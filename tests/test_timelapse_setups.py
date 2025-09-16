@@ -176,5 +176,43 @@ class InsertResultsDbTests(unittest.TestCase):
         self.assertIs(tls._DB_CONN, first_conn)
 
 
+class SlDistanceFilterTests(unittest.TestCase):
+    def test_sell_uses_ask_for_sl_distance(self):
+        # Reproduce SA40-like case where using Bid would pass, but Ask should fail
+        now = datetime.now(UTC)
+        sym = 'TESTIDX'
+        bid = 97239.9
+        ask = 97271.9  # spread = 32.0
+        s1 = 96788.26666666665
+        r1 = 97571.56666666665
+
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('D1 Close'): 97000.0,
+            tls.canonicalize_key('Strength 4H'): -0.1,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): bid,
+            tls.canonicalize_key('Ask'): ask,
+            tls.canonicalize_key('S1 Level M5'): s1,
+            tls.canonicalize_key('R1 Level M5'): r1,
+            tls.canonicalize_key('Strength 4H'): -0.6,
+            tls.canonicalize_key('Strength 1D'): -0.2,
+            tls.canonicalize_key('Strength 1W'): -0.1,  # ensure overall Sell (>=2 negatives)
+            tls.canonicalize_key('D1 Close'): 97500.0,
+            tls.canonicalize_key('D1 High'): 97600.0,
+            tls.canonicalize_key('D1 Low'): 96800.0,
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, min_sl_pct=0.0, as_of_ts=now, debug=False)
+        # No results should be produced due to SL too close to spread
+        self.assertEqual(results, [])
+        self.assertIn('sl_too_close_to_spread', reasons)
+        self.assertIn(sym, reasons['sl_too_close_to_spread'])
+
+
 if __name__ == '__main__':
     unittest.main()

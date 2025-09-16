@@ -568,6 +568,7 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         tick_time_utc: Optional[datetime] = None
         tick_age: Optional[float] = None
         has_recent_tick = False
+        used_backfill = False
 
         if tick is not None:
             try:
@@ -612,17 +613,66 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
                     except Exception:
                         pass
 
-        if bid is None or ask is None:
+        # Ensure Bid/Ask represent the latest available tick values.
+        # Previous behavior only backfilled when a side was None, which could
+        # leave us with stale prices if symbol_info_tick had both sides but an
+        # old or missing timestamp. To honor the "previous second" intent,
+        # refresh from tick history when the tick is stale or un-timestamped.
+        STALE_TICK_THRESHOLD_SEC = 2.0
+        needs_refresh = (
+            (bid is None or ask is None)
+            or (tick_age is None)  # missing/unknown tick time
+            or (tick_age is not None and tick_age > STALE_TICK_THRESHOLD_SEC)
+        )
+        if needs_refresh:
+            used_backfill = True
             mt5_bid, mt5_ask = _mt5_backfill_bid_ask(
                 sym,
                 now_utc,
-                need_bid=(bid is None),
-                need_ask=(ask is None),
+                need_bid=True,
+                need_ask=True,
             )
-            if bid is None:
+            if mt5_bid is not None:
                 bid = mt5_bid
-            if ask is None:
+            if mt5_ask is not None:
                 ask = mt5_ask
+            # Try to also refresh tick_time_utc using the last tick in a short window
+            # so downstream freshness checks reflect what we used.
+            try:
+                ticks_recent = mt5.copy_ticks_range(
+                    sym,
+                    now_utc - timedelta(seconds=5),
+                    now_utc,
+                    mt5.COPY_TICKS_ALL,
+                )
+                if ticks_recent is not None and len(ticks_recent) > 0:
+                    lt = ticks_recent[-1]
+                    try:
+                        # numpy structured array style
+                        tmsc = None
+                        try:
+                            tmsc = lt['time_msc']  # type: ignore[index]
+                        except Exception:
+                            tmsc = getattr(lt, 'time_msc', None)
+                        if tmsc:
+                            tick_time_utc = datetime.fromtimestamp(float(tmsc) / 1000.0, tz=UTC)
+                        else:
+                            ts_val = None
+                            try:
+                                ts_val = lt['time']  # type: ignore[index]
+                            except Exception:
+                                ts_val = getattr(lt, 'time', None)
+                            if ts_val is not None:
+                                tick_time_utc = datetime.fromtimestamp(float(ts_val), tz=UTC)
+                    except Exception:
+                        pass
+                    if tick_time_utc is not None:
+                        try:
+                            tick_age = max(0.0, (now_utc - tick_time_utc).total_seconds())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         if not has_recent_tick:
             try:
@@ -716,6 +766,7 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             'Bid': bid,
             'Ask': ask,
             'Spread%': spreadpct,
+            'Backfilled': 1 if used_backfill else 0,
             'Strength 4H': ss_4h,
             'Strength 1D': ss_1d,
             'Strength 1W': ss_1w,
@@ -1075,6 +1126,22 @@ def analyze(
         spreadpct_row = normalize_spread_pct(last.g("Spread%"))
         bid = last.g("Bid")
         ask = last.g("Ask")
+        # Pull auxiliary tick info for downstream reporting
+        try:
+            tick_time_str = str(last.row.get(canonicalize_key('Last Tick UTC'), '') or '')
+        except Exception:
+            tick_time_str = ''
+        backfilled_flag = 0
+        try:
+            val_bf = last.row.get(canonicalize_key('Backfilled'))
+            if isinstance(val_bf, str):
+                val_bf = val_bf.strip()
+                if val_bf.isdigit():
+                    backfilled_flag = int(val_bf)
+            elif isinstance(val_bf, (int, float)):
+                backfilled_flag = int(val_bf)
+        except Exception:
+            backfilled_flag = 0
 
         # Try MT5 tick backfill first if Bid/Ask missing at the latest snapshot
         if bid is None or ask is None:
@@ -1234,10 +1301,12 @@ def analyze(
                     prox_late = True
                     prox_note = "near S1 support (late)"
 
-        # Spread-based SL distance filter: SL must be at least 10x spread away from entry price.
-        # Prefer computing the distance from the actual entry price (`price`). If bid/ask are
-        # available a conservative fallback is used. Also support deriving spread from spreadpct
-        # when bid/ask are missing (spreadpct is in percent units).
+        # Spread-based SL distance filter: SL must be at least 10x spread away from the side
+        # that actually triggers the stop:
+        #   - Buy: stop is hit on Bid -> use (bid - SL)
+        #   - Sell: stop is hit on Ask -> use (SL - ask)
+        # If the preferred side is missing, fall back to entry `price` to avoid false negatives.
+        # Also support deriving absolute spread from `spreadpct` when bid/ask are missing.
         eps = 1e-12
         if sl is not None:
             spread_abs: Optional[float] = None
@@ -1253,19 +1322,19 @@ def analyze(
             # If we have a usable spread, evaluate distance
             if spread_abs is not None and spread_abs > 0:
                 distance: Optional[float] = None
-                # Prefer distance measured from the chosen entry price
-                if price is not None:
-                    if direction == "Buy":
+                # Prefer distance measured from the correct side that triggers the stop
+                if direction == "Buy":
+                    if bid is not None:
+                        distance = bid - sl
+                    elif price is not None:
+                        # Fallback to entry price (typically Ask); this is lenient but avoids None
                         distance = price - sl
-                    else:
+                else:  # Sell
+                    if ask is not None:
+                        distance = sl - ask
+                    elif price is not None:
+                        # Fallback to entry price (typically Bid)
                         distance = sl - price
-                else:
-                    # Fallback: conservative bid/ask based check (existing behavior)
-                    if bid is not None and ask is not None:
-                        if direction == "Buy":
-                            distance = bid - sl
-                        else:
-                            distance = sl - ask
                 # Enforce minimum distance threshold (10x spread) with tiny epsilon
                 if distance is None or (distance + eps) < (10 * spread_abs):
                     bump("sl_too_close_to_spread")
@@ -1342,6 +1411,11 @@ def analyze(
                 "score": score,
                 "explain": "; ".join(parts),
                 "as_of": as_of_value,
+                # Meta for logging; not used for DB schema
+                "bid": bid,
+                "ask": ask,
+                "tick_utc": tick_time_str,
+                "source": ("backfill" if backfilled_flag else "normal"),
             }
         )
 
@@ -1518,9 +1592,39 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
 
         if inserted > 0:
             try:
-                syms = [str(r.get('symbol')) for r in (results or [])]
-                uniq = sorted({s for s in syms if s})
-                print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
+                # Build detailed lines per result with tick time (UTC+3), bid/ask, and source
+                lines = []
+                for r in (results or []):
+                    sym = str(r.get('symbol') or '')
+                    bid = r.get('bid')
+                    ask = r.get('ask')
+                    src = str(r.get('source') or '')
+                    t = str(r.get('tick_utc') or '')
+                    # Convert UTC string to UTC+3 clock time for display
+                    t_disp = 'N/A'
+                    try:
+                        if t:
+                            # tick_utc is like 'YYYY-MM-DD HH:MM:SS' in UTC naive
+                            dt = datetime.strptime(t, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC)
+                            t_disp = dt.astimezone(UTC3).strftime('%H:%M:%S') + ' UTC+3'
+                    except Exception:
+                        t_disp = t or 'N/A'
+                    # Format bid/ask concisely when available
+                    def f(x):
+                        try:
+                            return f"{float(x):.5f}"
+                        except Exception:
+                            return 'N/A'
+                    line = f"{sym} | tick time {t_disp} | bid {f(bid)} | ask {f(ask)}" + (f" | source {src}" if src else '')
+                    if sym:
+                        lines.append(line)
+                if lines:
+                    print(f"[DB] Inserted {inserted} new setup(s): " + "; ".join(lines))
+                else:
+                    # Fallback to symbol list only
+                    syms = [str(r.get('symbol')) for r in (results or [])]
+                    uniq = sorted({s for s in syms if s})
+                    print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
             except Exception:
                 print(f"[DB] Inserted {inserted} new setup(s)")
 

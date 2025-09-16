@@ -1357,6 +1357,7 @@ def analyze(
     return results, reasons
 
 
+
 def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelapse_setups", detected_at: Optional[datetime] = None) -> None:
     """Insert analyzed results into local SQLite DB.
 
@@ -1418,6 +1419,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
         except Exception:
             # If creation fails, we'll proceed without gating
             pass
+
         inserted = 0
         if results:
             # Inspect columns to handle older schemas gracefully
@@ -1432,98 +1434,95 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 except Exception:
                     has_detected = False
 
-                # Insert with gating: only insert if there is no currently open setup for the same symbol
+            if has_detected:
+                ins = (
+                    f"""
+                    INSERT INTO {table}
+                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {table} t2
+                        LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
+                        WHERE t2.symbol = ?
+                          AND h.setup_id IS NULL
+                    )
+                    ON CONFLICT(symbol, direction, as_of) DO NOTHING
+                    """
+                )
+            else:
+                ins = (
+                    f"""
+                    INSERT INTO {table}
+                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {table} t2
+                        LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
+                        WHERE t2.symbol = ?
+                          AND h.setup_id IS NULL
+                    )
+                    ON CONFLICT(symbol, direction, as_of) DO NOTHING
+                    """
+                )
+
+            params: List[Tuple[object, ...]] = []
+            for r in results:
+                as_of_db = r.get("as_of")
+                if isinstance(as_of_db, datetime):
+                    as_of_val = as_of_db.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    as_of_val = str(as_of_db)
+                detected_at_val = None
+                if detected_at is not None:
+                    if isinstance(detected_at, datetime):
+                        detected_at_val = detected_at.strftime("%Y-%m-%d %H:%M:%S.%f")
+                    else:
+                        detected_at_val = str(detected_at)
+                sym_val = r.get("symbol")
                 if has_detected:
-                    ins = (
-                        f"""
-                        INSERT INTO {table}
-                            (symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at)
-                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM {table} t2
-                            LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
-                            WHERE t2.symbol = ?
-                              AND h.setup_id IS NULL
+                    params.append(
+                        (
+                            sym_val,
+                            r.get("direction"),
+                            r.get("price"),
+                            r.get("sl"),
+                            r.get("tp"),
+                            r.get("rrr"),
+                            r.get("score"),
+                            r.get("explain"),
+                            as_of_val,
+                            detected_at_val,
+                            sym_val,
                         )
-                        ON CONFLICT(symbol, direction, as_of) DO NOTHING
-                        """
                     )
                 else:
-                    ins = (
-                        f"""
-                        INSERT INTO {table}
-                            (symbol, direction, price, sl, tp, rrr, score, explain, as_of)
-                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM {table} t2
-                            LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
-                            WHERE t2.symbol = ?
-                              AND h.setup_id IS NULL
+                    params.append(
+                        (
+                            sym_val,
+                            r.get("direction"),
+                            r.get("price"),
+                            r.get("sl"),
+                            r.get("tp"),
+                            r.get("rrr"),
+                            r.get("score"),
+                            r.get("explain"),
+                            as_of_val,
+                            sym_val,
                         )
-                        ON CONFLICT(symbol, direction, as_of) DO NOTHING
-                        """
                     )
 
-                params: List[Tuple[object, ...]] = []
-                for r in results:
-                    as_of_db = r.get("as_of")
-                    # store as ISO string with microsecond precision
-                    if isinstance(as_of_db, datetime):
-                        as_of_val = as_of_db.strftime("%Y-%m-%d %H:%M:%S.%f")
-                    else:
-                        as_of_val = str(as_of_db)
-                    # Format detected_at timestamp
-                    detected_at_val = None
-                    if detected_at is not None:
-                        if isinstance(detected_at, datetime):
-                            detected_at_val = detected_at.strftime("%Y-%m-%d %H:%M:%S.%f")
-                        else:
-                            detected_at_val = str(detected_at)
-                    sym_val = r.get("symbol")
-                    if has_detected:
-                        params.append(
-                            (
-                                sym_val,
-                                r.get("direction"),
-                                r.get("price"),
-                                r.get("sl"),
-                                r.get("tp"),
-                                r.get("rrr"),
-                                r.get("score"),
-                                r.get("explain"),
-                                as_of_val,
-                                detected_at_val,
-                                sym_val,
-                            )
-                        )
-                    else:
-                        params.append(
-                            (
-                                sym_val,
-                                r.get("direction"),
-                                r.get("price"),
-                                r.get("sl"),
-                                r.get("tp"),
-                                r.get("rrr"),
-                                r.get("score"),
-                                r.get("explain"),
-                                as_of_val,
-                                sym_val,
-                            )
-                        )
-
-                # Use total_changes delta to get reliable count
+            if params:
                 before = conn.total_changes
                 cur.executemany(ins, params)
                 inserted = conn.total_changes - before
-            # Only log when new entries were actually written
-            if inserted > 0:
-                try:
-                    syms = [str(r.get('symbol')) for r in (results or [])]
-                    uniq = sorted({s for s in syms if s})
-                    print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
-                except Exception:
-                    print(f"[DB] Inserted {inserted} new setup(s)")
+
+        if inserted > 0:
+            try:
+                syms = [str(r.get('symbol')) for r in (results or [])]
+                uniq = sorted({s for s in syms if s})
+                print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
+            except Exception:
+                print(f"[DB] Inserted {inserted} new setup(s)")
 
 
 def main() -> None:

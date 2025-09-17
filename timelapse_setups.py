@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-Analyze Stein Investments CSV timelapse exports (forex or crypto) and surface Buy/Sell setups
-based on symbol strength, price momentum, ATR/ATR%, and S1/R1 proximity.
+Analyze MT5 symbols for trade setups based on symbol strength, price momentum, ATR/ATR%, and S1/R1 proximity.
 
 Usage:
-  python timelapse_setups.py [--glob 'Crypto_Data_*.csv']
-                             [--min-rrr 1.0] [--top N] [--brief]
-                             [--watch] [--interval 5]
+  python timelapse_setups.py [--min-rrr 1.0] [--top N] [--brief]
+                              [--watch] [--interval 5]
 
 Notes:
-  - CSV delimiter is semicolon (';'), UTF-8 (no BOM), header present.
   - Strength: -50..+50; ATR in pips on D1. For crypto, uses D1 Close delta for momentum.
   - Spread filter: Only spreads <0.3% accepted, others filtered out.
   - SL/TP logic: Buy -> SL=S1 or D1 Low, TP=R1 or D1 High; Sell -> SL=R1 or D1 High, TP=S1 or D1 Low. Price must lie between SL and TP.
   - SL distance filter: Stop loss must be at least 10x the current spread away from entry price (Buy: bid-SL >= 10x spread, Sell: SL-ask >= 10x spread).
   - Current price and RRR use Bid/Ask at signal timestamp (Buy: Ask, Sell: Bid), fallback to Close (M15→H1→D1).
   - ATR(%) effect: adds +0.5 score bonus when within [60, 150] (for informational purposes).
-  - Timelapse: processes only the last 4 matching CSVs and evaluates earliest vs latest snapshot deltas within that window for momentum context.
+  - Timelapse: simulated from previous values in MT5 data for momentum context.
   - Crypto adaptation: No Delta FXP or volume; uses Strength consensus + D1 Close trend.
 """
 
@@ -24,10 +21,6 @@ from __future__ import annotations
 
 import atexit
 import argparse
-import csv
-import glob
-import fnmatch
-import pathlib
 import os
 import re
 import time
@@ -51,12 +44,6 @@ except Exception:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SQLITE_PATH = os.path.join(SCRIPT_DIR, "timelapse.db")
-CSV_SOURCES = [
-    (os.path.join(os.path.dirname(SCRIPT_DIR), "Crypto", "Timelapse"), "Crypto_Data_*.csv"),
-    (os.path.join(os.path.dirname(SCRIPT_DIR), "Forex", "Timelapse"), "Symbol_Data_*.csv"),
-    (os.path.join(os.path.dirname(SCRIPT_DIR), "Indices", "Timelapse"), "Index_Data_*.csv"),
-    (os.path.join(os.path.dirname(SCRIPT_DIR), "Metals", "Timelapse"), "Metals_Data_*.csv"),
-]
 import json
 
 # Optional MT5 for tick backfill
@@ -301,22 +288,6 @@ def _get_tick_volume_last_5_bars(symbol: str) -> Optional[bool]:
     except Exception:
         return None
 
-def parse_timestamp_from_filename(fn: str) -> Optional[datetime]:
-    m = re.search(r"Crypto_Data_(\d{4}\.\d{2}\.\d{2})_(\d{2}-\d{2})", os.path.basename(fn))
-    if not m:
-        return None
-    date = m.group(1).replace(".", "-")
-    time = m.group(2).replace("-", ":")
-    try:
-        # Interpret filename time as input_tz (UTC+2) wall time
-        # Add seconds if not present for proper parsing
-        if len(time.split(":")) == 2:
-            time += ":00"
-        return to_input_tz(datetime.fromisoformat(f"{date} {time}"))
-    except Exception:
-        return None
-
-
 def canonicalize_key(s: Optional[str]) -> str:
     """Canonicalize CSV header / lookup keys for case-insensitive, punctuation-robust matching.
 
@@ -436,122 +407,6 @@ class Snapshot:
             return float(val)
         return fnum(val)
 
-def read_series(patterns: List[str]) -> Tuple[Dict[str, List[Snapshot]], Optional[str], Optional[datetime]]:
-    files = []
-    for pattern in patterns:
-        files.extend(glob.glob(pattern))
-    if not files:
-        return {}, None, None
-
-    # Determine timestamps for files, prefer filename timestamp, fallback to mtime
-    file_ts: List[Tuple[datetime, str]] = []
-    ts_map: Dict[str, datetime] = {}
-    for fn in files:
-        parse_ts = parse_timestamp_from_filename(fn)
-        if parse_ts is None:
-            mtime_utc = datetime.fromtimestamp(os.path.getmtime(fn), tz=UTC)
-            ts = mtime_utc.astimezone(INPUT_TZ)
-        else:
-            ts = parse_ts
-        ts_map[fn] = ts
-        file_ts.append((ts, fn))
-
-    # Sort chronologically and keep only the last 4 files
-    file_ts.sort(key=lambda x: x[0])
-    selected = file_ts[-4:] if len(file_ts) > 4 else file_ts
-    selected_files = [fn for _, fn in selected]
-    latest_ts: Optional[datetime] = ts_map[selected_files[-1]] if selected_files else None
-
-    series: Dict[str, List[Snapshot]] = {}
-    for fn in selected_files:
-        ts = ts_map[fn]
-        with open(fn, "r", encoding="utf-8") as f:
-            r = csv.DictReader(f, delimiter=";")
-            # Normalize header names by stripping BOM/whitespace and canonicalizing for robust access
-            headers = [canonicalize_key(h) if h else h for h in (r.fieldnames or [])]
-            for raw in r:
-                # Build a row mapping with canonicalized header keys
-                row = {}
-                for i, (k, v) in enumerate(raw.items()):
-                    key = headers[i] if i < len(headers) else (canonicalize_key(k) if k else k)
-                    row[key] = v.strip() if v is not None else ""
-                sym = row.get(HEADER_SYMBOL, "").strip()
-                # skip comment/info rows like
-                if not sym or sym.startswith("#"):
-                    continue
-                series.setdefault(sym, []).append(Snapshot(ts=ts, row=row))
-
-    # Detect market total volume change from the last processed file (optional informational)
-    latest_file = selected_files[-1]
-    mkttvc: Optional[str] = None
-    try:
-        with open(latest_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("#MKTTVC:"):
-                    mkttvc = line.strip().split(":", 1)[1].strip()
-                    break
-    except Exception:
-        pass
-
-    return series, mkttvc, latest_ts
-
-    files = []
-    for pattern in patterns:
-        files.extend(glob.glob(pattern))
-    if not files:
-        return {}, None, None
-
-    # Determine timestamps for files, prefer filename timestamp, fallback to mtime
-    file_ts: List[Tuple[datetime, str]] = []
-    ts_map: Dict[str, datetime] = {}
-    for fn in files:
-        parse_ts = parse_timestamp_from_filename(fn)
-        if parse_ts is None:
-            mtime_utc = datetime.fromtimestamp(os.path.getmtime(fn), tz=UTC)
-            ts = mtime_utc.astimezone(INPUT_TZ)
-        else:
-            ts = parse_ts
-        ts_map[fn] = ts
-        file_ts.append((ts, fn))
-
-    # Sort chronologically and keep only the last 4 files
-    file_ts.sort(key=lambda x: x[0])
-    selected = file_ts[-4:] if len(file_ts) > 4 else file_ts
-    selected_files = [fn for _, fn in selected]
-    latest_ts: Optional[datetime] = ts_map[selected_files[-1]] if selected_files else None
-
-    series: Dict[str, List[Snapshot]] = {}
-    for fn in selected_files:
-        ts = ts_map[fn]
-        with open(fn, "r", encoding="utf-8") as f:
-            r = csv.DictReader(f, delimiter=";")
-            # Normalize header names by stripping BOM/whitespace and canonicalizing for robust access
-            headers = [canonicalize_key(h) if h else h for h in (r.fieldnames or [])]
-            for raw in r:
-                # Build a row mapping with canonicalized header keys
-                row = {}
-                for i, (k, v) in enumerate(raw.items()):
-                    key = headers[i] if i < len(headers) else (canonicalize_key(k) if k else k)
-                    row[key] = v.strip() if v is not None else ""
-                sym = row.get(HEADER_SYMBOL, "").strip()
-                # skip comment/info rows like '#MKTTVC: x.x'
-                if not sym or sym.startswith("#"):
-                    continue
-                series.setdefault(sym, []).append(Snapshot(ts=ts, row=row))
-
-    # Detect market total volume change from the last processed file (optional informational)
-    latest_file = selected_files[-1]
-    mkttvc: Optional[str] = None
-    try:
-        with open(latest_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("#MKTTVC:"):
-                    mkttvc = line.strip().split(":", 1)[1].strip()
-                    break
-    except Exception:
-        pass
-
-    return series, mkttvc, latest_ts
 
 def _atr(values: List[Tuple[float, float, float]], period: int = 14) -> Optional[float]:
     if len(values) < period + 1:
@@ -893,7 +748,7 @@ def process_once(
             print("No MT5 symbols resolved or no data fetched.")
         return
 
-    # Apply exclude filter immediately after CSV reading (before any analysis)
+    # Apply exclude filter immediately after MT5 reading (before any analysis)
     if exclude_set:
         excluded_count = 0
         excluded_symbols = []
@@ -1019,109 +874,6 @@ def _watch_loop_events(
     )
     return
 
-    # Shared seen set for all patterns
-    seen: Set[str] = set()
-    for pattern in patterns:
-        seen.update(os.path.abspath(p) for p in glob.glob(pattern))
-
-    observers = []
-    handlers = []
-
-    for pattern in patterns:
-        watch_dir = pathlib.Path(pattern).parent
-        if str(watch_dir) == "":
-            watch_dir = pathlib.Path(".")
-        watch_dir = watch_dir.resolve()
-        base_glob = os.path.basename(pattern)
-
-        class NewFileHandler(PatternMatchingEventHandler):
-            def __init__(self, glob_pattern: str) -> None:
-                super().__init__(patterns=["*"], ignore_patterns=None, ignore_directories=True, case_sensitive=False)
-                self.glob_pattern = glob_pattern
-
-            def _handle_path(self, path: str) -> None:
-                apath = os.path.abspath(path)
-                if apath in seen:
-                    return
-                if not fnmatch.fnmatch(os.path.basename(apath), self.glob_pattern):
-                    return
-                time.sleep(max(0.05, settle_delay))
-                detected_at = datetime.now(UTC)  # Capture detection time
-                try:
-                    with open(apath, "rb"):
-                        pass
-                except Exception:
-                    time.sleep(0.1)
-                try:
-                    parse_ts = parse_timestamp_from_filename(apath)
-                    if parse_ts is None:
-                        mtime_utc = datetime.fromtimestamp(os.path.getmtime(apath), tz=UTC)
-                        ts = mtime_utc.astimezone(INPUT_TZ)
-                    else:
-                        ts = parse_ts
-                    print("\n=== New snapshot detected:", os.path.basename(apath), "|", to_input_tz(ts).isoformat(sep=" "))
-                except Exception:
-                    print("\n=== New snapshot detected:", os.path.basename(apath))
-                seen.add(apath)
-                process_once(
-                    patterns=patterns,
-                    min_rrr=min_rrr,
-                    top=top,
-                    brief=brief,
-                    debug=debug,
-                    exclude_set=exclude_set,
-                    detected_at=detected_at,
-                )
-
-            def on_created(self, event):  # type: ignore[override]
-                try:
-                    self._handle_path(event.src_path)
-                except Exception:
-                    pass
-
-            def on_moved(self, event):  # type: ignore[override]
-                try:
-                    self._handle_path(getattr(event, "dest_path", event.src_path))
-                except Exception:
-                    pass
-
-            def on_modified(self, event):  # type: ignore[override]
-                try:
-                    self._handle_path(event.src_path)
-                except Exception:
-                    pass
-
-        handler = NewFileHandler(base_glob)
-        handlers.append(handler)
-        observer = Observer()
-        observers.append(observer)
-        observer.schedule(handler, str(watch_dir), recursive=False)
-        observer.start()
-
-    # Create short descriptions for display
-    short_list = []
-    for p in patterns:
-        parts = p.split(os.sep)
-        if len(parts) >= 4:
-            type_folder = parts[-3]
-            pattern_file = parts[-1]
-            short_list.append(f"{type_folder}/Timelapse ({pattern_file})")
-        else:
-            short_list.append(os.path.basename(p))
-    print(f"Watching (events) for new files in {', '.join(short_list)}. Press Ctrl+C to stop.")
-    if exclude_set:
-        print(f"[EXCLUDE] Will filter out symbols: {sorted(exclude_set)}")
-
-    try:
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        print("\nStopped watching.")
-    finally:
-        for observer in observers:
-            observer.stop()
-            observer.join()
-
 
 def analyze(
     series: Dict[str, List[Snapshot]],
@@ -1196,25 +948,6 @@ def analyze(
             if need_ask and mt5_ask is not None:
                 ask = mt5_ask
 
-        # Backfill Bid/Ask (and Spread%) from previous snapshots if still missing at the latest timestamp
-        if bid is None:
-            for s in reversed(snaps[:-1] if len(snaps) > 1 else []):
-                v = s.g("Bid")
-                if v is not None:
-                    bid = v
-                    break
-        if ask is None:
-            for s in reversed(snaps[:-1] if len(snaps) > 1 else []):
-                v = s.g("Ask")
-                if v is not None:
-                    ask = v
-                    break
-        if spreadpct_row is None:
-            for s in reversed(snaps[:-1] if len(snaps) > 1 else []):
-                v = s.g("Spread%")
-                if v is not None:
-                    spreadpct_row = normalize_spread_pct(v)
-                    break
 
         # Drop symbols without recent ticks (avoid closed markets)
         recent_tick_flag = last.g("Recent Tick")

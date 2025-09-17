@@ -58,6 +58,9 @@ except Exception:
 
 HEADER_SYMBOL = "symbol"
 
+# Cache for canonicalized keys to speed up repeated lookups
+CANONICAL_KEYS: Dict[str, str] = {}
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Analyze MT5 symbols for trade setups (MT5 is the only source)")
@@ -82,7 +85,7 @@ UTC = timezone.utc
 UTC3 = timezone(timedelta(hours=3))
 # Consider market "alive" only if there's at least one tick
 # within this many seconds. Avoid creating entries for closed markets.
-TICK_FRESHNESS_SEC = 300  # 5 minutes
+TICK_FRESHNESS_SEC = 30  # 30 seconds
 # Cache last tick data to minimize expensive history lookups
 _LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[datetime]]] = {}
 
@@ -234,15 +237,15 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
         _RATE_CACHE.pop(key, None)
     return rates
 
-def _get_tick_volume_last_5_bars(symbol: str) -> Optional[bool]:
-    """Check tick volume for each of the last 5 completed minutes (M1 bars).
+def _get_tick_volume_last_2_bars(symbol: str) -> Optional[bool]:
+    """Check tick volume for each of the last 2 completed minutes (M1 bars).
 
-    For each minute in the last 5 minutes (excluding the current open minute),
+    For each minute in the last 2 minutes (excluding the current open minute),
     ensures the M1 bar exists and has tick_volume >= 10. Missing bars are treated
     as zero volume and fail the check.
 
     Returns:
-        True  -> all 5 completed minutes have tick_volume >= 10
+        True  -> all 2 completed minutes have tick_volume >= 10
         False -> any minute missing or tick_volume < 10
         None  -> MT5 not available/initialized
     """
@@ -251,8 +254,8 @@ def _get_tick_volume_last_5_bars(symbol: str) -> Optional[bool]:
     try:
         now_ts = int(time.time())
         this_minute_start = (now_ts // 60) * 60
-        # Minutes to check: t-60, t-120, t-180, t-240, t-300
-        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
+        # Minutes to check: t-60, t-120
+        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
 
         # Fetch bars covering exactly that window
         dt_from = datetime.fromtimestamp(target_opens[-1], tz=UTC)
@@ -265,24 +268,30 @@ def _get_tick_volume_last_5_bars(symbol: str) -> Optional[bool]:
         if rates is None or len(rates) == 0:
             return False
 
-        # Map open time -> tick_volume
-        vol_by_time: Dict[int, int] = {}
-        for r in rates:
-            try:
-                t_open = int(r['time'])
-            except Exception:
+        # Map open time -> tick_volume using numpy for speed
+        try:
+            times = rates['time'].astype(int)
+            vols = rates['tick_volume'].astype(int)
+            vol_by_time = dict(zip(times, vols))
+        except Exception:
+            # Fallback to loop
+            vol_by_time: Dict[int, int] = {}
+            for r in rates:
                 try:
-                    t_open = int(r[0])
+                    t_open = int(r['time'])
                 except Exception:
-                    continue
-            try:
-                vol = int(r['tick_volume'])
-            except Exception:
+                    try:
+                        t_open = int(r[0])
+                    except Exception:
+                        continue
                 try:
-                    vol = int(r[5])
+                    vol = int(r['tick_volume'])
                 except Exception:
-                    continue
-            vol_by_time[t_open] = vol
+                    try:
+                        vol = int(r[5])
+                    except Exception:
+                        continue
+                vol_by_time[t_open] = vol
 
         # Verify each minute
         for t_open in target_opens:
@@ -302,7 +311,10 @@ def canonicalize_key(s: Optional[str]) -> str:
     """
     if s is None:
         return ""
+    if s in CANONICAL_KEYS:
+        return CANONICAL_KEYS[s]
     # strip BOM and surrounding whitespace, lowercase
+    orig_s = s
     s = s.lstrip("\ufeff").strip().lower()
     # normalize percent sign to word "percent" so variants like '%' and 'percent' match
     s = s.replace("%", " percent ")
@@ -310,6 +322,7 @@ def canonicalize_key(s: Optional[str]) -> str:
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     # collapse multiple spaces
     s = re.sub(r"\s+", " ", s).strip()
+    CANONICAL_KEYS[orig_s] = s
     return s
 
 def fnum(v: Optional[str]) -> Optional[float]:
@@ -416,15 +429,16 @@ class Snapshot:
 def _atr(values: List[Tuple[float, float, float]], period: int = 14) -> Optional[float]:
     if len(values) < period + 1:
         return None
-    trs: List[float] = []
-    prev_close = values[0][2]
-    for (high, low, close) in values[1:period+1]:
-        tr = max(high - low, abs(high - prev_close), abs(prev_close - low))
-        trs.append(tr)
-        prev_close = close
-    if not trs:
-        return None
-    return sum(trs) / len(trs)
+    vals = np.array(values)  # shape (n, 3): high, low, close
+    highs = vals[1:period+1, 0]
+    lows = vals[1:period+1, 1]
+    closes = vals[1:period+1, 2]
+    prev_closes = vals[0:period, 2]
+    tr1 = highs - lows
+    tr2 = np.abs(highs - prev_closes)
+    tr3 = np.abs(prev_closes - lows)
+    trs = np.maximum.reduce([tr1, tr2, tr3])
+    return np.mean(trs)
 
 def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]]:
     try:
@@ -962,12 +976,12 @@ def analyze(
                 print(f"[DEBUG] no_recent_ticks for {sym}")
             continue
 
-        # Filter out symbols with low tick volume in the last 5 M1 bars
-        volume_check_passed = _get_tick_volume_last_5_bars(sym)
+        # Filter out symbols with low tick volume in the last 2 M1 bars
+        volume_check_passed = _get_tick_volume_last_2_bars(sym)
         if volume_check_passed is not None and not volume_check_passed:
-            bump("low_tick_volume_last_5_bars")
+            bump("low_tick_volume_last_2_bars")
             if debug:
-                print(f"[DEBUG] low_tick_volume_last_5_bars for {sym}: insufficient tick volume detected in the last 5 bars")
+                print(f"[DEBUG] low_tick_volume_last_2_bars for {sym}: insufficient tick volume detected in the last 2 bars")
             continue
 
         # Timelapse deltas (context)

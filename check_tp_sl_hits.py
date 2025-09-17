@@ -52,10 +52,17 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SQLITE_PATH = os.path.join(SCRIPT_DIR, "timelapse.db")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Check TP/SL hits for timelapse setups via MT5 ticks (SQLite)")
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--since-hours", type=int, default=24, help="Check setups inserted in the last N hours")
+    g.add_argument("--since-hours", type=int, default=None, help="Optional: only check setups inserted in the last N hours (default: all)")
     g.add_argument("--ids", help="Comma-separated setup IDs to check (overrides --since-hours)")
     p.add_argument("--symbols", help="Optional comma-separated symbols filter (e.g., BTCUSD,SOLUSD)")
     p.add_argument("--max-mins", type=int, default=24*60, help="Safety limit: max minutes of history to scan (default 1440)")
@@ -64,15 +71,125 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--db", dest="db", default=DEFAULT_SQLITE_PATH, help="Path to SQLite DB file (default: timelapse.db next to script)")
     p.add_argument("--dry-run", action="store_true", help="Do not write hit records to DB")
     p.add_argument("--verbose", action="store_true")
+    # MT5 init tuning
+    p.add_argument("--mt5-path", dest="mt5_path", default=os.environ.get("MT5_TERMINAL_PATH"), help="Path to terminal64.exe (env: MT5_TERMINAL_PATH)")
+    p.add_argument("--mt5-timeout", dest="mt5_timeout", type=int, default=int(os.environ.get("MT5_TIMEOUT", "90")), help="MT5 initialize timeout seconds (default/env: 90)")
+    p.add_argument("--mt5-retries", dest="mt5_retries", type=int, default=int(os.environ.get("MT5_RETRIES", "2")), help="Retries for MT5 initialize on transient errors (default/env: 2)")
+    p.add_argument("--mt5-portable", dest="mt5_portable", action="store_true", default=_env_bool("MT5_PORTABLE", False), help="Pass portable=True to MT5 (env: MT5_PORTABLE)")
     p.add_argument("--watch", action="store_true", help="Run continuously, polling every --interval seconds")
     p.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for --watch mode (default 60)")
     return p.parse_args()
 
 
-def init_mt5(path: Optional[str] = None) -> None:
-    ok = mt5.initialize(path) if path else mt5.initialize()
-    if not ok:
-        raise RuntimeError(f"mt5.initialize failed: {mt5.last_error()}")
+def _candidate_terminal_paths(user_hint: Optional[str]) -> List[Optional[str]]:
+    """Return candidate terminal64.exe paths to try. Includes None (auto) first.
+
+    Priority: [None (auto)] -> user hint -> common install locations.
+    """
+    cands: List[Optional[str]] = [None]
+    if user_hint:
+        cands.append(user_hint)
+    # Common Windows locations
+    win = os.name == "nt"
+    if win:
+        pf = os.environ.get("PROGRAMFILES") or r"C:\\Program Files"
+        pfx = os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)"
+        user = os.environ.get("USERNAME", "")
+        roaming = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal")
+        patterns = [
+            os.path.join(pf, "MetaTrader 5", "terminal64.exe"),
+            os.path.join(pf, "MetaTrader 5 *", "terminal64.exe"),
+            os.path.join(pfx, "MetaTrader 5", "terminal64.exe"),
+            os.path.join(roaming, "*", "terminal64.exe"),
+        ]
+        import glob
+        for pat in patterns:
+            for p in glob.glob(pat):
+                if os.path.isfile(p):
+                    cands.append(p)
+    # Deduplicate while preserving order
+    seen = set()
+    uniq: List[Optional[str]] = []
+    for p in cands:
+        key = p or "<auto>"
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
+
+
+def init_mt5(
+    path: Optional[str] = None,
+    *,
+    timeout: int = 90,
+    retries: int = 2,
+    portable: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Initialize MT5 robustly with retries and optional terminal path.
+
+    Honors env credentials if provided: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER.
+    """
+    login = os.environ.get("MT5_LOGIN")
+    password = os.environ.get("MT5_PASSWORD")
+    server = os.environ.get("MT5_SERVER")
+    # Build candidate paths. Try None (auto) first.
+    candidates = _candidate_terminal_paths(path)
+    last_err: Optional[Tuple[int, str]] = None
+
+    for attempt in range(1, max(1, retries) + 1):
+        for cand in candidates:
+            if verbose:
+                where = cand or "<auto>"
+                print(f"[mt5] initialize attempt {attempt} path={where} timeout={timeout}s portable={portable}")
+            ok = False
+            try:
+                # Build kwargs only with non-None values to avoid invalid-arg errors
+                kwargs = {"timeout": timeout}
+                if portable:
+                    kwargs["portable"] = True
+                # Only pass explicit credentials if all are provided;
+                # otherwise rely on terminal's saved account.
+                if login and password and server:
+                    try:
+                        kwargs["login"] = int(login)
+                        kwargs["password"] = password
+                        kwargs["server"] = server
+                    except Exception:
+                        # Fallback: don't pass partial/invalid creds
+                        pass
+                if cand is None:
+                    ok = mt5.initialize(**kwargs)
+                else:
+                    ok = mt5.initialize(cand, **kwargs)
+            except Exception:
+                ok = False
+            if ok:
+                # Optional sanity: fetch version to ensure IPC works
+                try:
+                    _ = mt5.version()
+                except Exception:
+                    pass
+                return
+            # Record last error and try next candidate
+            try:
+                last_err = mt5.last_error()
+            except Exception:
+                last_err = None
+            # Some errors merit a short wait before retrying
+            code = last_err[0] if last_err else None
+            if verbose and last_err:
+                print(f"[mt5] initialize failed at path={cand or '<auto>'}: {last_err}")
+            if code in (-10004, -10005, -10006):  # system busy / IPC timeout / no IPC
+                time.sleep(1.0)
+            # Ensure clean state for next try
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+        # Slight backoff across attempts
+        time.sleep(1.0)
+    raise RuntimeError(f"mt5.initialize failed after retries: {last_err}")
 
 
 def shutdown_mt5() -> None:
@@ -204,8 +321,7 @@ def load_setups_sqlite(conn, table: str, since_hours: Optional[int], ids: Option
         params.extend([int(x) for x in ids])
     elif since_hours is not None:
         # compute threshold in Python to avoid string concatenation in SQL
-        from datetime import datetime, timedelta, timezone
-        thr = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        thr = (datetime.now(UTC) - timedelta(hours=since_hours)).strftime("%Y-%m-%d %H:%M:%S")
         where.append("inserted_at >= ?")
         params.append(thr)
     if symbols:
@@ -547,7 +663,21 @@ def run_once(args) -> None:
 
         # MT5
         t2 = perf_counter()
-        init_mt5()
+        # Initialize MT5 with retry handling and optional path/timeout
+        try:
+            init_mt5(
+                path=getattr(args, "mt5_path", None),
+                timeout=int(getattr(args, "mt5_timeout", 90)),
+                retries=int(getattr(args, "mt5_retries", 2)),
+                portable=bool(getattr(args, "mt5_portable", False)),
+                verbose=bool(getattr(args, "verbose", False)),
+            )
+        except RuntimeError as e:
+            # Provide actionable guidance and exit this run gracefully
+            print("ERROR: Failed to initialize MetaTrader5 (" + str(e) + ")")
+            print("Hints: set --mt5-path or MT5_TERMINAL_PATH to your terminal64.exe; "
+                  "increase --mt5-timeout; ensure the terminal isn't updating and that only one Python process is using MT5.")
+            return
         mt5_init_s = perf_counter() - t2
         try:
             # Resolve symbols and infer server offset once (from first resolved)

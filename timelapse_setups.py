@@ -11,7 +11,7 @@ Notes:
   - Spread filter: Only spreads <0.3% accepted, others filtered out.
   - SL/TP logic: Buy -> SL=S1 or D1 Low, TP=R1 or D1 High; Sell -> SL=R1 or D1 High, TP=S1 or D1 Low. Price must lie between SL and TP.
   - SL distance filter: Stop loss must be at least 10x the current spread away from entry price (Buy: bid-SL >= 10x spread, Sell: SL-ask >= 10x spread).
-  - Current price and RRR use Bid/Ask at signal timestamp (Buy: Ask, Sell: Bid), fallback to Close (M15→H1→D1).
+  - Current price and RRR use Bid/Ask at signal timestamp (Buy: Ask, Sell: Bid).
   - ATR(%) effect: adds +0.5 score bonus when within [60, 150] (for informational purposes).
   - Timelapse: simulated from previous values in MT5 data for momentum context.
   - Crypto adaptation: No Delta FXP or volume; uses Strength consensus + D1 Close trend.
@@ -176,26 +176,7 @@ def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask
         else:
             end_utc = as_of.astimezone(UTC)
 
-        # Prefer cached tick data within the lookback window to avoid history scans
-        out_bid: Optional[float] = None
-        out_ask: Optional[float] = None
-        cached = _LAST_TICK_CACHE.get(symbol)
-        if cached is not None:
-            cached_bid, cached_ask, cached_ts = cached
-            age_sec: Optional[float] = None
-            if cached_ts is not None:
-                try:
-                    age_sec = abs((end_utc - cached_ts).total_seconds())
-                except Exception:
-                    age_sec = None
-            if need_bid and cached_bid is not None and (age_sec is None or age_sec <= max_lookback_sec):
-                out_bid = cached_bid
-            if need_ask and cached_ask is not None and (age_sec is None or age_sec <= max_lookback_sec):
-                out_ask = cached_ask
-            if ((not need_bid) or out_bid is not None) and ((not need_ask) or out_ask is not None):
-                return (out_bid if need_bid else None, out_ask if need_ask else None)
-
-        window = 30  # seconds per fetch window
+        window = 7  # seconds per fetch window
         looked = 0
         while looked < max_lookback_sec and ((need_bid and out_bid is None) or (need_ask and out_ask is None)):
             start_utc = end_utc - timedelta(seconds=min(window, max_lookback_sec - looked))

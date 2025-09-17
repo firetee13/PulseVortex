@@ -17,6 +17,7 @@ class FakeMT5:
     TIMEFRAME_W1 = 3
     TIMEFRAME_H1 = 4
     TIMEFRAME_M15 = 5
+    TIMEFRAME_M1 = 6
     COPY_TICKS_ALL = 99
     TICK_FLAG_BID = 1
     TICK_FLAG_ASK = 2
@@ -212,6 +213,133 @@ class SlDistanceFilterTests(unittest.TestCase):
         self.assertEqual(results, [])
         self.assertIn('sl_too_close_to_spread', reasons)
         self.assertIn(sym, reasons['sl_too_close_to_spread'])
+
+
+class VolumeFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.original_mt5 = tls.mt5
+        self.original_imported = tls._MT5_IMPORTED
+        self.original_ready = tls._MT5_READY
+        tls.mt5 = None
+        tls._MT5_IMPORTED = True
+        tls._MT5_READY = True
+
+    def tearDown(self):
+        tls.mt5 = self.original_mt5
+        tls._MT5_IMPORTED = self.original_imported
+        tls._MT5_READY = self.original_ready
+
+    def test_get_tick_volume_last_5_bars_high_volume(self):
+        now = datetime.now(UTC)
+        fake_mt5 = FakeMT5(now)
+
+        # Simulate M1 bars where each has high tick volume (>= 10)
+        high_volume_m1_rates = [
+            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for i in range(5)
+        ]
+        fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = high_volume_m1_rates
+        tls.mt5 = fake_mt5
+
+        volume_check = tls._get_tick_volume_last_5_bars('EURUSD')
+        self.assertTrue(volume_check)
+
+    def test_get_tick_volume_last_5_bars_one_bar_low_volume(self):
+        now = datetime.now(UTC)
+        fake_mt5 = FakeMT5(now)
+
+        # Simulate M1 bars where one bar has low tick volume (< 10)
+        mixed_volume_m1_rates = [
+            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for i in range(4)
+        ]
+        mixed_volume_m1_rates.append({'time': 4, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
+        fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = mixed_volume_m1_rates
+        tls.mt5 = fake_mt5
+
+        volume_check = tls._get_tick_volume_last_5_bars('EURUSD')
+        self.assertFalse(volume_check)
+
+    def test_analyze_filters_low_volume_symbol(self):
+        now = datetime.now(UTC)
+        sym = 'LOWVOL'
+        fake_mt5 = FakeMT5(now)
+
+        # Simulate M1 bars where one bar has low tick volume (< 10)
+        low_volume_m1_rates = [
+            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for i in range(4)
+        ]
+        low_volume_m1_rates.append({'time': 4, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
+        fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = low_volume_m1_rates
+        tls.mt5 = fake_mt5
+
+        # Create snapshots for a valid Buy setup that should pass all other checks
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('D1 Close'): 1.0000,
+            tls.canonicalize_key('Strength 4H'): 0.1,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): 1.1000,
+            tls.canonicalize_key('Ask'): 1.1002, # small spread
+            tls.canonicalize_key('S1 Level M5'): 1.0900,
+            tls.canonicalize_key('R1 Level M5'): 1.1200,
+            tls.canonicalize_key('Strength 4H'): 0.6,
+            tls.canonicalize_key('Strength 1D'): 0.2,
+            tls.canonicalize_key('Strength 1W'): 0.1,  # ensure overall Buy (>=2 positives)
+            tls.canonicalize_key('D1 Close'): 1.1050,
+            tls.canonicalize_key('D1 High'): 1.1100,
+            tls.canonicalize_key('D1 Low'): 1.0900,
+            tls.canonicalize_key('Spread%'): 0.018, # Good spread
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, min_sl_pct=0.0, as_of_ts=now, debug=True)
+
+        self.assertEqual(results, [])
+        self.assertIn('low_tick_volume_last_5_bars', reasons)
+        self.assertIn(sym, reasons['low_tick_volume_last_5_bars'])
+
+    def test_analyze_passes_high_volume_symbol(self):
+        now = datetime.now(UTC)
+        sym = 'HIGHVOL'
+        fake_mt5 = FakeMT5(now)
+
+        # Simulate M1 bars where each has high tick volume (>= 10)
+        high_volume_m1_rates = [
+            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for i in range(5)
+        ]
+        fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = high_volume_m1_rates
+        tls.mt5 = fake_mt5
+
+        # Create snapshots for a valid Buy setup that should pass
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('D1 Close'): 1.0000,
+            tls.canonicalize_key('Strength 4H'): 0.1,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): 1.1000,
+            tls.canonicalize_key('Ask'): 1.1002, # small spread
+            tls.canonicalize_key('S1 Level M5'): 1.0900,
+            tls.canonicalize_key('R1 Level M5'): 1.1200,
+            tls.canonicalize_key('Strength 4H'): 0.6,
+            tls.canonicalize_key('Strength 1D'): 0.2,
+            tls.canonicalize_key('Strength 1W'): 0.1,  # ensure overall Buy (>=2 positives)
+            tls.canonicalize_key('D1 Close'): 1.1050,
+            tls.canonicalize_key('D1 High'): 1.1100,
+            tls.canonicalize_key('D1 Low'): 1.0900,
+            tls.canonicalize_key('Spread%'): 0.018, # Good spread
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, min_sl_pct=0.0, as_of_ts=now, debug=True)
+
+        self.assertGreater(len(results), 0)
+        self.assertEqual(results[0]['symbol'], sym)
+        self.assertNotIn('low_tick_volume_last_5_bars', reasons)
 
 
 if __name__ == '__main__':

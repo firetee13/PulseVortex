@@ -265,6 +265,42 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
         _RATE_CACHE.pop(key, None)
     return rates
 
+def _get_tick_volume_last_5_bars(symbol: str) -> Optional[bool]:
+    """Checks if any of the last 5 M1 bars for a symbol has a tick volume less than 10.
+
+    Returns:
+        bool: True if all bars have tick_volume >= 10, False if any bar has tick_volume < 10.
+        None: If data cannot be fetched or an error occurs.
+    """
+    if not _mt5_ensure_init():
+        return None
+    try:
+        # Fetch last 5 M1 bars
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 5)
+        if rates is None or len(rates) == 0:
+            return None
+
+        for rate in rates:
+            volume_for_bar = 0
+            # Ensure 'tick_volume' is accessed correctly for numpy record array
+            try:
+                # This handles numpy structured arrays like rates[0]['tick_volume']
+                volume_for_bar = int(rate['tick_volume'])
+            except (TypeError, IndexError, KeyError):
+                # Fallback for other potential structures (e.g. if it's a tuple)
+                try:
+                    # Assuming tick_volume is at a specific index if it's a tuple-like structure
+                    volume_for_bar = int(rate[5]) # Common index for real_volume/tick_volume
+                except (TypeError, IndexError):
+                    return None # Cannot parse volume for this bar
+
+            if volume_for_bar < 10:
+                return False  # Found a bar with volume < 10
+
+        return True # All bars had volume >= 10
+    except Exception:
+        return None
+
 def parse_timestamp_from_filename(fn: str) -> Optional[datetime]:
     m = re.search(r"Crypto_Data_(\d{4}\.\d{2}\.\d{2})_(\d{2}-\d{2})", os.path.basename(fn))
     if not m:
@@ -440,7 +476,7 @@ def read_series(patterns: List[str]) -> Tuple[Dict[str, List[Snapshot]], Optiona
                     key = headers[i] if i < len(headers) else (canonicalize_key(k) if k else k)
                     row[key] = v.strip() if v is not None else ""
                 sym = row.get(HEADER_SYMBOL, "").strip()
-                # skip comment/info rows like 
+                # skip comment/info rows like
                 if not sym or sym.startswith("#"):
                     continue
                 series.setdefault(sym, []).append(Snapshot(ts=ts, row=row))
@@ -1186,6 +1222,14 @@ def analyze(
             bump("no_recent_ticks")
             if debug:
                 print(f"[DEBUG] no_recent_ticks for {sym}")
+            continue
+
+        # Filter out symbols with low tick volume in the last 5 M1 bars
+        volume_check_passed = _get_tick_volume_last_5_bars(sym)
+        if volume_check_passed is not None and not volume_check_passed:
+            bump("low_tick_volume_last_5_bars")
+            if debug:
+                print(f"[DEBUG] low_tick_volume_last_5_bars for {sym}: check failed")
             continue
 
         # Timelapse deltas (context)

@@ -159,6 +159,7 @@ def _mt5_ensure_init() -> bool:
         _MT5_READY = False
     return _MT5_READY
 
+
 def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask: bool, max_lookback_sec: int = 180) -> Tuple[Optional[float], Optional[float]]:
     """Fetch nearest prior Bid/Ask from MT5 tick history up to max_lookback_sec.
 
@@ -253,38 +254,61 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     return rates
 
 def _get_tick_volume_last_5_bars(symbol: str) -> Optional[bool]:
-    """Checks if any of the last 5 M1 bars for a symbol has a tick volume less than 10.
+    """Check tick volume for each of the last 5 completed minutes (M1 bars).
+
+    For each minute in the last 5 minutes (excluding the current open minute),
+    ensures the M1 bar exists and has tick_volume >= 10. Missing bars are treated
+    as zero volume and fail the check.
 
     Returns:
-        bool: True if all bars have tick_volume >= 10, False if any bar has tick_volume < 10.
-        None: If data cannot be fetched or an error occurs.
+        True  -> all 5 completed minutes have tick_volume >= 10
+        False -> any minute missing or tick_volume < 10
+        None  -> MT5 not available/initialized
     """
     if not _mt5_ensure_init():
         return None
     try:
-        # Fetch last 5 M1 bars
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 5)
+        now_ts = int(time.time())
+        this_minute_start = (now_ts // 60) * 60
+        # Minutes to check: t-60, t-120, t-180, t-240, t-300
+        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
+
+        # Fetch bars covering exactly that window
+        dt_from = datetime.fromtimestamp(target_opens[-1], tz=UTC)
+        dt_to = datetime.fromtimestamp(this_minute_start, tz=UTC)
+        try:
+            rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1, dt_from, dt_to)
+        except Exception:
+            rates = None
+
         if rates is None or len(rates) == 0:
-            return None
+            return False
 
-        for rate in rates:
-            volume_for_bar = 0
-            # Ensure 'tick_volume' is accessed correctly for numpy record array
+        # Map open time -> tick_volume
+        vol_by_time: Dict[int, int] = {}
+        for r in rates:
             try:
-                # This handles numpy structured arrays like rates[0]['tick_volume']
-                volume_for_bar = int(rate['tick_volume'])
-            except (TypeError, IndexError, KeyError):
-                # Fallback for other potential structures (e.g. if it's a tuple)
+                t_open = int(r['time'])
+            except Exception:
                 try:
-                    # Assuming tick_volume is at a specific index if it's a tuple-like structure
-                    volume_for_bar = int(rate[5]) # Common index for real_volume/tick_volume
-                except (TypeError, IndexError):
-                    return None # Cannot parse volume for this bar
+                    t_open = int(r[0])
+                except Exception:
+                    continue
+            try:
+                vol = int(r['tick_volume'])
+            except Exception:
+                try:
+                    vol = int(r[5])
+                except Exception:
+                    continue
+            vol_by_time[t_open] = vol
 
-            if volume_for_bar < 10:
-                return False  # Found a bar with volume < 10
-
-        return True # All bars had volume >= 10
+        # Verify each minute
+        for t_open in target_opens:
+            vol = vol_by_time.get(t_open)
+            if vol is None or vol < 10:
+                return False
+        return True
     except Exception:
         return None
 
@@ -962,7 +986,7 @@ def analyze(
         if volume_check_passed is not None and not volume_check_passed:
             bump("low_tick_volume_last_5_bars")
             if debug:
-                print(f"[DEBUG] low_tick_volume_last_5_bars for {sym}: check failed")
+                print(f"[DEBUG] low_tick_volume_last_5_bars for {sym}: insufficient tick volume detected in the last 5 bars")
             continue
 
         # Timelapse deltas (context)
@@ -1267,6 +1291,9 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 )
                 """
             )
+            # Add indexes for performance
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_timelapse_hits_symbol ON timelapse_hits (symbol)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_timelapse_hits_setup_id ON timelapse_hits (setup_id)")
         except Exception:
             # If creation fails, we'll proceed without gating
             pass

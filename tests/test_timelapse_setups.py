@@ -2,9 +2,11 @@
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import timelapse_setups as tls
 
@@ -71,6 +73,9 @@ class FakeMT5:
 
     def copy_rates_from_pos(self, sym: str, timeframe: int, pos: int, count: int):
         self.rates_calls.append((sym, timeframe, count))
+        return list(self.rates_return.get(timeframe, []))
+
+    def copy_rates_range(self, sym: str, timeframe: int, start: datetime, end: datetime):
         return list(self.rates_return.get(timeframe, []))
 
     def symbols_get(self):
@@ -178,7 +183,8 @@ class InsertResultsDbTests(unittest.TestCase):
 
 
 class SlDistanceFilterTests(unittest.TestCase):
-    def test_sell_uses_ask_for_sl_distance(self):
+    @patch('timelapse_setups._get_tick_volume_last_5_bars', return_value=True)
+    def test_sell_uses_ask_for_sl_distance(self, mock_volume):
         # Reproduce SA40-like case where using Bid would pass, but Ask should fail
         now = datetime.now(UTC)
         sym = 'TESTIDX'
@@ -234,8 +240,11 @@ class VolumeFilterTests(unittest.TestCase):
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where each has high tick volume (>= 10)
+        now_ts = int(time.time())
+        this_minute_start = (now_ts // 60) * 60
+        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         high_volume_m1_rates = [
-            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for i in range(5)
+            {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for t in target_opens
         ]
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = high_volume_m1_rates
         tls.mt5 = fake_mt5
@@ -248,10 +257,13 @@ class VolumeFilterTests(unittest.TestCase):
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where one bar has low tick volume (< 10)
+        now_ts = int(time.time())
+        this_minute_start = (now_ts // 60) * 60
+        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         mixed_volume_m1_rates = [
-            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for i in range(4)
+            {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for t in target_opens[:-1]
         ]
-        mixed_volume_m1_rates.append({'time': 4, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
+        mixed_volume_m1_rates.append({'time': target_opens[-1], 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = mixed_volume_m1_rates
         tls.mt5 = fake_mt5
 
@@ -264,10 +276,13 @@ class VolumeFilterTests(unittest.TestCase):
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where one bar has low tick volume (< 10)
+        now_ts = int(time.time())
+        this_minute_start = (now_ts // 60) * 60
+        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         low_volume_m1_rates = [
-            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for i in range(4)
+            {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for t in target_opens[:-1]
         ]
-        low_volume_m1_rates.append({'time': 4, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
+        low_volume_m1_rates.append({'time': target_opens[-1], 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = low_volume_m1_rates
         tls.mt5 = fake_mt5
 
@@ -306,8 +321,11 @@ class VolumeFilterTests(unittest.TestCase):
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where each has high tick volume (>= 10)
+        now_ts = int(time.time())
+        this_minute_start = (now_ts // 60) * 60
+        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         high_volume_m1_rates = [
-            {'time': i, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for i in range(5)
+            {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for t in target_opens
         ]
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = high_volume_m1_rates
         tls.mt5 = fake_mt5

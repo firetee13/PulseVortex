@@ -259,7 +259,7 @@ class App(tk.Tk):
         # Misc
         misc = ttk.Frame(frm)
         misc.pack(side=tk.RIGHT)
-        ttk.Button(misc, text="Clear Log", command=self._clear_log).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(misc, text="Clear Log", command=self._clear_log).pack(side=tk.TOP, padx=4, pady=4)
 
     def _make_logs(self, parent) -> None:
         # Two side-by-side log panes
@@ -308,6 +308,7 @@ class App(tk.Tk):
         ttk.Button(row1, text="Refresh", command=self._db_refresh).pack(side=tk.LEFT)
         ttk.Checkbutton(row1, text="Auto", variable=self.var_auto, command=self._db_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
         add_labeled(row1, "Every(s):", ttk.Spinbox(row1, from_=5, to=3600, textvariable=self.var_interval, width=6)).pack(side=tk.LEFT)
+        ttk.Button(row1, text="Restart", command=self._restart_monitors).pack(side=tk.RIGHT, padx=(10, 0))
 
         # Tree (table)
         # Splitter: top table, bottom chart
@@ -1140,6 +1141,25 @@ class App(tk.Tk):
 
     def _stop_hits(self) -> None:
         self.hits.stop()
+
+    def _restart_monitors(self) -> None:
+        # Stop the current subprocesses
+        self._stop_timelapse()
+        self._stop_hits()
+        # Start a new instance of the GUI
+        try:
+            subprocess.Popen([sys.executable, 'run_monitor_gui.pyw'], cwd=HERE)
+        except Exception as e:
+            # If fails, just restart the processes
+            self.after(1000, self._do_restart)
+            return
+        # Close this instance after a short delay
+        self.after(2000, self.destroy)
+
+    def _do_restart(self) -> None:
+        self._start_timelapse()
+        self._start_hits()
+        self._update_buttons()
 
     def _on_close(self) -> None:
         # Stop child processes before exit

@@ -7,4 +7,5 @@ MetaTrader5
 matplotlib
 numpy
 watchdog
+pika
 

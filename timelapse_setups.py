@@ -912,10 +912,18 @@ def analyze(
         snaps.sort(key=lambda s: s.ts)
         first, last = snaps[0], snaps[-1]
 
-        # Filter out entries between 23:00 and 01:00 UTC+3
+        # Filter out entries between 23:00 and 01:00 (UTC+3).
+        # Intention: block 23:00–00:59 inclusive, allow from 01:00 onward.
         last_ts_utc3 = last.ts.astimezone(UTC3)
         hour = last_ts_utc3.hour
-        if hour in [23, 0, 1]:
+        minute = last_ts_utc3.minute
+        # Block hours 23 and 0; do not block entire hour 1
+        if hour == 23 or hour == 0:
+            if debug:
+                try:
+                    print(f"[DEBUG] low_vol_time_window at {last_ts_utc3.strftime('%Y-%m-%d %H:%M:%S')} UTC+3; gating 23:00–00:59")
+                except Exception:
+                    pass
             bump("low_vol_time_window")
             continue
 

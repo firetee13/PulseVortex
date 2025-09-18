@@ -181,6 +181,9 @@ class App(tk.Tk):
         self.tab_db = ttk.Frame(self.nb)
         self.nb.add(self.tab_db, text="DB Results")
 
+        self.tab_pnl = ttk.Frame(self.nb)
+        self.nb.add(self.tab_pnl, text="PnL")
+
         # Set DB Results tab as default active tab
         self.nb.select(self.tab_db)
 
@@ -208,12 +211,19 @@ class App(tk.Tk):
 
         # UI elements in DB tab
         self._make_db_tab(self.tab_db)
+        # UI elements in PnL tab
+        self._make_pnl_tab(self.tab_pnl)
         # Ensure DB results refresh once at startup and auto-refresh is active
         try:
             self.var_auto.set(True)
         except Exception:
             pass
         self._db_refresh()
+        # Also refresh PnL once at startup
+        try:
+            self._pnl_refresh()
+        except Exception:
+            pass
 
         # Log queue for thread-safe updates
         self.log_q: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -385,6 +395,432 @@ class App(tk.Tk):
         self._chart_req_id = 0
         self._chart_active_req_id: int | None = None
         self._mt5_inited = False
+        # PnL chart state
+        self._pnl_fig = None
+        self._pnl_ax = None
+        self._pnl_canvas = None
+        self._pnl_toolbar = None
+        self._pnl_loading = False
+        self.pnl_status = None
+        self.pnl_chart_frame = None
+
+        # PnL helper methods moved to class level (avoids nested defs in __init__)
+
+        def _pnl_render_draw(self, times, returns, cum, avg) -> None:
+            """Draw the PnL chart on the PnL axes."""
+            if FigureCanvasTkAgg is None or Figure is None:
+                try:
+                    if self.pnl_status is not None:
+                        self.pnl_status.config(text="Matplotlib not available; cannot render PnL.")
+                except Exception:
+                    pass
+                return
+            if self._pnl_ax is None or self._pnl_canvas is None:
+                self._init_pnl_chart_widgets()
+            ax = self._pnl_ax
+            ax.clear()
+            ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+            try:
+                times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+            except Exception:
+                times_disp = [t + timedelta(hours=3) for t in times]
+
+            # Plot cumulative and avg
+            try:
+                ax.plot(times_disp, cum, color='#1f77b4', linewidth=2, label='Cumulative PnL (sum of +RRR/-1)')
+                ax.plot(times_disp, avg, color='#ff7f0e', linewidth=1.5, linestyle='--', label='Avg PnL per trade')
+            except Exception:
+                pass
+
+            # scatter markers for wins/losses
+            try:
+                wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
+                wins_y = [cum[i] for i, v in enumerate(returns) if v > 0]
+                losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
+                losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
+                if wins_x:
+                    ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='TP')
+                if losses_x:
+                    ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='SL')
+            except Exception:
+                pass
+
+            # Formatter
+            try:
+                locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+                formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+                ax.xaxis.set_major_locator(locator)
+                ax.xaxis.set_major_formatter(formatter)
+            except Exception:
+                pass
+
+            try:
+                ax.legend(loc='upper left')
+            except Exception:
+                pass
+            try:
+                if self._pnl_fig is not None:
+                    self._pnl_fig.tight_layout()
+                self._pnl_canvas.draw_idle()
+            except Exception:
+                pass
+            try:
+                if self.pnl_status is not None:
+                    self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
+            except Exception:
+                pass
+
+    def _make_pnl_tab(self, parent) -> None:
+        """Create the PnL tab UI: simple controls + Matplotlib chart."""
+        top = ttk.Frame(parent)
+        top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        row1 = ttk.Frame(top)
+        row1.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=1, to=24*365, textvariable=self.var_since_hours, width=6).pack(side=tk.LEFT, padx=6)
+        ttk.Button(row1, text="Refresh", command=self._pnl_refresh).pack(side=tk.LEFT)
+
+        chart_wrap = ttk.Frame(parent)
+        self.pnl_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (normalized wins/losses).")
+        self.pnl_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
+        self.pnl_chart_frame = ttk.Frame(chart_wrap)
+        self.pnl_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Initialize Matplotlib canvas for PnL chart
+        self._init_pnl_chart_widgets()
+
+    def _init_pnl_chart_widgets(self) -> None:
+        """Initialize Matplotlib widgets for the PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        # Destroy previous widgets if present
+        if self.pnl_chart_frame is None:
+            return
+        for w in (self.pnl_chart_frame.winfo_children() if self.pnl_chart_frame is not None else []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 3), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_title('PnL (normalized wins/losses)')
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (UTC+3)')
+        ax.set_ylabel('Normalized PnL')
+        canvas = FigureCanvasTkAgg(fig, master=self.pnl_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.pnl_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._pnl_toolbar = toolbar
+        except Exception:
+            self._pnl_toolbar = None
+        self._pnl_fig = fig
+        self._pnl_ax = ax
+        self._pnl_canvas = canvas
+
+    def _pnl_refresh(self) -> None:
+        """Trigger background fetch of PnL data and redraw chart."""
+        if self._pnl_loading:
+            return
+        self._pnl_loading = True
+        try:
+            if self.pnl_status is not None:
+                self.pnl_status.config(text="Loading PnL...")
+        except Exception:
+            pass
+        t = threading.Thread(target=self._pnl_fetch_thread, daemon=True)
+        t.start()
+
+    def _pnl_fetch_thread(self) -> None:
+        """Fetch PnL-relevant rows from the SQLite DB in a background thread and compute ATR-normalized P/L."""
+        dbname = self.var_db_name.get().strip()
+        hours = max(1, int(self.var_since_hours.get()))
+        rows: list[tuple] = []
+        error: str | None = None
+        try:
+            import sqlite3  # type: ignore
+            db_path = dbname if dbname.lower().endswith('.db') else os.path.join(HERE, 'timelapse.db')
+            conn = sqlite3.connect(db_path, timeout=3)
+            try:
+                cur = conn.cursor()
+                from datetime import timezone as _tz
+                thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+                sql = (
+                    """
+                    SELECT COALESCE(h.hit_time, s.inserted_at) as event_time,
+                           h.hit,
+                           s.symbol,
+                           COALESCE(h.entry_price, s.price) AS entry_price,
+                           h.hit_price,
+                           s.sl,
+                           s.direction
+                    FROM timelapse_setups s
+                    JOIN timelapse_hits h ON h.setup_id = s.id
+                    WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
+                    ORDER BY COALESCE(h.hit_time, s.inserted_at) ASC
+                    """
+                )
+                cur.execute(sql, (thr,))
+                for (event_time, hit, symbol, entry_price, hit_price, sl, direction) in cur.fetchall() or []:
+                    rows.append((event_time, hit, symbol, entry_price, hit_price, sl, direction))
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            error = str(e)
+
+        # Compute ATR per symbol (D1, period 14-ish) and normalize P/L as profit / ATR.
+        times: list[datetime] = []
+        norm_returns: list[float] = []
+        try:
+            atr_map: dict[str, float | None] = {}
+            if _MT5_IMPORTED and mt5 is not None:
+                try:
+                    init_ok, init_err = self._ensure_mt5()
+                    if init_ok:
+                        symbols = sorted({r[2] for r in rows if r and r[2]})
+                        for sym in symbols:
+                            atr_map[sym] = None
+                            try:
+                                try:
+                                    mt5.symbol_select(sym, True)
+                                except Exception:
+                                    pass
+                                tf = getattr(mt5, "TIMEFRAME_D1", 0)
+                                rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
+                                if rates is None or len(rates) < 2:
+                                    atr_map[sym] = None
+                                    continue
+                                vals = []
+                                for b in rates[-15:]:
+                                    try:
+                                        high = float(b['high'])
+                                        low = float(b['low'])
+                                        close = float(b['close'])
+                                    except Exception:
+                                        try:
+                                            high = float(getattr(b, 'high', 0.0))
+                                            low = float(getattr(b, 'low', 0.0))
+                                            close = float(getattr(b, 'close', 0.0))
+                                        except Exception:
+                                            high = low = close = 0.0
+                                    vals.append((high, low, close))
+                                if len(vals) >= 2:
+                                    trs = []
+                                    prev_close = vals[0][2]
+                                    for h, l, c in vals[1:]:
+                                        tr1 = h - l
+                                        tr2 = abs(h - prev_close)
+                                        tr3 = abs(prev_close - l)
+                                        trs.append(max(tr1, tr2, tr3))
+                                        prev_close = c
+                                    atr_map[sym] = (sum(trs) / len(trs)) if trs else None
+                                else:
+                                    atr_map[sym] = None
+                            except Exception:
+                                atr_map[sym] = None
+                except Exception:
+                    atr_map = {}
+
+            # Compute normalized returns using ATR
+            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction in rows:
+                if not hit:
+                    continue
+                dt = None
+                if isinstance(event_time, str):
+                    try:
+                        dt = datetime.fromisoformat(event_time)
+                    except Exception:
+                        try:
+                            dt = datetime.strptime(event_time.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            dt = None
+                elif isinstance(event_time, datetime):
+                    dt = event_time
+                if dt is None:
+                    continue
+                try:
+                    dt = dt.replace(tzinfo=UTC)
+                except Exception:
+                    pass
+
+                try:
+                    ep = float(entry_price) if entry_price is not None else None
+                except Exception:
+                    ep = None
+                try:
+                    hp = float(hit_price) if hit_price is not None else None
+                except Exception:
+                    hp = None
+                try:
+                    slp = float(sl_val) if sl_val is not None else None
+                except Exception:
+                    slp = None
+                if ep is None or hp is None or slp is None:
+                    continue
+                dir_s = (str(direction) or '').lower()
+                profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
+                atr = atr_map.get(symbol)
+                if atr is None or atr == 0:
+                    # skip if ATR not available
+                    continue
+                norm = profit / atr
+                times.append(dt)
+                norm_returns.append(norm)
+        except Exception as e:
+            if error is None:
+                error = str(e)
+
+        # Compute cumulative and average per trade (ATR-normalized)
+        cum: list[float] = []
+        ssum = 0.0
+        for v in norm_returns:
+            ssum += v
+            cum.append(ssum)
+        avg = [c / (i + 1) for i, c in enumerate(cum)] if cum else []
+
+        # Hand off to UI thread
+        self.after(0, self._pnl_update_ui, times, norm_returns, cum, avg, error)
+
+    def _pnl_update_ui(self, times, norm_returns, cum, avg, error: str | None) -> None:
+        """UI-thread handler for ATR-normalized PnL series.
+
+        Expects:
+          - times: list[datetime] (UTC-aware or naive)
+          - norm_returns: list[float] (per-trade profit divided by ATR)
+          - cum: list[float] (cumulative sums of norm_returns)
+          - avg: list[float] (average per-trade)
+          - error: optional error message
+        """
+        self._pnl_loading = False
+
+        if error:
+            try:
+                if self.pnl_status is not None:
+                    self.pnl_status.config(text=f"Error: {error}")
+            except Exception:
+                pass
+            # Clear any previous chart
+            if self._pnl_ax is not None:
+                try:
+                    self._pnl_ax.clear()
+                    if self._pnl_fig is not None:
+                        self._pnl_fig.tight_layout()
+                    if self._pnl_canvas is not None:
+                        self._pnl_canvas.draw_idle()
+                except Exception:
+                    pass
+            return
+
+        if not times or not norm_returns:
+            try:
+                if self.pnl_status is not None:
+                    self.pnl_status.config(text="No ATR-normalized hits in the requested time range.")
+            except Exception:
+                pass
+            # Clear chart if available
+            if self._pnl_ax is not None:
+                try:
+                    self._pnl_ax.clear()
+                    if self._pnl_fig is not None:
+                        self._pnl_fig.tight_layout()
+                    if self._pnl_canvas is not None:
+                        self._pnl_canvas.draw_idle()
+                except Exception:
+                    pass
+            return
+
+        # Ensure lists align
+        if len(times) != len(norm_returns):
+            # trim to shortest
+            n = min(len(times), len(norm_returns))
+            times = times[:n]
+            norm_returns = norm_returns[:n]
+            cum = cum[:n]
+            avg = avg[:n] if avg else [ (cum[i]/(i+1)) for i in range(len(cum)) ]
+
+        # Render using the prepared series
+        try:
+            self._pnl_render_draw(times, norm_returns, cum, avg)
+        except Exception as e:
+            try:
+                if self.pnl_status is not None:
+                    self.pnl_status.config(text=f"Render error: {e}")
+            except Exception:
+                pass
+
+    def _pnl_render_draw(self, times, returns, cum, avg) -> None:
+        """Draw the PnL chart on the PnL axes."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                if self.pnl_status is not None:
+                    self.pnl_status.config(text="Matplotlib not available; cannot render PnL.")
+            except Exception:
+                pass
+            return
+        if self._pnl_ax is None or self._pnl_canvas is None:
+            self._init_pnl_chart_widgets()
+        ax = self._pnl_ax
+        ax.clear()
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+        try:
+            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+        except Exception:
+            times_disp = [t + timedelta(hours=3) for t in times]
+
+        # Plot cumulative and avg
+        try:
+            ax.plot(times_disp, cum, color='#1f77b4', linewidth=2, label='Cumulative PnL (sum of +RRR/-1)')
+            ax.plot(times_disp, avg, color='#ff7f0e', linewidth=1.5, linestyle='--', label='Avg PnL per trade')
+        except Exception:
+            pass
+
+        # scatter markers for wins/losses
+        try:
+            wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
+            wins_y = [cum[i] for i, v in enumerate(returns) if v > 0]
+            losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
+            losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
+            if wins_x:
+                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='TP')
+            if losses_x:
+                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='SL')
+        except Exception:
+            pass
+
+        # Formatter
+        try:
+            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        except Exception:
+            pass
+
+        try:
+            ax.legend(loc='upper left')
+        except Exception:
+            pass
+        try:
+            if self._pnl_fig is not None:
+                self._pnl_fig.tight_layout()
+            self._pnl_canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            if self.pnl_status is not None:
+                self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
+        except Exception:
+            pass
 
     def _enqueue_log(self, name: str, text: str) -> None:
         self.log_q.put((name, text))

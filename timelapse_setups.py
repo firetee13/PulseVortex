@@ -45,6 +45,7 @@ except Exception:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SQLITE_PATH = os.path.join(SCRIPT_DIR, "timelapse.db")
 import json
+import numpy as np  # required for ATR computations
 
 # Optional MT5 for tick backfill
 _MT5_IMPORTED = False
@@ -54,6 +55,48 @@ try:
 except Exception:
     mt5 = None  # type: ignore
     _MT5_IMPORTED = False
+
+
+# -----------------------------------------
+# Precision helpers for price/SL/TP rounding
+# -----------------------------------------
+def _infer_decimals_from_price(price: Optional[float]) -> int:
+    """Infer decimal places from a price value by inspecting its string form.
+
+    Falls back to 5 when not inferable.
+    """
+    try:
+        if price is None:
+            return 5
+        s = f"{float(price):.10f}".rstrip("0").rstrip(".")
+        if "." in s:
+            return max(0, min(10, len(s.split(".")[1])))
+        return 0
+    except Exception:
+        return 5
+
+
+def _symbol_digits(symbol: str, price: Optional[float]) -> int:
+    """Resolve desired decimal places for a symbol.
+
+    - Prefer MT5 symbol_info().digits when available
+    - Fallback: infer from the actual price value
+    - Default: 5
+    """
+    try:
+        if _MT5_IMPORTED and _mt5_ensure_init():
+            try:
+                info = mt5.symbol_info(symbol)
+                if info is not None:
+                    d = int(getattr(info, "digits", 0) or 0)
+                    if 0 <= d <= 10:
+                        return d
+            except Exception:
+                pass
+        d = _infer_decimals_from_price(price)
+        return d if 0 <= d <= 10 else 5
+    except Exception:
+        return 5
 
 
 HEADER_SYMBOL = "symbol"
@@ -1204,13 +1247,26 @@ def analyze(
         # Use the latest file timestamp consistently for all rows
         # Store UTC time as naive timestamp for DB (no TZ)
         as_of_value = utc_naive(as_of_ts or last.ts)
+
+        # Round SL/TP to the same precision as price for this symbol
+        digits = _symbol_digits(sym, price)
+        def _r(v: Optional[float]) -> Optional[float]:
+            try:
+                return None if v is None else round(float(v), int(digits))
+            except Exception:
+                return v
+
+        price_out = _r(price)
+        sl_out = _r(sl)
+        tp_out = _r(tp)
+
         results.append(
             {
                 "symbol": sym,
                 "direction": direction,
-                "price": price,
-                "sl": sl,
-                "tp": tp,
+                "price": price_out if price_out is not None else price,
+                "sl": sl_out if sl_out is not None else sl,
+                "tp": tp_out if tp_out is not None else tp,
                 "rrr": rrr,
                 "score": score,
                 "explain": "; ".join(parts),

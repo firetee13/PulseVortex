@@ -25,6 +25,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from time import perf_counter
@@ -600,8 +601,45 @@ def earliest_hit_from_ticks(ticks: Sequence[object], direction: str, sl: float, 
 
 
 def record_hit_sqlite(conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool, utc3_hours: int = 3) -> None:
+    # Determine instrument precision and round numeric fields consistently
+    def infer_decimals_from_price(price: Optional[float]) -> int:  # type: ignore
+        try:
+            if price is None:
+                return 5
+            s = str(float(price))
+            if 'e' in s or 'E' in s:
+                s = f"{float(price):.10f}"
+            return len(s.split('.')[1]) if '.' in s else 0
+        except Exception:
+            return 5
+
+    def instrument_digits(symbol: str, ref_price: Optional[float]) -> int:
+        try:
+            sym = (symbol or '').upper()
+            if re.fullmatch(r"[A-Z]{6}", sym):
+                quote = sym[3:]
+                return 3 if quote == 'JPY' else 5
+            if re.fullmatch(r"XA[UG][A-Z]{3}", sym):
+                return 2
+        except Exception:
+            pass
+        d = infer_decimals_from_price(ref_price)
+        return max(0, min(10, d)) or 5
+
+    digits = instrument_digits(setup.symbol, setup.entry_price if setup.entry_price is not None else hit.price)
+    def r(v: Optional[float]) -> Optional[float]:  # type: ignore
+        try:
+            return None if v is None else round(float(v), digits)
+        except Exception:
+            return v
+
+    rounded_sl = r(setup.sl)
+    rounded_tp = r(setup.tp)
+    rounded_hit_price = r(hit.price)
+    rounded_entry_price = r(setup.entry_price)
+
     if verbose:
-        print(f"[HIT] #{setup.id} {setup.symbol} {setup.direction} -> {hit.kind} at {hit.price:.6f} on {hit.time_utc.isoformat(timespec='seconds')}")
+        print(f"[HIT] #{setup.id} {setup.symbol} {setup.direction} -> {hit.kind} at {rounded_hit_price if rounded_hit_price is not None else hit.price:.6f} on {hit.time_utc.isoformat(timespec='seconds')}")
     if dry_run:
         return
     dt_hit_utc3 = (hit.time_utc + timedelta(hours=utc3_hours)).strftime("%Y-%m-%d %H:%M:%S")
@@ -615,12 +653,15 @@ def record_hit_sqlite(conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool
                (setup_id, symbol, direction, sl, tp, hit, hit_price, hit_time, hit_time_utc3, entry_time_utc3, entry_price)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(setup_id) DO UPDATE SET
+               sl=excluded.sl,
+               tp=excluded.tp,
+               hit_price=excluded.hit_price,
                hit_time_utc3=excluded.hit_time_utc3,
                entry_time_utc3=excluded.entry_time_utc3,
                entry_price=excluded.entry_price
             """,
-            (setup.id, setup.symbol, setup.direction, setup.sl, setup.tp,
-             hit.kind, hit.price, hit_time, dt_hit_utc3, dt_entry_utc3, setup.entry_price)
+            (setup.id, setup.symbol, setup.direction, rounded_sl, rounded_tp,
+             hit.kind, rounded_hit_price, hit_time, dt_hit_utc3, dt_entry_utc3, rounded_entry_price)
         )
 
 

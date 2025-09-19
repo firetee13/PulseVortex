@@ -224,6 +224,8 @@ def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask
 
         window = 7  # seconds per fetch window
         looked = 0
+        out_bid: Optional[float] = None
+        out_ask: Optional[float] = None
         while looked < max_lookback_sec and ((need_bid and out_bid is None) or (need_ask and out_ask is None)):
             start_utc = end_utc - timedelta(seconds=min(window, max_lookback_sec - looked))
             ticks = mt5.copy_ticks_range(symbol, start_utc, end_utc, mt5.COPY_TICKS_ALL)
@@ -1056,12 +1058,15 @@ def analyze(
             price = ask
         else:  # Sell
             price = bid
-        # Fallback to Close if still no Bid/Ask available after backfill
-        if price is None:
-            price = last.g("M15 Close") or last.g("H1 Close") or last.g("D1 Close")
 
+        # If Bid/Ask are not available even after backfill, skip until live tick arrives
         if price is None:
-            bump("no_price")
+            bump("no_live_bid_ask")
+            if debug:
+                try:
+                    print(f"[DEBUG] skipping {sym}: no live Bid/Ask; waiting for live tick")
+                except Exception:
+                    pass
             continue
 
         # Spread and ATR(%) handling — prefer computing directly from Bid/Ask
@@ -1083,7 +1088,7 @@ def analyze(
         # ATR% score bonus only when value is present and within [60, 150]
         atrp_in_range = (atrp is not None) and (60.0 <= atrp <= 150.0)
 
-        # S/R based SL/TP with D1 fallback, using Close as entry for orientation and RRR
+        # S/R based SL/TP with D1 fallback; entry/RRR strictly computed from live Bid/Ask only
         # Initialize proximity flags
         prox_note = None
         prox_flag = None

@@ -482,6 +482,32 @@ class App(tk.Tk):
         self._pnl_loading = False
         self.pnl_status = None
         self.pnl_chart_frame = None
+        # Second PnL (10k notional) chart state
+        self._pnl2_fig = None
+        self._pnl2_ax = None
+        self._pnl2_canvas = None
+        self._pnl2_toolbar = None
+        self.pnl2_status = None
+        self.pnl2_chart_frame = None
+        # Category PnL (10k notional) chart states
+        self._fx_fig = None
+        self._fx_ax = None
+        self._fx_canvas = None
+        self._fx_toolbar = None
+        self._crypto_fig = None
+        self._crypto_ax = None
+        self._crypto_canvas = None
+        self._crypto_toolbar = None
+        self._indices_fig = None
+        self._indices_ax = None
+        self._indices_canvas = None
+        self._indices_toolbar = None
+        self.pnl_fx_status = None
+        self.pnl_fx_chart_frame = None
+        self.pnl_crypto_status = None
+        self.pnl_crypto_chart_frame = None
+        self.pnl_indices_status = None
+        self.pnl_indices_chart_frame = None
 
         # PnL helper methods moved to class level (avoids nested defs in __init__)
 
@@ -562,14 +588,29 @@ class App(tk.Tk):
         ttk.Button(row1, text="Refresh", command=self._pnl_refresh).pack(side=tk.LEFT)
 
         chart_wrap = ttk.Frame(parent)
-        self.pnl_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (normalized wins/losses).")
-        self.pnl_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
-        self.pnl_chart_frame = ttk.Frame(chart_wrap)
-        self.pnl_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # 10k-notional PnL split into three charts
+        self.pnl_fx_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (10k - Forex).")
+        self.pnl_fx_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
+        self.pnl_fx_chart_frame = ttk.Frame(chart_wrap)
+        self.pnl_fx_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.pnl_crypto_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (10k - Crypto).")
+        self.pnl_crypto_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(8, 0))
+        self.pnl_crypto_chart_frame = ttk.Frame(chart_wrap)
+        self.pnl_crypto_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.pnl_indices_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (10k - Indices).")
+        self.pnl_indices_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(8, 0))
+        self.pnl_indices_chart_frame = ttk.Frame(chart_wrap)
+        self.pnl_indices_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # Initialize Matplotlib canvas for PnL chart
-        self._init_pnl_chart_widgets()
+        # Initialize Matplotlib canvases
+        self._init_fx_chart_widgets()
+        self._init_crypto_chart_widgets()
+        self._init_indices_chart_widgets()
 
     def _init_pnl_chart_widgets(self) -> None:
         """Initialize Matplotlib widgets for the PnL chart."""
@@ -603,14 +644,141 @@ class App(tk.Tk):
         self._pnl_ax = ax
         self._pnl_canvas = canvas
 
+    def _init_pnl2_chart_widgets(self) -> None:
+        """Initialize Matplotlib widgets for the 10k-notional PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+    def _init_fx_chart_widgets(self) -> None:
+        """Initialize Matplotlib widgets for the 10k-notional Forex PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self.pnl_fx_chart_frame is None:
+            return
+        for w in (self.pnl_fx_chart_frame.winfo_children() if self.pnl_fx_chart_frame is not None else []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 3), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_title('PnL (10k - Forex)')
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (UTC+3)')
+        ax.set_ylabel('Profit (quote currency)')
+        canvas = FigureCanvasTkAgg(fig, master=self.pnl_fx_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.pnl_fx_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._fx_toolbar = toolbar
+        except Exception:
+            self._fx_toolbar = None
+        self._fx_fig = fig
+        self._fx_ax = ax
+        self._fx_canvas = canvas
+
+    def _init_crypto_chart_widgets(self) -> None:
+        """Initialize Matplotlib widgets for the 10k-notional Crypto PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self.pnl_crypto_chart_frame is None:
+            return
+        for w in (self.pnl_crypto_chart_frame.winfo_children() if self.pnl_crypto_chart_frame is not None else []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 3), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_title('PnL (10k - Crypto)')
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (UTC+3)')
+        ax.set_ylabel('Profit (quote currency)')
+        canvas = FigureCanvasTkAgg(fig, master=self.pnl_crypto_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.pnl_crypto_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._crypto_toolbar = toolbar
+        except Exception:
+            self._crypto_toolbar = None
+        self._crypto_fig = fig
+        self._crypto_ax = ax
+        self._crypto_canvas = canvas
+
+    def _init_indices_chart_widgets(self) -> None:
+        """Initialize Matplotlib widgets for the 10k-notional Indices PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self.pnl_indices_chart_frame is None:
+            return
+        for w in (self.pnl_indices_chart_frame.winfo_children() if self.pnl_indices_chart_frame is not None else []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 3), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_title('PnL (10k - Indices)')
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (UTC+3)')
+        ax.set_ylabel('Profit (quote currency)')
+        canvas = FigureCanvasTkAgg(fig, master=self.pnl_indices_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.pnl_indices_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._indices_toolbar = toolbar
+        except Exception:
+            self._indices_toolbar = None
+        self._indices_fig = fig
+        self._indices_ax = ax
+        self._indices_canvas = canvas
+        if self.pnl2_chart_frame is None:
+            return
+        for w in (self.pnl2_chart_frame.winfo_children() if self.pnl2_chart_frame is not None else []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 3), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_title('PnL (10k notional)')
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (UTC+3)')
+        ax.set_ylabel('Profit (quote currency)')
+        canvas = FigureCanvasTkAgg(fig, master=self.pnl2_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.pnl2_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._pnl2_toolbar = toolbar
+        except Exception:
+            self._pnl2_toolbar = None
+        self._pnl2_fig = fig
+        self._pnl2_ax = ax
+        self._pnl2_canvas = canvas
+
     def _pnl_refresh(self) -> None:
         """Trigger background fetch of PnL data and redraw chart."""
         if self._pnl_loading:
             return
         self._pnl_loading = True
         try:
-            if self.pnl_status is not None:
-                self.pnl_status.config(text="Loading PnL...")
+            if self.pnl_fx_status is not None:
+                self.pnl_fx_status.config(text="Loading PnL (10k - Forex)...")
+            if self.pnl_crypto_status is not None:
+                self.pnl_crypto_status.config(text="Loading PnL (10k - Crypto)...")
+            if self.pnl_indices_status is not None:
+                self.pnl_indices_status.config(text="Loading PnL (10k - Indices)...")
         except Exception:
             pass
         t = threading.Thread(target=self._pnl_fetch_thread, daemon=True)
@@ -659,14 +827,16 @@ class App(tk.Tk):
         # Compute ATR per symbol (D1, period 14-ish) and normalize P/L as profit / ATR.
         times: list[datetime] = []
         norm_returns: list[float] = []
+        symbols: list[str] = []  # trade symbol per hit
+        notional_returns: list[float] = []
         try:
             atr_map: dict[str, float | None] = {}
             if _MT5_IMPORTED and mt5 is not None:
                 try:
                     init_ok, init_err = self._ensure_mt5()
                     if init_ok:
-                        symbols = sorted({r[2] for r in rows if r and r[2]})
-                        for sym in symbols:
+                        atr_syms = sorted({r[2] for r in rows if r and r[2]})
+                        for sym in atr_syms:
                             atr_map[sym] = None
                             try:
                                 try:
@@ -752,8 +922,16 @@ class App(tk.Tk):
                     # skip if ATR not available
                     continue
                 norm = profit / atr
+                # 10k-notional absolute PnL (units = 10000 / entry_price)
+                try:
+                    units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
+                except Exception:
+                    units = 0.0
+                notional_profit = units * profit
                 times.append(dt)
                 norm_returns.append(norm)
+                symbols.append(str(symbol))
+                notional_returns.append(notional_profit)
         except Exception as e:
             if error is None:
                 error = str(e)
@@ -766,17 +944,29 @@ class App(tk.Tk):
             cum.append(ssum)
         avg = [c / (i + 1) for i, c in enumerate(cum)] if cum else []
 
-        # Hand off to UI thread
-        self.after(0, self._pnl_update_ui, times, norm_returns, cum, avg, error)
+        # Compute cumulative and average for 10k-notional series
+        not_cum: list[float] = []
+        nsum = 0.0
+        for v in notional_returns:
+            nsum += v
+            not_cum.append(nsum)
+        not_avg = [c / (i + 1) for i, c in enumerate(not_cum)] if not_cum else []
 
-    def _pnl_update_ui(self, times, norm_returns, cum, avg, error: str | None) -> None:
-        """UI-thread handler for ATR-normalized PnL series.
+        # Hand off to UI thread
+        self.after(0, self._pnl_update_ui, times, norm_returns, cum, avg, symbols, notional_returns, not_cum, not_avg, error)
+
+    def _pnl_update_ui(self, times, norm_returns, cum, avg, symbols, notional_returns, not_cum, not_avg, error: str | None) -> None:
+        """UI-thread handler for ATR-normalized and 10k-notional PnL series.
 
         Expects:
           - times: list[datetime] (UTC-aware or naive)
           - norm_returns: list[float] (per-trade profit divided by ATR)
           - cum: list[float] (cumulative sums of norm_returns)
-          - avg: list[float] (average per-trade)
+          - avg: list[float] (average per-trade for normalized series)
+          - symbols: list[str] (trade symbol at each point)
+          - notional_returns: list[float] (per-trade PnL for 10k notional)
+          - not_cum: list[float] (cumulative notional PnL)
+          - not_avg: list[float] (average notional PnL per trade)
           - error: optional error message
         """
         self._pnl_loading = False
@@ -799,45 +989,73 @@ class App(tk.Tk):
                     pass
             return
 
-        if not times or not norm_returns:
+        if not times or not notional_returns:
             try:
-                if self.pnl_status is not None:
-                    self.pnl_status.config(text="No ATR-normalized hits in the requested time range.")
+                if self.pnl_fx_status is not None:
+                    self.pnl_fx_status.config(text="No 10k-notional hits in the requested time range.")
+                if self.pnl_crypto_status is not None:
+                    self.pnl_crypto_status.config(text="No 10k-notional hits in the requested time range.")
+                if self.pnl_indices_status is not None:
+                    self.pnl_indices_status.config(text="No 10k-notional hits in the requested time range.")
             except Exception:
                 pass
-            # Clear chart if available
-            if self._pnl_ax is not None:
-                try:
-                    self._pnl_ax.clear()
-                    if self._pnl_fig is not None:
-                        self._pnl_fig.tight_layout()
-                    if self._pnl_canvas is not None:
-                        self._pnl_canvas.draw_idle()
-                except Exception:
-                    pass
+            # Clear charts if available
+            for ax, fig, canvas in ((getattr(self, '_fx_ax', None), getattr(self, '_fx_fig', None), getattr(self, '_fx_canvas', None)),
+                                    (getattr(self, '_crypto_ax', None), getattr(self, '_crypto_fig', None), getattr(self, '_crypto_canvas', None)),
+                                    (getattr(self, '_indices_ax', None), getattr(self, '_indices_fig', None), getattr(self, '_indices_canvas', None))):
+                if ax is not None:
+                    try:
+                        ax.clear()
+                        if fig is not None:
+                            fig.tight_layout()
+                        if canvas is not None:
+                            canvas.draw_idle()
+                    except Exception:
+                        pass
             return
 
         # Ensure lists align
-        if len(times) != len(norm_returns):
-            # trim to shortest
-            n = min(len(times), len(norm_returns))
-            times = times[:n]
-            norm_returns = norm_returns[:n]
-            cum = cum[:n]
-            avg = avg[:n] if avg else [ (cum[i]/(i+1)) for i in range(len(cum)) ]
+        n = min(len(times), len(notional_returns), len(symbols))
+        times = times[:n]
+        symbols = symbols[:n]
+        notional_returns = notional_returns[:n]
 
-        # Render using the prepared series
+        # Split by instrument class
+        def _sel(idxs, seq):
+            return [seq[i] for i in idxs]
+
+        idx_fx = [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'forex']
+        idx_crypto = [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'crypto']
+        idx_indices = [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'indices']
+
+        # Build series for each category
+        series = []
+        for idxs in (idx_fx, idx_crypto, idx_indices):
+            ts = _sel(idxs, times)
+            rets = _sel(idxs, notional_returns)
+            syms = _sel(idxs, symbols)
+            cum_ = []
+            ssum = 0.0
+            for v in rets:
+                ssum += v
+                cum_.append(ssum)
+            avg_ = [c / (i + 1) for i, c in enumerate(cum_)] if cum_ else []
+            series.append((ts, rets, cum_, avg_, syms))
+
+        # Render using the prepared series (Forex, Crypto, Indices)
         try:
-            self._pnl_render_draw(times, norm_returns, cum, avg)
+            self._pnl_fx_render_draw(*series[0])
+            self._pnl_crypto_render_draw(*series[1])
+            self._pnl_indices_render_draw(*series[2])
         except Exception as e:
             try:
-                if self.pnl_status is not None:
-                    self.pnl_status.config(text=f"Render error: {e}")
+                if self.pnl_fx_status is not None:
+                    self.pnl_fx_status.config(text=f"Render error: {e}")
             except Exception:
                 pass
 
-    def _pnl_render_draw(self, times, returns, cum, avg) -> None:
-        """Draw the PnL chart on the PnL axes."""
+    def _pnl_render_draw(self, times, returns, cum, avg, symbols) -> None:
+        """Draw the PnL chart with step lines, baseline, and per-trade annotations."""
         if FigureCanvasTkAgg is None or Figure is None:
             try:
                 if self.pnl_status is not None:
@@ -851,19 +1069,37 @@ class App(tk.Tk):
         ax.clear()
         ax.grid(True, which='both', linestyle='--', alpha=0.3)
 
+        # Convert times to display timezone
         try:
             times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
         except Exception:
             times_disp = [t + timedelta(hours=3) for t in times]
 
-        # Plot cumulative and avg
+        # Add baseline so N trades -> N visible segments
         try:
-            ax.plot(times_disp, cum, color='#1f77b4', linewidth=2, label='Cumulative PnL (sum of +RRR/-1)')
-            ax.plot(times_disp, avg, color='#ff7f0e', linewidth=1.5, linestyle='--', label='Avg PnL per trade')
+            base_time = times_disp[0] - timedelta(seconds=1)
+        except Exception:
+            base_time = None
+        if base_time is not None:
+            times_plot = [base_time] + list(times_disp)
+            cum_plot = [0.0] + list(cum)
+            avg_plot = [0.0] + (list(avg) if avg else [0.0] * len(cum))
+        else:
+            times_plot = list(times_disp)
+            cum_plot = list(cum)
+            avg_plot = list(avg) if avg else list(cum)
+
+        # Use step plots to emphasize per-trade jumps; add breakeven line
+        try:
+            ax.step(times_plot, cum_plot, where='post', color='#1f77b4', linewidth=2,
+                    label='Cumulative PnL (sum of +RRR/-1)')
+            ax.step(times_plot, avg_plot, where='post', color='#ff7f0e', linewidth=1.2, linestyle='--',
+                    label='Avg PnL per trade')
+            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
         except Exception:
             pass
 
-        # scatter markers for wins/losses
+        # Mark wins/losses at the end of each trade (TP green ^, SL red v)
         try:
             wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
             wins_y = [cum[i] for i, v in enumerate(returns) if v > 0]
@@ -876,7 +1112,43 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Formatter
+        # Annotate per-trade change values; always annotate last, annotate all when small series
+        try:
+            if returns:
+                last_idx = len(returns) - 1
+                ax.annotate(f"{returns[last_idx]:+.2f}",
+                            xy=(times_disp[last_idx], cum[last_idx]),
+                            xytext=(0, -16), textcoords="offset points",
+                            ha="right", va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                if len(returns) <= 12:
+                    for i, r in enumerate(returns):
+                        color = 'green' if r > 0 else ('red' if r < 0 else '#333333')
+                        ax.annotate(f"{r:+.2f}",
+                                    xy=(times_disp[i], cum[i]),
+                                    xytext=(0, 8), textcoords="offset points",
+                                    ha="center", va="bottom", fontsize=8, color=color, alpha=0.9)
+        except Exception:
+            pass
+
+        # Annotate symbol at each trade point (to avoid clutter, show last 20 if many)
+        try:
+            if returns:
+                max_labels = 20
+                n = len(returns)
+                start = 0 if n <= max_labels else n - max_labels
+                for i in range(start, n):
+                    sym = (symbols[i] if symbols and i < len(symbols) else '')
+                    if not sym:
+                        continue
+                    ax.annotate(str(sym),
+                                xy=(times_disp[i], cum[i]),
+                                xytext=(0, 18), textcoords="offset points",
+                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+        except Exception:
+            pass
+
+        # X-axis formatter
         try:
             locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
             formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
@@ -897,10 +1169,520 @@ class App(tk.Tk):
             pass
         try:
             if self.pnl_status is not None:
-                self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
+                last_change = returns[-1] if returns else 0.0
+                last_sym = (symbols[-1] if symbols else '')
+                self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
         except Exception:
             pass
 
+    def _pnl2_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        """Draw the 10k-notional PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                if self.pnl2_status is not None:
+                    self.pnl2_status.config(text="Matplotlib not available; cannot render 10k-notional PnL.")
+            except Exception:
+                pass
+            return
+        if self._pnl2_ax is None or self._pnl2_canvas is None:
+            self._init_pnl2_chart_widgets()
+        ax = self._pnl2_ax
+        ax.clear()
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+        # Convert times to display timezone
+        try:
+            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+        except Exception:
+            times_disp = [t + timedelta(hours=3) for t in times]
+
+        # Baseline so N trades -> N visible segments
+        try:
+            base_time = times_disp[0] - timedelta(seconds=1)
+        except Exception:
+            base_time = None
+        if base_time is not None:
+            times_plot = [base_time] + list(times_disp)
+            cum_plot = [0.0] + list(cum_abs)
+            avg_plot = [0.0] + (list(avg_abs) if avg_abs else [0.0] * len(cum_abs))
+        else:
+            times_plot = list(times_disp)
+            cum_plot = list(cum_abs)
+            avg_plot = list(avg_abs) if avg_abs else list(cum_abs)
+
+        # Plot cumulative and avg as steps, add breakeven line
+        try:
+            ax.step(times_plot, cum_plot, where='post', color='#2c7fb8', linewidth=2, label='Cumulative PnL (10k notional)')
+            ax.step(times_plot, avg_plot, where='post', color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg PnL per trade (10k)')
+            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
+        except Exception:
+            pass
+
+        # Markers for wins/losses
+        try:
+            wins_x = [times_disp[i] for i, v in enumerate(returns_abs) if v > 0]
+            wins_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v > 0]
+            losses_x = [times_disp[i] for i, v in enumerate(returns_abs) if v < 0]
+            losses_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v < 0]
+            if wins_x:
+                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='Win')
+            if losses_x:
+                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='Loss')
+        except Exception:
+            pass
+
+        # Annotations: last value and recent symbols
+        try:
+            if returns_abs:
+                last_idx = len(returns_abs) - 1
+                ax.annotate(f"{returns_abs[last_idx]:+.2f}",
+                            xy=(times_disp[last_idx], cum_abs[last_idx]),
+                            xytext=(0, -16), textcoords="offset points",
+                            ha="right", va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                max_labels = 20
+                n = len(returns_abs)
+                start = 0 if n <= max_labels else n - max_labels
+                for i in range(start, n):
+                    sym = symbols[i] if symbols and i < len(symbols) else ''
+                    if not sym:
+                        continue
+                    ax.annotate(str(sym),
+                                xy=(times_disp[i], cum_abs[i]),
+                                xytext=(0, 18), textcoords="offset points",
+                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+        except Exception:
+            pass
+
+        # Axis formatter
+        try:
+            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        except Exception:
+            pass
+
+        try:
+            ax.legend(loc='upper left')
+        except Exception:
+            pass
+        try:
+            if self._pnl2_fig is not None:
+                self._pnl2_fig.tight_layout()
+            self._pnl2_canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            if self.pnl2_status is not None:
+                last_change = returns_abs[-1] if returns_abs else 0.0
+                last_sym = symbols[-1] if symbols else ''
+                self.pnl2_status.config(text=f"Rendered PnL (10k): {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}, avg {avg_abs[-1]:.2f}")
+        except Exception:
+            pass
+
+    def _pnl2_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        """Draw the 10k-notional PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                if self.pnl2_status is not None:
+                    self.pnl2_status.config(text="Matplotlib not available; cannot render 10k-notional PnL.")
+            except Exception:
+                pass
+            return
+        if self._pnl2_ax is None or self._pnl2_canvas is None:
+            self._init_pnl2_chart_widgets()
+        ax = self._pnl2_ax
+        ax.clear()
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+        # Convert times to display timezone
+        try:
+            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+        except Exception:
+            times_disp = [t + timedelta(hours=3) for t in times]
+
+        # Baseline so N trades -> N visible segments
+        try:
+            base_time = times_disp[0] - timedelta(seconds=1)
+        except Exception:
+            base_time = None
+        if base_time is not None:
+            times_plot = [base_time] + list(times_disp)
+            cum_plot = [0.0] + list(cum_abs)
+            avg_plot = [0.0] + (list(avg_abs) if avg_abs else [0.0] * len(cum_abs))
+        else:
+            times_plot = list(times_disp)
+            cum_plot = list(cum_abs)
+            avg_plot = list(avg_abs) if avg_abs else list(cum_abs)
+
+        # Plot cumulative and avg as steps, add breakeven line
+        try:
+            ax.step(times_plot, cum_plot, where='post', color='#2c7fb8', linewidth=2, label='Cumulative PnL (10k notional)')
+            ax.step(times_plot, avg_plot, where='post', color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg PnL per trade (10k)')
+            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
+        except Exception:
+            pass
+
+        # Markers for wins/losses
+        try:
+            wins_x = [times_disp[i] for i, v in enumerate(returns_abs) if v > 0]
+            wins_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v > 0]
+            losses_x = [times_disp[i] for i, v in enumerate(returns_abs) if v < 0]
+            losses_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v < 0]
+            if wins_x:
+                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='Win')
+            if losses_x:
+                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='Loss')
+        except Exception:
+            pass
+
+        # Annotations: last value and recent symbols
+        try:
+            if returns_abs:
+                last_idx = len(returns_abs) - 1
+                ax.annotate(f"{returns_abs[last_idx]:+.2f}",
+                            xy=(times_disp[last_idx], cum_abs[last_idx]),
+                            xytext=(0, -16), textcoords="offset points",
+                            ha="right", va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                max_labels = 20
+                n = len(returns_abs)
+                start = 0 if n <= max_labels else n - max_labels
+                for i in range(start, n):
+                    sym = symbols[i] if symbols and i < len(symbols) else ''
+                    if not sym:
+                        continue
+                    ax.annotate(str(sym),
+                                xy=(times_disp[i], cum_abs[i]),
+                                xytext=(0, 18), textcoords="offset points",
+                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+        except Exception:
+            pass
+
+        # Axis formatter
+        try:
+            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        except Exception:
+            pass
+
+        try:
+            ax.legend(loc='upper left')
+        except Exception:
+            pass
+        try:
+            if self._pnl2_fig is not None:
+                self._pnl2_fig.tight_layout()
+            self._pnl2_canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            if self.pnl2_status is not None:
+                last_change = returns_abs[-1] if returns_abs else 0.0
+                last_sym = symbols[-1] if symbols else ''
+                self.pnl2_status.config(text=f"Rendered PnL (10k): {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}, avg {avg_abs[-1]:.2f}")
+        except Exception:
+            pass
+
+    def _pnl2_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        """Draw the 10k-notional PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                if self.pnl2_status is not None:
+                    self.pnl2_status.config(text="Matplotlib not available; cannot render 10k-notional PnL.")
+            except Exception:
+                pass
+            return
+        if self._pnl2_ax is None or self._pnl2_canvas is None:
+            self._init_pnl2_chart_widgets()
+        ax = self._pnl2_ax
+        ax.clear()
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+        # Convert times to display timezone
+        try:
+            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+        except Exception:
+            times_disp = [t + timedelta(hours=3) for t in times]
+
+        # Baseline so N trades -> N visible segments
+        try:
+            base_time = times_disp[0] - timedelta(seconds=1)
+        except Exception:
+            base_time = None
+        if base_time is not None:
+            times_plot = [base_time] + list(times_disp)
+            cum_plot = [0.0] + list(cum_abs)
+            avg_plot = [0.0] + (list(avg_abs) if avg_abs else [0.0] * len(cum_abs))
+        else:
+            times_plot = list(times_disp)
+            cum_plot = list(cum_abs)
+            avg_plot = list(avg_abs) if avg_abs else list(cum_abs)
+
+        # Plot cumulative and avg as steps, add breakeven line
+        try:
+            ax.step(times_plot, cum_plot, where='post', color='#2c7fb8', linewidth=2, label='Cumulative PnL (10k notional)')
+            ax.step(times_plot, avg_plot, where='post', color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg PnL per trade (10k)')
+            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
+        except Exception:
+            pass
+
+        # Markers for wins/losses
+        try:
+            wins_x = [times_disp[i] for i, v in enumerate(returns_abs) if v > 0]
+            wins_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v > 0]
+            losses_x = [times_disp[i] for i, v in enumerate(returns_abs) if v < 0]
+            losses_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v < 0]
+            if wins_x:
+                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='Win')
+            if losses_x:
+                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='Loss')
+        except Exception:
+            pass
+
+        # Annotations: last value and recent symbols
+        try:
+            if returns_abs:
+                last_idx = len(returns_abs) - 1
+                ax.annotate(f"{returns_abs[last_idx]:+.2f}",
+                            xy=(times_disp[last_idx], cum_abs[last_idx]),
+                            xytext=(0, -16), textcoords="offset points",
+                            ha="right", va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                max_labels = 20
+                n = len(returns_abs)
+                start = 0 if n <= max_labels else n - max_labels
+                for i in range(start, n):
+                    sym = symbols[i] if symbols and i < len(symbols) else ''
+                    if not sym:
+                        continue
+                    ax.annotate(str(sym),
+                                xy=(times_disp[i], cum_abs[i]),
+                                xytext=(0, 18), textcoords="offset points",
+                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+        except Exception:
+            pass
+
+        # Axis formatter
+        try:
+            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        except Exception:
+            pass
+
+        try:
+            ax.legend(loc='upper left')
+        except Exception:
+            pass
+        try:
+            if self._pnl2_fig is not None:
+                self._pnl2_fig.tight_layout()
+            self._pnl2_canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            if self.pnl2_status is not None:
+                last_change = returns_abs[-1] if returns_abs else 0.0
+                last_sym = symbols[-1] if symbols else ''
+                self.pnl2_status.config(text=f"Rendered PnL (10k): {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}, avg {avg_abs[-1]:.2f}")
+        except Exception:
+            pass
+
+    def _classify_symbol(self, sym: str) -> str:
+        """Heuristically classify a symbol as 'forex', 'crypto', or 'indices'."""
+        s = (sym or '').upper()
+
+        # Crypto keywords/tickers
+        crypto_tickers = [
+            'BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOGE', 'BNB', 'DOT', 'AVAX', 'LINK',
+            'LTC', 'BCH', 'XLM', 'TRX', 'ETC', 'UNI', 'ATOM', 'APT', 'SHIB', 'PEPE'
+        ]
+        if any(t in s for t in crypto_tickers):
+            return 'crypto'
+
+        # Indices keywords
+        index_keys = [
+            'US30', 'US100', 'US500', 'SP500', 'SPX', 'NDX', 'NAS100', 'USTEC',
+            'DAX', 'DE30', 'DE40', 'GER30', 'GER40',
+            'FTSE', 'UK100', 'CAC', 'FCHI', 'FR40',
+            'JP225', 'NIKKEI', 'N225',
+            'AUS200', 'ASX200',
+            'HK50', 'HSI',
+            'ES35', 'IBEX', 'IT40', 'EU50', 'STOXX'
+        ]
+        if any(k in s for k in index_keys):
+            return 'indices'
+
+        # Forex detection by ISO currency pairs
+        iso_ccy = {
+            'USD','EUR','JPY','GBP','AUD','NZD','CAD','CHF','NOK','SEK','DKK',
+            'ZAR','TRY','MXN','PLN','CZK','HUF','CNH','CNY','HKD','SGD'
+        }
+        metals = {'XAU','XAG','XPT','XPD'}  # treat metals as forex-style pairs
+        def is_pair(x: str) -> bool:
+            if len(x) >= 6:
+                a = x[:3]; b = x[3:6]
+                if (a in iso_ccy or a in metals) and (b in iso_ccy):
+                    return True
+            return False
+        if is_pair(s):
+            return 'forex'
+
+        # Fallbacks
+        if s.endswith('USD') and any(t in s for t in crypto_tickers):
+            return 'crypto'
+        if any(ch.isdigit() for ch in s):
+            return 'indices'
+        return 'forex'
+
+    def _pnl_category_render(self, title: str, ax, fig, canvas, status_label, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        """Common renderer for 10k-notional category charts."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                if status_label is not None:
+                    status_label.config(text="Matplotlib not available; cannot render.")
+            except Exception:
+                pass
+            return
+
+        # Ensure axis exists (caller should have initialized)
+        if ax is None or canvas is None:
+            try:
+                if title.endswith("Forex"):
+                    self._init_fx_chart_widgets()
+                    ax, fig, canvas = self._fx_ax, self._fx_fig, self._fx_canvas
+                elif title.endswith("Crypto"):
+                    self._init_crypto_chart_widgets()
+                    ax, fig, canvas = self._crypto_ax, self._crypto_fig, self._crypto_canvas
+                else:
+                    self._init_indices_chart_widgets()
+                    ax, fig, canvas = self._indices_ax, self._indices_fig, self._indices_canvas
+            except Exception:
+                return
+        if ax is None:
+            return
+
+        ax.clear()
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+        # Convert times to display timezone
+        try:
+            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+        except Exception:
+            times_disp = [t + timedelta(hours=3) for t in times]
+
+        # Baseline so N trades -> N segments
+        try:
+            base_time = times_disp[0] - timedelta(seconds=1) if times_disp else None
+        except Exception:
+            base_time = None
+        if base_time is not None:
+            times_plot = [base_time] + list(times_disp)
+            cum_plot = [0.0] + list(cum_abs)
+            avg_plot = [0.0] + (list(avg_abs) if avg_abs else [0.0] * len(cum_abs))
+        else:
+            times_plot = list(times_disp)
+            cum_plot = list(cum_abs)
+            avg_plot = list(avg_abs) if avg_abs else list(cum_abs)
+
+        # Plot cumulative and avg as steps, add breakeven line
+        try:
+            ax.set_title(title)
+            ax.step(times_plot, cum_plot, where='post', color='#2c7fb8', linewidth=2, label='Cumulative (10k)')
+            ax.step(times_plot, avg_plot, where='post', color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)')
+            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
+        except Exception:
+            pass
+
+        # Markers for wins/losses
+        try:
+            wins_x = [times_disp[i] for i, v in enumerate(returns_abs) if v > 0]
+            wins_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v > 0]
+            losses_x = [times_disp[i] for i, v in enumerate(returns_abs) if v < 0]
+            losses_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v < 0]
+            if wins_x:
+                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='Win')
+            if losses_x:
+                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='Loss')
+        except Exception:
+            pass
+
+        # Annotations: last value and recent symbols
+        try:
+            if returns_abs:
+                last_idx = len(returns_abs) - 1
+                ax.annotate(f"{returns_abs[last_idx]:+.2f}",
+                            xy=(times_disp[last_idx], cum_abs[last_idx]),
+                            xytext=(0, -16), textcoords="offset points",
+                            ha="right", va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                max_labels = 20
+                n = len(returns_abs)
+                start = 0 if n <= max_labels else n - max_labels
+                for i in range(start, n):
+                    sym = symbols[i] if symbols and i < len(symbols) else ''
+                    if not sym:
+                        continue
+                    ax.annotate(str(sym),
+                                xy=(times_disp[i], cum_abs[i]),
+                                xytext=(0, 18), textcoords="offset points",
+                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+        except Exception:
+            pass
+
+        # Axis formatter
+        try:
+            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        except Exception:
+            pass
+
+        try:
+            ax.legend(loc='upper left')
+        except Exception:
+            pass
+        try:
+            if fig is not None:
+                fig.tight_layout()
+            if canvas is not None:
+                canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            if status_label is not None:
+                if cum_abs:
+                    last_change = returns_abs[-1] if returns_abs else 0.0
+                    last_sym = symbols[-1] if symbols else ''
+                    status_label.config(text=f"{title}: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}")
+                else:
+                    status_label.config(text=f"{title}: no trades")
+        except Exception:
+            pass
+
+    def _pnl_fx_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        if self._fx_ax is None or self._fx_canvas is None:
+            self._init_fx_chart_widgets()
+        self._pnl_category_render("PnL (10k - Forex)", self._fx_ax, self._fx_fig, self._fx_canvas, self.pnl_fx_status,
+                                  times, returns_abs, cum_abs, avg_abs, symbols)
+
+    def _pnl_crypto_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        if self._crypto_ax is None or self._crypto_canvas is None:
+            self._init_crypto_chart_widgets()
+        self._pnl_category_render("PnL (10k - Crypto)", self._crypto_ax, self._crypto_fig, self._crypto_canvas, self.pnl_crypto_status,
+                                  times, returns_abs, cum_abs, avg_abs, symbols)
+
+    def _pnl_indices_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+        if self._indices_ax is None or self._indices_canvas is None:
+            self._init_indices_chart_widgets()
+        self._pnl_category_render("PnL (10k - Indices)", self._indices_ax, self._indices_fig, self._indices_canvas, self.pnl_indices_status,
+                                  times, returns_abs, cum_abs, avg_abs, symbols)
     def _enqueue_log(self, name: str, text: str) -> None:
         self.log_q.put((name, text))
 
@@ -1079,6 +1861,11 @@ class App(tk.Tk):
             self.db_status.config(text=f"Rows: {len(rows_display)} - Updated {datetime.now().strftime('%H:%M:%S')}")
         # Schedule next auto refresh if enabled
         self._db_schedule_next()
+        # Also refresh PnL so changes are reflected immediately
+        try:
+            self._pnl_refresh()
+        except Exception:
+            pass
 
     def _db_delete_selected(self) -> None:
         # Delete from DB both in timelapse_hits and timelapse_setups for a selected row

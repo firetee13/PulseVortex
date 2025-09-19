@@ -1,7 +1,4 @@
-*.csv
-Prompt*.txt
 __pycache__/
 .vscode
 *.db
 backup
-*.txt

@@ -189,6 +189,8 @@ class App(tk.Tk):
 
         # User-configurable exclude list for timelapse setups (comma-separated symbols)
         self.var_exclude_symbols = tk.StringVar(value="")
+        # Min prox SL for timelapse setups
+        self.var_min_prox_sl = tk.StringVar(value="0.25")
         # DB tab variables
         self.var_db_name = tk.StringVar(value="timelapse.db")
         self.var_since_hours = tk.IntVar(value=168)
@@ -202,6 +204,7 @@ class App(tk.Tk):
         # Persist on any change
         try:
             self.var_exclude_symbols.trace_add("write", self._on_exclude_changed)
+            self.var_min_prox_sl.trace_add("write", self._on_min_prox_changed)
         except Exception:
             pass
 
@@ -252,13 +255,21 @@ class App(tk.Tk):
 
         # Timelapse controls
         tl = ttk.LabelFrame(frm, text="Timelapse Setups --watch")
-        tl.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.X, expand=True)
+        tl.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.Y, expand=True)
         self.btn_tl_toggle = ttk.Button(tl, text="Start", command=self._toggle_timelapse)
-        self.btn_tl_toggle.pack(side=tk.LEFT, padx=4, pady=6)
+        self.btn_tl_toggle.pack(side=tk.TOP, padx=4, pady=6)
         # Exclude symbols input (comma-separated)
-        ttk.Label(tl, text="Exclude (comma):").pack(side=tk.LEFT, padx=(10, 4))
-        ent_ex = ttk.Entry(tl, textvariable=self.var_exclude_symbols)
-        ent_ex.pack(side=tk.LEFT, padx=(0, 4), fill=tk.X, expand=True)
+        ex_frame = ttk.Frame(tl)
+        ex_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        ttk.Label(ex_frame, text="Exclude (comma):").pack(side=tk.LEFT)
+        ent_ex = ttk.Entry(ex_frame, textvariable=self.var_exclude_symbols)
+        ent_ex.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+        # Min Prox SL input
+        mps_frame = ttk.Frame(tl)
+        mps_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        ttk.Label(mps_frame, text="Min Prox SL:").pack(side=tk.LEFT)
+        ent_mps = ttk.Entry(mps_frame, textvariable=self.var_min_prox_sl)
+        ent_mps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
         # TP/SL Hits controls
         ht = ttk.LabelFrame(frm, text="TP/SL Hits --watch")
@@ -1557,7 +1568,7 @@ class App(tk.Tk):
 
     # Button handlers
     def _start_timelapse(self) -> None:
-        # Build command dynamically to include exclude list if provided
+        # Build command dynamically to include exclude list and min prox sl if provided
         py = sys.executable or "python"
         cmd = [py, "-u", "timelapse_setups.py", "--watch"]
         try:
@@ -1566,6 +1577,12 @@ class App(tk.Tk):
             ex = ""
         if ex:
             cmd += ["--exclude", ex]
+        try:
+            mps = (self.var_min_prox_sl.get() or "").strip()
+        except Exception:
+            mps = ""
+        if mps:
+            cmd += ["--min-prox-sl", mps]
         self.timelapse.cmd = cmd
         self.timelapse.start()
 
@@ -1653,6 +1670,12 @@ class App(tk.Tk):
                 self.var_exclude_symbols.set(ex)
             except Exception:
                 pass
+        mps = data.get("min_prox_sl")
+        if isinstance(mps, str):
+            try:
+                self.var_min_prox_sl.set(mps)
+            except Exception:
+                pass
         since = data.get("since_hours")
         if isinstance(since, int):
             try:
@@ -1669,6 +1692,7 @@ class App(tk.Tk):
     def _save_settings(self) -> None:
         data = {
             "exclude_symbols": self.var_exclude_symbols.get() if self.var_exclude_symbols is not None else "",
+            "min_prox_sl": self.var_min_prox_sl.get() if self.var_min_prox_sl is not None else "0.25",
             "since_hours": self.var_since_hours.get() if self.var_since_hours is not None else 168,
             "interval": self.var_interval.get() if self.var_interval is not None else 60,
         }
@@ -1679,6 +1703,12 @@ class App(tk.Tk):
             pass
 
     def _on_exclude_changed(self, *args) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+
+    def _on_min_prox_changed(self, *args) -> None:
         try:
             self._save_settings()
         except Exception:

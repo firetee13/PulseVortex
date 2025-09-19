@@ -1482,7 +1482,9 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     if sym:
                         lines.append(line)
                 if lines:
-                    print(f"[DB] Inserted {inserted} new setup(s): " + "; ".join(lines))
+                    print(f"[DB] Inserted {inserted} new setup(s):")
+                    for line in lines:
+                        print(f"  {line}")
                 else:
                     # Fallback to symbol list only
                     syms = [str(r.get('symbol')) for r in (results or [])]

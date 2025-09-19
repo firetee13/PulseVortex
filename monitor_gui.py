@@ -29,6 +29,9 @@ from datetime import datetime, timedelta, timezone
 import tkinter as tk
 from tkinter import ttk
 import json
+import argparse
+import tempfile
+import shutil
 
 # Plotting
 try:
@@ -44,6 +47,20 @@ except Exception:
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+def parse_args() -> argparse.Namespace:
+    """
+    Parse command-line arguments for the monitor GUI.
+
+    Returns:
+        argparse.Namespace: Parsed arguments
+    """
+    parser = argparse.ArgumentParser(description="EASY Insight Monitor GUI")
+    parser.add_argument("--restore-timelapse-log",
+                       help="Path to timelapse log file to restore on startup")
+    parser.add_argument("--restore-hits-log",
+                       help="Path to hits log file to restore on startup")
+    return parser.parse_args()
 
 # MT5 imports (optional at module import; initialized lazily when needed)
 _MT5_IMPORTED = False
@@ -165,11 +182,16 @@ class ProcController:
 
 
 class App(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, restore_timelapse_log: str | None = None,
+                 restore_hits_log: str | None = None) -> None:
         super().__init__()
         self.title("EASY Insight - Timelapse Monitors")
         self.geometry("1000x600")
         self.minsize(800, 400)
+
+        # Store restore log paths for later cleanup
+        self.restore_timelapse_log = restore_timelapse_log
+        self.restore_hits_log = restore_hits_log
 
         # Notebook with tabs
         self.nb = ttk.Notebook(self)
@@ -211,6 +233,9 @@ class App(tk.Tk):
         # UI elements in Monitors tab
         self._make_controls(self.tab_mon)
         self._make_logs(self.tab_mon)
+
+        # Restore logs if provided
+        self._restore_logs()
 
         # UI elements in DB tab
         self._make_db_tab(self.tab_db)
@@ -309,6 +334,49 @@ class App(tk.Tk):
 
         paned.add(lf_tl, weight=1)
         paned.add(lf_hits, weight=1)
+
+    def _restore_logs(self) -> None:
+        """Restore logs from files if provided."""
+        # Restore timelapse log
+        if self.restore_timelapse_log and os.path.exists(self.restore_timelapse_log):
+            try:
+                with open(self.restore_timelapse_log, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content:
+                        self._append_text(self.txt_tl, content)
+            except Exception:
+                pass  # Ignore errors during restore
+
+        # Restore hits log
+        if self.restore_hits_log and os.path.exists(self.restore_hits_log):
+            try:
+                with open(self.restore_hits_log, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content:
+                        self._append_text(self.txt_hits, content)
+            except Exception:
+                pass  # Ignore errors during restore
+
+        # Clean up temporary files after restore
+        self._cleanup_restore_files()
+
+    def _cleanup_restore_files(self) -> None:
+        """Clean up temporary log files after restoring."""
+        files_to_clean = []
+        if self.restore_timelapse_log and os.path.exists(self.restore_timelapse_log):
+            files_to_clean.append(self.restore_timelapse_log)
+        if self.restore_hits_log and os.path.exists(self.restore_hits_log):
+            files_to_clean.append(self.restore_hits_log)
+
+        # Clean up in a separate thread to avoid blocking UI
+        if files_to_clean:
+            def cleanup():
+                for file_path in files_to_clean:
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+            threading.Thread(target=cleanup, daemon=True).start()
 
     # --- DB TAB ---
     def _make_db_tab(self, parent) -> None:
@@ -1599,9 +1667,47 @@ class App(tk.Tk):
         # Stop the current subprocesses
         self._stop_timelapse()
         self._stop_hits()
-        # Start a new instance of the GUI
+
+        # Save current logs to temporary files
+        timelapse_log_path = None
+        hits_log_path = None
+
         try:
-            subprocess.Popen([sys.executable, 'run_monitor_gui.pyw'], cwd=HERE)
+            # Get current log content
+            self.txt_tl.configure(state=tk.NORMAL)
+            timelapse_content = self.txt_tl.get("1.0", tk.END)
+            self.txt_tl.configure(state=tk.DISABLED)
+
+            self.txt_hits.configure(state=tk.NORMAL)
+            hits_content = self.txt_hits.get("1.0", tk.END)
+            self.txt_hits.configure(state=tk.DISABLED)
+
+            # Create temporary files
+            if timelapse_content.strip():
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False,
+                                               encoding='utf-8') as f:
+                    f.write(timelapse_content)
+                    timelapse_log_path = f.name
+
+            if hits_content.strip():
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False,
+                                               encoding='utf-8') as f:
+                    f.write(hits_content)
+                    hits_log_path = f.name
+        except Exception:
+            # If we can't save logs, continue with restart anyway
+            timelapse_log_path = None
+            hits_log_path = None
+
+        # Start a new instance of the GUI with log restore arguments
+        cmd = [sys.executable, 'run_monitor_gui.pyw']
+        if timelapse_log_path:
+            cmd.extend(['--restore-timelapse-log', timelapse_log_path])
+        if hits_log_path:
+            cmd.extend(['--restore-hits-log', hits_log_path])
+
+        try:
+            subprocess.Popen(cmd, cwd=HERE)
         except Exception as e:
             # If fails, just restart the processes
             self.after(1000, self._do_restart)
@@ -1717,7 +1823,9 @@ class App(tk.Tk):
 
 
 def main() -> None:
-    app = App()
+    args = parse_args()
+    app = App(restore_timelapse_log=args.restore_timelapse_log,
+              restore_hits_log=args.restore_hits_log)
     app.mainloop()
 
 

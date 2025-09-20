@@ -32,6 +32,8 @@ import json
 import argparse
 import tempfile
 import shutil
+from monitor.config import db_path_str, default_db_path
+from monitor.mt5_client import resolve_symbol as _RESOLVE, get_server_offset_hours as _GET_OFFS, to_server_naive as _TO_SERVER
 
 # Plotting
 try:
@@ -71,13 +73,7 @@ except Exception:
     mt5 = None  # type: ignore
     _MT5_IMPORTED = False
 
-# Reuse helpers from check_tp_sl_hits when available
-_RESOLVE = None
-_GET_OFFS = None
-_TO_SERVER = None
-try:
-    from check_tp_sl_hits import resolve_symbol as _RESOLVE, get_server_offset_hours as _GET_OFFS, to_server_naive as _TO_SERVER
-except Exception:
+# MT5 helper functions shared with CLI scripts
     pass
 
 UTC = timezone.utc
@@ -214,7 +210,7 @@ class App(tk.Tk):
         # Min prox SL for timelapse setups
         self.var_min_prox_sl = tk.StringVar(value="0.25")
         # DB tab variables
-        self.var_db_name = tk.StringVar(value="timelapse.db")
+        self.var_db_name = tk.StringVar(value=str(default_db_path()))
         self.var_since_hours = tk.IntVar(value=168)
         self.var_auto = tk.BooleanVar(value=True)
         self.var_interval = tk.IntVar(value=60)
@@ -792,7 +788,7 @@ class App(tk.Tk):
         error: str | None = None
         try:
             import sqlite3  # type: ignore
-            db_path = dbname if dbname.lower().endswith('.db') else os.path.join(HERE, 'timelapse.db')
+            db_path = db_path_str(dbname)
             conn = sqlite3.connect(db_path, timeout=3)
             try:
                 cur = conn.cursor()
@@ -1763,7 +1759,7 @@ class App(tk.Tk):
                 import sqlite3  # type: ignore
             except Exception as e:
                 raise RuntimeError(f"sqlite3 not available: {e}")
-            db_path = dbname if dbname.lower().endswith('.db') else os.path.join(HERE, 'timelapse.db')
+            db_path = db_path_str(dbname)
             conn = sqlite3.connect(db_path, timeout=3)
             try:
                 cur = conn.cursor()
@@ -1903,7 +1899,7 @@ class App(tk.Tk):
         # Run deletion in a thread then refresh
         def _do_delete():
             dbname = self.var_db_name.get().strip()
-            db_path = dbname if dbname.lower().endswith('.db') else os.path.join(HERE, 'timelapse.db')
+            db_path = db_path_str(dbname)
             err = None
             try:
                 import sqlite3  # type: ignore
@@ -2032,7 +2028,7 @@ class App(tk.Tk):
             self._set_chart_message(f"Still loading {symbol}… MT5 may be busy. Try again or check terminal.")
 
     def _resolve_symbol(self, base: str) -> tuple[str | None, str | None]:
-        # Prefer helper from check_tp_sl_hits
+        # Prefer shared helper
         if _RESOLVE is not None:
             try:
                 name = _RESOLVE(base)

@@ -42,19 +42,20 @@ try:
 except Exception:
     HAS_WATCHDOG = False
 
+from monitor.config import default_db_path
+from monitor import mt5_client
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SQLITE_PATH = os.path.join(SCRIPT_DIR, "timelapse.db")
+DEFAULT_SQLITE_PATH = str(default_db_path())
 import json
 import numpy as np  # required for ATR computations
 
 # Optional MT5 for tick backfill
-_MT5_IMPORTED = False
-try:
-    import MetaTrader5 as mt5  # type: ignore
-    _MT5_IMPORTED = True
-except Exception:
-    mt5 = None  # type: ignore
-    _MT5_IMPORTED = False
+mt5 = getattr(mt5_client, "mt5", None)  # type: ignore
+_MT5_IMPORTED = mt5_client.has_mt5()
+atexit.register(mt5_client.shutdown_mt5)
+
+
 
 
 # -----------------------------------------
@@ -198,12 +199,16 @@ def _mt5_ensure_init() -> bool:
         return False
     if _MT5_READY:
         return True
+    timeout = int(os.environ.get("TIMELAPSE_MT5_TIMEOUT", os.environ.get("MT5_TIMEOUT", "30")))
+    retries = int(os.environ.get("TIMELAPSE_MT5_RETRIES", "1"))
+    portable = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower() in {"1", "true", "yes", "on"}
     try:
-        ok = mt5.initialize()
-        _MT5_READY = bool(ok)
-    except Exception:
+        mt5_client.init_mt5(timeout=timeout, retries=retries, portable=portable)
+        _MT5_READY = True
+    except RuntimeError:
         _MT5_READY = False
     return _MT5_READY
+
 
 
 def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask: bool, max_lookback_sec: int = 180) -> Tuple[Optional[float], Optional[float]]:

@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import glob
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from time import perf_counter
+from typing import List, Optional, Sequence, Tuple
+
+from .domain import Hit, TickFetchStats
+
+try:
+    import MetaTrader5 as mt5  # type: ignore
+except Exception:  # pragma: no cover
+    mt5 = None  # type: ignore
+
+UTC = timezone.utc
+
+
+def has_mt5() -> bool:
+    return mt5 is not None
+
+
+def _candidate_terminal_paths(user_hint: Optional[str]) -> List[Optional[str]]:
+    """Return candidate terminal64.exe paths to try. Includes None (auto) first."""
+    candidates: List[Optional[str]] = [None]
+    if user_hint:
+        candidates.append(user_hint)
+    if os.name == "nt":
+        pf = os.environ.get("PROGRAMFILES") or r"C:\\Program Files"
+        pfx = os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)"
+        roaming = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal")
+        patterns = [
+            os.path.join(pf, "MetaTrader 5", "terminal64.exe"),
+            os.path.join(pf, "MetaTrader 5 *", "terminal64.exe"),
+            os.path.join(pfx, "MetaTrader 5", "terminal64.exe"),
+            os.path.join(roaming, "*", "terminal64.exe"),
+        ]
+        for pat in patterns:
+            for path in glob.glob(pat):
+                if os.path.isfile(path):
+                    candidates.append(path)
+    seen = set()
+    uniq: List[Optional[str]] = []
+    for cand in candidates:
+        key = cand or "<auto>"
+        if key not in seen:
+            seen.add(key)
+            uniq.append(cand)
+    return uniq
+
+
+def init_mt5(
+    path: Optional[str] = None,
+    *,
+    timeout: int = 90,
+    retries: int = 2,
+    portable: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Initialize MetaTrader5 with retries and optional terminal path."""
+    if mt5 is None:
+        raise RuntimeError("MetaTrader5 package is not installed")
+
+    login = os.environ.get("MT5_LOGIN")
+    password = os.environ.get("MT5_PASSWORD")
+    server = os.environ.get("MT5_SERVER")
+    candidates = _candidate_terminal_paths(path)
+    last_err: Optional[Tuple[int, str]] = None
+
+    for attempt in range(1, max(1, retries) + 1):
+        for cand in candidates:
+            if verbose:
+                where = cand or "<auto>"
+                print(f"[mt5] initialize attempt {attempt} path={where} timeout={timeout}s portable={portable}")
+            ok = False
+            try:
+                kwargs = {"timeout": timeout}
+                if portable:
+                    kwargs["portable"] = True
+                if login and password and server:
+                    try:
+                        kwargs["login"] = int(login)
+                        kwargs["password"] = password
+                        kwargs["server"] = server
+                    except Exception:
+                        pass
+                if cand is None:
+                    ok = mt5.initialize(**kwargs)
+                else:
+                    ok = mt5.initialize(cand, **kwargs)
+            except Exception:
+                ok = False
+            if ok:
+                try:
+                    mt5.version()
+                except Exception:
+                    pass
+                return
+            try:
+                last_err = mt5.last_error()
+            except Exception:
+                last_err = None
+            if verbose and last_err:
+                print(f"[mt5] initialize failed at path={cand or '<auto>'}: {last_err}")
+            if last_err and last_err[0] in (-10004, -10005, -10006):
+                time.sleep(1.0)
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+        time.sleep(1.0)
+    raise RuntimeError(f"mt5.initialize failed after retries: {last_err}")
+
+
+def shutdown_mt5() -> None:
+    if mt5 is None:
+        return
+    try:
+        mt5.shutdown()
+    except Exception:
+        pass
+
+
+def resolve_symbol(base: str) -> Optional[str]:
+    if mt5 is None:
+        return None
+    if mt5.symbol_select(base, True):
+        return base
+    try:
+        candidates = mt5.symbols_get(f"{base}*") or []
+    except Exception:
+        candidates = []
+    best: Optional[Tuple[int, str]] = None
+    for symbol_info in candidates:
+        name = getattr(symbol_info, "name", None)
+        if not name:
+            continue
+        score = 0
+        if getattr(symbol_info, "visible", False):
+            score -= 10
+        score += len(name)
+        if best is None or score < best[0]:
+            best = (score, name)
+    if best is not None:
+        chosen = best[1]
+        if mt5.symbol_select(chosen, True):
+            return chosen
+    return None
+
+
+def get_server_offset_hours(symbol_for_probe: str) -> int:
+    """Infer whole-hour server offset using latest tick time vs now UTC."""
+    if mt5 is None:
+        return 0
+    tick = mt5.symbol_info_tick(symbol_for_probe)
+    if tick is None:
+        return 0
+    try:
+        ts = float(getattr(tick, "time_msc", 0) or 0) / 1000.0
+        if ts == 0:
+            ts = float(getattr(tick, "time", 0) or 0)
+        dt_raw = datetime.fromtimestamp(ts, tz=UTC)
+        now_utc = datetime.now(UTC)
+        diff_hours = (dt_raw - now_utc).total_seconds() / 3600.0
+        if abs(diff_hours) <= (10.0 / 60.0):
+            return 0
+        est = int(round(diff_hours))
+        if -12 <= est <= 12:
+            return est
+    except Exception:
+        pass
+    return 0
+
+
+def to_server_naive(dt_utc: datetime, offset_hours: int) -> datetime:
+    target_epoch = dt_utc.timestamp() + (offset_hours * 3600.0)
+    return datetime.fromtimestamp(target_epoch)
+
+
+def epoch_to_server_naive(epoch_seconds: float, offset_hours: int) -> datetime:
+    return datetime.fromtimestamp(epoch_seconds + (offset_hours * 3600.0))
+
+
+def from_server_naive(dt_naive: datetime, offset_hours: int) -> datetime:
+    epoch = dt_naive.timestamp() - (offset_hours * 3600.0)
+    return datetime.fromtimestamp(epoch, tz=UTC)
+
+
+def ticks_paged(
+    symbol: str,
+    start_server_naive: datetime,
+    end_server_naive: datetime,
+    page: int,
+    trace: bool = False,
+    server_offset_hours: int = 0,
+) -> Tuple[List[object], TickFetchStats]:
+    """Fetch ticks from start..end (server-local naive) using copy_ticks_from."""
+    if mt5 is None:
+        return [], TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+    t0 = perf_counter()
+    all_ticks: List[object] = []
+    cur = start_server_naive
+    pages = 0
+    fetch_s = 0.0
+    while True:
+        call_t0 = perf_counter()
+        chunk = mt5.copy_ticks_from(symbol, cur, page, mt5.COPY_TICKS_ALL)
+        call_dt = perf_counter() - call_t0
+        fetch_s += call_dt
+        n = 0 if chunk is None else len(chunk)
+        if trace:
+            cur_str = cur.isoformat(sep=' ', timespec='seconds')
+            print(f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms")
+        if chunk is None or n == 0:
+            break
+        all_ticks.extend(chunk)
+        pages += 1
+        last = chunk[-1]
+        try:
+            tms = getattr(last, 'time_msc', None)
+            if tms is None:
+                tms = int(last['time_msc']) if isinstance(last, dict) else last['time_msc']
+            next_ts = (int(tms) + 1) / 1000.0
+        except Exception:
+            try:
+                tse = getattr(last, 'time', None)
+                if tse is None:
+                    tse = int(last['time']) if isinstance(last, dict) else last['time']
+                next_ts = int(tse) + 1
+            except Exception:
+                break
+        cur = epoch_to_server_naive(next_ts, server_offset_hours)
+        if cur > end_server_naive:
+            break
+    elapsed = perf_counter() - t0
+    return all_ticks, TickFetchStats(pages=pages, total_ticks=len(all_ticks), elapsed_s=elapsed, fetch_s=fetch_s, early_stop=False)
+
+
+def ticks_range_all(
+    symbol: str,
+    start_server_naive: datetime,
+    end_server_naive: datetime,
+    trace: bool = False,
+) -> Tuple[List[object], TickFetchStats]:
+    """Fetch all ticks for [start, end] using copy_ticks_range."""
+    if mt5 is None:
+        return [], TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+    t0 = perf_counter()
+    call_t0 = perf_counter()
+    ticks = mt5.copy_ticks_range(symbol, start_server_naive, end_server_naive, mt5.COPY_TICKS_ALL)
+    call_dt = perf_counter() - call_t0
+    n = 0 if ticks is None else len(ticks)
+    if trace:
+        print(f"    [ticks-range] {n} ticks in {call_dt*1000:.1f} ms")
+    elapsed = perf_counter() - t0
+    ticks_out = ticks if ticks is not None else []
+    pages = 1 if n > 0 else 0
+    return ticks_out, TickFetchStats(pages=pages, total_ticks=n, elapsed_s=elapsed, fetch_s=call_dt, early_stop=False)
+
+
+def scan_ticks_paged_for_hit(
+    symbol: str,
+    start_server_naive: datetime,
+    end_server_naive: datetime,
+    page: int,
+    direction: str,
+    sl: float,
+    tp: float,
+    server_offset_hours: int,
+    trace: bool = False,
+) -> Tuple[Optional[Hit], TickFetchStats]:
+    """Fetch ticks page-by-page and stop as soon as a hit is detected."""
+    if mt5 is None:
+        return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+    pages = 0
+    total_ticks = 0
+    t0 = perf_counter()
+    fetch_s = 0.0
+    cur = start_server_naive
+    while True:
+        call_t0 = perf_counter()
+        chunk = mt5.copy_ticks_from(symbol, cur, page, mt5.COPY_TICKS_ALL)
+        call_dt = perf_counter() - call_t0
+        fetch_s += call_dt
+        n = 0 if chunk is None else len(chunk)
+        if trace:
+            cur_str = cur.isoformat(sep=' ', timespec='seconds')
+            print(f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms")
+        if chunk is None or n == 0:
+            break
+        pages += 1
+        total_ticks += n
+        hit = earliest_hit_from_ticks(chunk, direction, sl, tp, server_offset_hours)
+        if hit is not None:
+            elapsed = perf_counter() - t0
+            return hit, TickFetchStats(pages=pages, total_ticks=total_ticks, elapsed_s=elapsed, fetch_s=fetch_s, early_stop=True)
+        last = chunk[-1]
+        try:
+            tms = getattr(last, 'time_msc', None)
+            if tms is None:
+                tms = int(last['time_msc']) if isinstance(last, dict) else last['time_msc']
+            next_ts = (int(tms) + 1) / 1000.0
+        except Exception:
+            try:
+                tse = getattr(last, 'time', None)
+                if tse is None:
+                    tse = int(last['time']) if isinstance(last, dict) else last['time']
+                next_ts = int(tse) + 1
+            except Exception:
+                break
+        cur = epoch_to_server_naive(next_ts, server_offset_hours)
+        if cur > end_server_naive:
+            break
+    elapsed = perf_counter() - t0
+    return None, TickFetchStats(pages=pages, total_ticks=total_ticks, elapsed_s=elapsed, fetch_s=fetch_s, early_stop=False)
+
+
+def earliest_hit_from_ticks(
+    ticks: Sequence[object],
+    direction: str,
+    sl: float,
+    tp: float,
+    server_offset_hours: int,
+) -> Optional[Hit]:
+    if ticks is None:
+        return None
+    try:
+        n = len(ticks)
+    except Exception:
+        try:
+            n = int(getattr(ticks, 'size', 0))
+        except Exception:
+            n = 0
+    if n == 0:
+        return None
+    for i in range(n):
+        tk = ticks[i]
+        try:
+            bid = getattr(tk, 'bid', None)
+            ask = getattr(tk, 'ask', None)
+        except Exception:
+            bid = tk.get('bid') if isinstance(tk, dict) else None
+            ask = tk.get('ask') if isinstance(tk, dict) else None
+        if bid is None and ask is None:
+            continue
+        try:
+            tms = getattr(tk, 'time_msc', None)
+            if tms is None:
+                tms = tk['time_msc'] if isinstance(tk, dict) else None
+            if tms is not None:
+                dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
+            else:
+                tse = getattr(tk, 'time') if hasattr(tk, 'time') else tk['time']
+                dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
+        except Exception:
+            continue
+        dt_utc = dt_raw - timedelta(hours=server_offset_hours)
+        if direction.lower() == 'buy':
+            if bid is not None and bid <= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=bid)
+            if bid is not None and bid >= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=bid)
+        else:
+            if ask is not None and ask >= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=ask)
+            if ask is not None and ask <= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=ask)
+    return None

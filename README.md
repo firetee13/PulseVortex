@@ -1,6 +1,12 @@
-# EASY Insight Monitor - MT5 Trade Setup Analyzer
+# EASY Insight Monitor - MT5 Trade Setup Analyzer & Monitor
 
-A sophisticated Python application that analyzes MetaTrader 5 (MT5) symbols to identify high-confidence trade setups based on technical indicators, price momentum, and support/resistance levels. This tool is designed for forex and crypto traders seeking automated setup detection with advanced filtering and risk management features.
+A comprehensive Python application suite for MT5 trading that includes:
+
+- **CLI Setup Analyzer** (`timelapse_setups.py`): Analyzes MT5 symbols to identify high-confidence trade setups
+- **GUI Monitor** (`monitor_gui.py`): Visual interface for real-time monitoring and analysis
+- **TP/SL Hit Checker** (`check_tp_sl_hits.py`): Automated monitoring of take-profit and stop-loss hits
+
+Designed for forex and crypto traders seeking automated setup detection, real-time monitoring, and comprehensive risk management with advanced filtering and visualization features.
 
 ## Table of Contents
 
@@ -8,8 +14,8 @@ A sophisticated Python application that analyzes MetaTrader 5 (MT5) symbols to i
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Usage](#usage)
-- [Command Line Options](#command-line-options)
+- [GUI Interface](#gui-interface)
+- [CLI Tools](#cli-tools)
 - [Configuration](#configuration)
 - [Database Schema](#database-schema)
 - [Testing](#testing)
@@ -59,6 +65,22 @@ A sophisticated Python application that analyzes MetaTrader 5 (MT5) symbols to i
 - **Symbol Selection**: Analyze all visible MarketWatch symbols or specify custom symbol lists
 - **Exclusion Lists**: Filter out unwanted symbols by name
 
+### GUI Interface Features
+
+- **Real-time Monitoring Dashboard**: Visual interface with live logs for setup detection and hit monitoring
+- **Database Results Viewer**: Browse detected setups and TP/SL hits with filtering and sorting
+- **PnL Analytics**: Comprehensive profit/loss charts with ATR-normalized returns and category breakdowns (Forex, Crypto, Indices)
+- **Chart Visualization**: Interactive 1-minute candlestick charts with SL/TP overlays for individual setups
+- **Settings Management**: Persistent configuration for exclude lists, polling intervals, and display preferences
+- **Process Control**: Start/stop monitoring processes with automatic restart capabilities
+
+### TP/SL Hit Monitoring
+
+- **Automated Hit Detection**: Real-time monitoring of take-profit and stop-loss levels using MT5 ticks
+- **Database Integration**: Stores hit records with timestamps and price data
+- **Watch Mode Support**: Continuous polling for new hits with configurable intervals
+- **Performance Optimized**: Efficient tick fetching with server offset handling
+
 ### Data Persistence
 
 - **SQLite Database**: Automatic storage of detected setups with deduplication
@@ -82,8 +104,11 @@ A sophisticated Python application that analyzes MetaTrader 5 (MT5) symbols to i
 
 ### Python Packages
 
-- `MetaTrader5` (via pip install MetaTrader5)
-- `watchdog` (optional, for file watching - pip install watchdog)
+- `MetaTrader5` (MT5 integration)
+- `matplotlib` (GUI charts and visualization)
+- `numpy` (numerical computations)
+- `watchdog` (optional, for file watching)
+- `pika` (message queuing support)
 
 ### System Requirements
 
@@ -96,11 +121,15 @@ A sophisticated Python application that analyzes MetaTrader 5 (MT5) symbols to i
 1. **Clone or Download** the repository to your local machine
 2. **Install Python Dependencies**:
    ```bash
-   pip install MetaTrader5
-   pip install watchdog  # Optional for advanced watching
+   pip install -r requirements.txt
+   ```
+   Or install individually:
+   ```bash
+   pip install MetaTrader5 matplotlib numpy watchdog pika
    ```
 3. **Ensure MT5 Terminal** is installed and running
 4. **Configure MT5** with desired symbols in MarketWatch
+5. **For GUI**: Ensure Tkinter is available (usually included with Python)
 
 ## Quick Start
 
@@ -124,7 +153,41 @@ EURUSD | Buy @ 1.0850 | SL 1.0820 | TP 1.0920 | RRR 2.33 | score 3.2
   -> Strength 4H/1D/1W: 2.1/1.8/0.9; ATR: 15.2 pips (1.40%); S/R: S1=1.0820, R1=1.0920 near support; Timelapse: D1 Close up 0.0032; Spread: 0.08% (Excellent)
 ```
 
-## Usage
+## GUI Interface
+
+### Launching the GUI
+
+**Windows (Recommended)**:
+```batch
+Run_Monitors.bat
+```
+
+**Cross-platform**:
+```bash
+python run_monitor_gui.pyw
+```
+
+**Direct Python**:
+```bash
+python monitor_gui.py
+```
+
+### GUI Features
+
+- **Monitors Tab**: Control setup detection and hit monitoring with start/stop buttons
+- **DB Results Tab**: View detected setups and hits with filtering by time range
+- **PnL Tab**: Analyze trading performance with charts for Forex, Crypto, and Indices
+- **Settings**: Configure exclude symbols, minimum proximity SL, and auto-refresh intervals
+
+### GUI Workflow
+
+1. Launch the GUI application
+2. Configure exclude symbols and settings in the Monitors tab
+3. Click "Start" buttons for both timelapse and hits monitoring
+4. Switch to DB Results tab to view detected setups and hits
+5. Use PnL tab for performance analysis with visual charts
+
+## CLI Tools
 
 ### Command Line Interface
 
@@ -151,6 +214,26 @@ python timelapse_setups.py [OPTIONS]
 #### Output Control
 - `--brief`: Brief output without detailed explanations
 - `--debug`: Enable debug output with filtering diagnostics
+
+### TP/SL Hit Checker (`check_tp_sl_hits.py`)
+
+Monitor existing setups for take-profit and stop-loss hits:
+
+```bash
+python check_tp_sl_hits.py --since-hours 24
+python check_tp_sl_hits.py --ids 1,2,3 --verbose
+python check_tp_sl_hits.py --symbols EURUSD,GBPUSD --watch --interval 30
+```
+
+#### Hit Checker Options
+- `--since-hours HOURS`: Check setups from last N hours (default: all)
+- `--ids IDS`: Comma-separated setup IDs to check
+- `--symbols SYMBOLS`: Filter by specific symbols
+- `--max-mins MINS`: Maximum history to scan (default: 1440 minutes)
+- `--watch`: Run continuously with polling
+- `--interval SEC`: Polling interval for watch mode (default: 60)
+- `--dry-run`: Test without saving to database
+- `--verbose`: Detailed output with timing information
 
 ## Configuration
 
@@ -224,25 +307,38 @@ python -m unittest tests.test_timelapse_setups -v
 
 ### Core Components
 
-1. **MT5 Integration Layer**
-   - Connection management and symbol selection
-   - Rate data fetching with caching
-   - Tick history backfill for Bid/Ask
+1. **MT5 Integration Layer** (`monitor/mt5_client.py`)
+   - Connection management and symbol resolution
+   - Rate and tick data fetching with caching
+   - Server offset handling for accurate timestamps
+   - Bid/Ask spread analysis
 
-2. **Analysis Engine**
-   - Strength calculation across timeframes
-   - Pivot point computation
-   - Setup scoring and filtering
+2. **Analysis Engine** (`timelapse_setups.py`)
+   - Multi-timeframe strength calculation
+   - Pivot point support/resistance levels
+   - ATR-based volatility assessment
+   - Setup scoring and risk-reward validation
 
-3. **Data Persistence Layer**
+3. **Hit Monitoring Engine** (`check_tp_sl_hits.py`)
+   - Real-time TP/SL detection using tick data
+   - Performance-optimized tick range fetching
+   - Hit deduplication and timestamp validation
+
+4. **Data Persistence Layer** (`monitor/db.py`)
    - SQLite database operations
-   - Setup deduplication
-   - Result serialization
+   - Setup and hit record management
+   - Schema migration and backup support
 
-4. **Operational Modes**
-   - Single-run processing
-   - Continuous watching with polling
-   - Symbol filtering and exclusion
+5. **GUI Application** (`monitor_gui.py`)
+   - Tkinter-based interface with matplotlib charts
+   - Process management for CLI tools
+   - Database visualization and PnL analytics
+   - Settings persistence and user preferences
+
+6. **Configuration Management** (`monitor/config.py`)
+   - Centralized settings and path management
+   - Database path resolution
+   - Environment variable handling
 
 ### Data Flow
 
@@ -281,6 +377,18 @@ python -m unittest tests.test_timelapse_setups -v
 - Increase polling interval in watch mode
 - Check MT5 terminal resource usage
 
+#### GUI Issues
+- **Matplotlib not available**: Install matplotlib (`pip install matplotlib`)
+- **Tkinter not available**: Ensure Python installation includes Tkinter (usually included by default)
+- **GUI won't start**: Try running `python monitor_gui.py` directly to see error messages
+- **Charts not rendering**: Check matplotlib backend compatibility
+- **Process control not working**: Ensure subprocess permissions allow process management
+
+#### Hit Checker Issues
+- **No hits detected**: Verify MT5 tick history availability for monitored symbols
+- **Server offset errors**: Check MT5 terminal time synchronization
+- **Database connection errors**: Ensure write permissions to database file location
+
 ### Debug Mode
 
 Enable debug output for detailed information:
@@ -311,6 +419,8 @@ This provides:
 - Add type hints for new functions
 - Include docstrings for public APIs
 - Maintain test coverage above 90%
+- Use the `monitor/` package for shared functionality
+- Keep GUI code separate from CLI logic
 
 ### Testing Guidelines
 

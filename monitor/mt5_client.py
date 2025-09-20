@@ -336,24 +336,44 @@ def earliest_hit_from_ticks(
         return None
     for i in range(n):
         tk = ticks[i]
-        try:
-            bid = getattr(tk, 'bid', None)
-            ask = getattr(tk, 'ask', None)
-        except Exception:
-            bid = tk.get('bid') if isinstance(tk, dict) else None
-            ask = tk.get('ask') if isinstance(tk, dict) else None
+        bid = getattr(tk, 'bid', None)
+        ask = getattr(tk, 'ask', None)
+        if bid is None:
+            try:
+                bid = tk['bid']  # type: ignore[index]
+            except Exception:
+                if isinstance(tk, dict):
+                    bid = tk.get('bid')
+        if ask is None:
+            try:
+                ask = tk['ask']  # type: ignore[index]
+            except Exception:
+                if isinstance(tk, dict):
+                    ask = tk.get('ask')
         if bid is None and ask is None:
             continue
-        try:
-            tms = getattr(tk, 'time_msc', None)
-            if tms is None:
-                tms = tk['time_msc'] if isinstance(tk, dict) else None
-            if tms is not None:
-                dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
-            else:
-                tse = getattr(tk, 'time') if hasattr(tk, 'time') else tk['time']
-                dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
-        except Exception:
+        tms = getattr(tk, 'time_msc', None)
+        if tms is None:
+            try:
+                tms = tk['time_msc']  # type: ignore[index]
+            except Exception:
+                if isinstance(tk, dict):
+                    tms = tk.get('time_msc')
+        dt_raw = None
+        if tms is not None:
+            dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
+        else:
+            tse = getattr(tk, 'time', None)
+            if tse is None:
+                try:
+                    tse = tk['time']  # type: ignore[index]
+                except Exception:
+                    if isinstance(tk, dict):
+                        tse = tk.get('time')
+            if tse is None:
+                continue
+            dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
+        if dt_raw is None:
             continue
         dt_utc = dt_raw - timedelta(hours=server_offset_hours)
         if direction.lower() == 'buy':

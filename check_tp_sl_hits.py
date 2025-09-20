@@ -30,13 +30,14 @@ from time import perf_counter
 import os
 import sys
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 try:
     import sqlite3  # type: ignore
 except Exception:
     sqlite3 = None  # type: ignore
 
+from monitor.domain import Hit, TickFetchStats
 from monitor.config import db_path_str
 from monitor.db import (
     backfill_hit_columns_sqlite,
@@ -85,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         "--max-mins",
         type=int,
         default=24 * 60,
-        help="Safety limit: max minutes of history to scan (default 1440)",
+        help="Maximum minutes per fetch chunk when scanning history (default 1440)",
     )
     parser.add_argument(
         "--page",
@@ -162,6 +163,73 @@ def _parse_symbols(symbols_arg: Optional[str]) -> Optional[List[str]]:
         return None
     return [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
+
+
+
+def scan_for_hit_with_chunks(
+    symbol: str,
+    direction: str,
+    sl: float,
+    tp: float,
+    offset_hours: int,
+    start_utc: datetime,
+    end_utc: datetime,
+    chunk_minutes: Optional[int],
+    trace: bool = False,
+) -> Tuple[Optional[Hit], TickFetchStats, int]:
+    """Fetch ticks in bounded chunks until a hit is found or the range is exhausted."""
+    if start_utc >= end_utc:
+        return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False), 0
+    chunk_span = 0 if chunk_minutes is None else max(0, int(chunk_minutes))
+    chunk_count = 0
+    total_ticks = 0
+    total_pages = 0
+    total_fetch_s = 0.0
+    total_scan_s = 0.0
+    hit: Optional[Hit] = None
+    chunk_start = start_utc
+    t0 = perf_counter()
+    while chunk_start < end_utc and hit is None:
+        chunk_count += 1
+        if chunk_span <= 0:
+            chunk_end = end_utc
+        else:
+            chunk_end = min(end_utc, chunk_start + timedelta(minutes=chunk_span))
+        if chunk_end <= chunk_start:
+            break
+        if trace:
+            print(
+                f"    [chunk] #{chunk_count} UTC {chunk_start.isoformat(timespec='seconds')} -> {chunk_end.isoformat(timespec='seconds')}"
+            )
+        fetch_start = perf_counter()
+        ticks, stats = ticks_range_all(
+            symbol,
+            to_server_naive(chunk_start, offset_hours),
+            to_server_naive(chunk_end, offset_hours),
+            trace=trace,
+        )
+        fetch_elapsed = perf_counter() - fetch_start
+        total_fetch_s += fetch_elapsed
+        total_ticks += stats.total_ticks
+        total_pages += stats.pages
+        scan_start = perf_counter()
+        candidate = earliest_hit_from_ticks(ticks, direction, sl, tp, offset_hours)
+        total_scan_s += perf_counter() - scan_start
+        if candidate is not None:
+            hit = candidate
+            break
+        chunk_start = chunk_end
+    elapsed = perf_counter() - t0
+    if elapsed == 0.0:
+        elapsed = total_fetch_s + total_scan_s
+    stats_out = TickFetchStats(
+        pages=total_pages,
+        total_ticks=total_ticks,
+        elapsed_s=elapsed,
+        fetch_s=total_fetch_s,
+        early_stop=hit is not None,
+    )
+    return hit, stats_out, chunk_count
 
 def run_once(args: argparse.Namespace) -> None:
     ids = _parse_ids(getattr(args, "ids", None))
@@ -251,43 +319,34 @@ def run_once(args: argparse.Namespace) -> None:
                     print(f"[offset] {sym_name} server offset {sign}{abs(offset_h)}h")
 
                 start_utc = setup.as_of_utc
-                if (now_utc - start_utc) > timedelta(minutes=args.max_mins):
-                    if args.verbose:
-                        full_mins = (now_utc - start_utc).total_seconds() / 60.0
-                        print(
-                            f"[clip] #{setup.id} full window {full_mins:.1f} mins exceeds --max-mins={args.max_mins}; clipping"
-                        )
-                    start_utc = now_utc - timedelta(minutes=args.max_mins)
-
+                end_utc = now_utc
                 start_server = to_server_naive(start_utc, offset_h)
-                end_server = to_server_naive(now_utc, offset_h)
+                end_server = to_server_naive(end_utc, offset_h)
                 if args.verbose:
                     print(
                         f"[window] #{setup.id} {setup.symbol} {setup.direction} | "
-                        f"UTC {start_utc.isoformat(timespec='seconds')} -> {now_utc.isoformat(timespec='seconds')} | "
+                        f"UTC {start_utc.isoformat(timespec='seconds')} -> {end_utc.isoformat(timespec='seconds')} | "
                         f"server-naive {start_server.isoformat(sep=' ', timespec='seconds')} -> {end_server.isoformat(sep=' ', timespec='seconds')}"
                     )
 
-                fetch_start = perf_counter()
-                ticks, stats = ticks_range_all(
+                chunk_minutes = args.max_mins if args.max_mins and args.max_mins > 0 else None
+                hit, stats, chunk_count = scan_for_hit_with_chunks(
                     sym_name,
-                    start_server,
-                    end_server,
-                    trace=(args.verbose and args.trace_pages),
-                )
-                fetch_elapsed = perf_counter() - fetch_start
-                scan_start = perf_counter()
-                hit = earliest_hit_from_ticks(
-                    ticks,
                     setup.direction,
                     setup.sl,
                     setup.tp,
                     offset_h,
+                    start_utc,
+                    end_utc,
+                    chunk_minutes,
+                    trace=(args.verbose and args.trace_pages),
                 )
-                scan_elapsed = perf_counter() - scan_start
+                if args.verbose and chunk_count > 1 and chunk_minutes:
+                    total_minutes = (end_utc - start_utc).total_seconds() / 60.0
+                    print(
+                        f"[chunks] #{setup.id} scanned {chunk_count} chunk(s) (max {chunk_minutes} mins each, total {total_minutes:.1f} mins)"
+                    )
 
-                stats.fetch_s = fetch_elapsed
-                stats.elapsed_s = fetch_elapsed + scan_elapsed
                 thr = (stats.total_ticks / stats.elapsed_s) if stats.elapsed_s > 0 else 0.0
                 avg_per_page = (stats.total_ticks / stats.pages) if stats.pages > 0 else 0.0
                 t_fetch_ms = stats.fetch_s * 1000.0

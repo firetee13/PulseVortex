@@ -721,28 +721,15 @@ def run_once(args) -> None:
             return
         mt5_init_s = perf_counter() - t2
         try:
-            # Resolve symbols and infer server offset once (from first resolved)
-            # Different brokers in same terminal should share offset.
-            first_sym_name: Optional[str] = None
-            t3 = perf_counter()
-            for s in setups:
-                sym_name = resolve_symbol(s.symbol)
-                if sym_name is None:
-                    print(f"Symbol '{s.symbol}' not found/selected; skipping setup #{s.id}.")
-                    continue
-                first_sym_name = sym_name
-                break
-            mt5_resolve_first_s = perf_counter() - t3
-            if first_sym_name is None:
-                print("None of the symbols could be resolved in MT5.")
-                return
-            t4 = perf_counter()
-            offset_h = get_server_offset_hours(first_sym_name)
-            mt5_offset_s = perf_counter() - t4
-            if args.verbose:
-                sign = '+' if offset_h >= 0 else '-'
-                print(f"Detected server offset: {sign}{abs(offset_h)}h")
-                print(f"[timing] db_conn={db_conn_s*1000:.1f}ms db_load={db_load_s*1000:.1f}ms mt5_init={mt5_init_s*1000:.1f}ms resolve_first={mt5_resolve_first_s*1000:.1f}ms detect_offset={mt5_offset_s*1000:.1f}ms")
+            # NOTE: Previously we inferred server offset once from the first
+            # resolved symbol and reused it for all setups. On some terminals,
+            # different symbols can be served by gateways with different
+            # offsets, which causes us to fetch the wrong tick windows and may
+            # yield spurious TP/SL hits. We now resolve the offset per symbol
+            # inside the processing loop below. Keep timing variables for
+            # consistent verbose output.
+            mt5_resolve_first_s = 0.0
+            mt5_offset_s = 0.0
 
             now_utc = datetime.now(UTC)
 
@@ -779,6 +766,14 @@ def run_once(args) -> None:
                     continue
                 if args.verbose and not cache_used and sym_name != setup.symbol:
                     print(f"[resolve] '{setup.symbol}' -> '{sym_name}'")
+
+                # Infer server offset PER SYMBOL
+                t_off = perf_counter()
+                offset_h = get_server_offset_hours(sym_name)
+                mt5_offset_s = perf_counter() - t_off
+                if args.verbose:
+                    sign = '+' if offset_h >= 0 else '-'
+                    print(f"[offset] {sym_name} server offset {sign}{abs(offset_h)}h")
 
                 # Limit scan window by --max-mins
                 start_utc = setup.as_of_utc

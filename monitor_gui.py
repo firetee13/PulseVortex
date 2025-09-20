@@ -1499,7 +1499,9 @@ class App(tk.Tk):
 
         # Crypto keywords/tickers
         crypto_tickers = [
+            # Common crypto tickers (include broker aliases)
             'BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOGE', 'BNB', 'DOT', 'AVAX', 'LINK',
+            'LNK',  # alias used by some brokers for Chainlink (LINK)
             'LTC', 'BCH', 'XLM', 'TRX', 'ETC', 'UNI', 'ATOM', 'APT', 'SHIB', 'PEPE'
         ]
         if any(t in s for t in crypto_tickers):

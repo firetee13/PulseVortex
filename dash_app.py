@@ -43,6 +43,34 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Utility function to load settings from JSON file
+def load_gui_settings():
+    """Load GUI settings from monitor_gui_settings.json file."""
+    settings_file = os.path.join(HERE, "monitor_gui_settings.json")
+    default_settings = {
+        "exclude_symbols": "",
+        "min_prox_sl": "0.25",
+        "since_hours": 168,
+        "interval": 20
+    }
+    
+    try:
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                settings = json.load(f)
+                # Merge with defaults to ensure all keys are present
+                for key, value in default_settings.items():
+                    if key not in settings:
+                        settings[key] = value
+                return settings
+    except Exception:
+        pass
+    
+    return default_settings
+
+# Load settings at startup
+GUI_SETTINGS = load_gui_settings()
+
 # Ensure controllers exist and attach named buffers
 if create_controller is not None and logs is not None:
     try:
@@ -83,16 +111,16 @@ def monitors_layout():
                     ),
                     html.Hr(),
                     dbc.Label("Exclude (comma):"),
-                    dbc.Input(id="input-exclude", placeholder="GLMUSD,BCHUSD", value="", type="text"),
+                    dbc.Input(id="input-exclude", placeholder="GLMUSD,BCHUSD", value=GUI_SETTINGS["exclude_symbols"], type="text"),
                     html.Br(),
                     dbc.Label("Min Prox SL (fraction 0.0-0.49):"),
-                    dbc.Input(id="input-min-prox-sl", placeholder="0.25", value="0.25", type="number", step="0.01"),
+                    dbc.Input(id="input-min-prox-sl", placeholder="0.25", value=GUI_SETTINGS["min_prox_sl"], type="number", step="0.01"),
                     html.Br(),
                     dbc.Label("Auto-refresh interval (s):"),
-                    dbc.Input(id="input-interval-sec", placeholder="5", value=5, type="number", step="1", min=1),
+                    dbc.Input(id="input-interval-sec", placeholder="5", value=GUI_SETTINGS["interval"], type="number", step="1", min=1),
                     html.Br(),
                     dbc.Label("Since (hours) for DB / PnL:"),
-                    dbc.Input(id="input-since-hours", placeholder="168", value=168, type="number", step="1", min=1),
+                    dbc.Input(id="input-since-hours", placeholder="168", value=GUI_SETTINGS["since_hours"], type="number", step="1", min=1),
                     html.Br(),
                     dbc.Button("Clear Logs", id="btn-clear-logs", color="danger"),
                 ],
@@ -118,6 +146,7 @@ def db_layout():
         {"name": "Inserted UTC+3", "id": "entry_utc3"},
         {"name": "Hit Time UTC+3", "id": "hit_time_utc3"},
         {"name": "Hit", "id": "hit"},
+        {"name": "Hit Price", "id": "hit_price"},
         {"name": "TP", "id": "tp"},
         {"name": "SL", "id": "sl"},
         {"name": "Entry Price", "id": "entry_price"},
@@ -126,13 +155,14 @@ def db_layout():
         [
             dbc.Row(
                 [
-                    dbc.Col(dbc.Button("Export Visible CSV", id="btn-export-csv", color="primary", size="sm"), width="auto"),
-                    dbc.Col(dbc.Button("Export Selected CSV", id="btn-export-selected-csv", color="secondary", size="sm"), width="auto"),
-                    dbc.Col(dcc.Download(id="download-db-csv"), width="auto"),
+                    dbc.Col(dbc.Button("Running", id="btn-filter-running", color="info", size="sm"), width="auto"),
+                    dbc.Col(dbc.Button("SL Hit", id="btn-filter-sl", color="danger", size="sm"), width="auto"),
+                    dbc.Col(dbc.Button("TP Hit", id="btn-filter-tp", color="success", size="sm"), width="auto"),
+                    dbc.Col(html.Div(id="filter-status"), width="auto"),
                 ],
                 align="center",
+                className="mb-2",
             ),
-            html.Br(),
             dash_table.DataTable(
                 id="db-table",
                 columns=columns,
@@ -142,7 +172,7 @@ def db_layout():
                 sort_action="native",
                 filter_action="native",
                 filter_options={"placeholder_text": "Filter..."},
-                style_table={"overflowX": "auto", "maxHeight": "500px"},
+                style_table={"overflowX": "auto", "maxHeight": "300px"},
                 fixed_rows={"headers": True},
                 style_cell={"textAlign": "left", "minWidth": "80px", "width": "120px", "maxWidth": "240px", "whiteSpace": "normal"},
                 css=[
@@ -154,28 +184,38 @@ def db_layout():
                     {"if": {"state": "active"}, "backgroundColor": "inherit", "outline": "none"},
                     {"if": {"state": "selected"}, "backgroundColor": "inherit", "outline": "none"},
                     {
-                        "if": {"filter_query": '{hit} = "SL"'},
+                        "if": {"row_index": "odd"},
+                        "backgroundColor": "rgb(248, 248, 248)"
+                    },
+                    {
+                        "if": {
+                            "filter_query": "{hit} = 'SL'",
+                        },
                         "backgroundColor": "#f8d7da",
                     },
                     {
-                        "if": {"filter_query": '{hit} = "TP"'},
+                        "if": {
+                            "filter_query": "{hit} = 'TP'",
+                        },
                         "backgroundColor": "#d4edda",
                     },
                 ],
             ),
             html.Br(),
-            dcc.Graph(id="chart-ohlc"),
-        ]
+            dcc.Graph(id="chart-ohlc", style={"height": "65vh"}),
+        ],
+        style={"height": "85vh"}
     )
 
 
 def pnl_layout():
     return html.Div(
         [
-            dcc.Graph(id="pnl-forex"),
-            dcc.Graph(id="pnl-crypto"),
-            dcc.Graph(id="pnl-indices"),
-        ]
+            dcc.Graph(id="pnl-forex", style={"height": "33.33vh"}),
+            dcc.Graph(id="pnl-crypto", style={"height": "33.33vh"}),
+            dcc.Graph(id="pnl-indices", style={"height": "33.33vh"}),
+        ],
+        style={"height": "90vh"}
     )
 
 
@@ -188,7 +228,7 @@ app.layout = dbc.Container(
         dbc.Tabs(
             [
                 dbc.Tab(label="Monitors", tab_id="tab-monitors"),
-                dbc.Tab(label="DB Results", tab_id="tab-db"),
+                dbc.Tab(label="Results", tab_id="tab-db"),
                 dbc.Tab(label="PnL", tab_id="tab-pnl"),
             ],
             id="tabs",
@@ -231,6 +271,38 @@ def set_interval_sec(val):
         return int(v * 1000)
     except Exception:
         return 5000
+
+
+# --- Save settings to JSON file ---
+@app.callback(
+    Output("status-msg", "children", allow_duplicate=True),
+    [Input("input-exclude", "value"),
+     Input("input-min-prox-sl", "value"),
+     Input("input-interval-sec", "value"),
+     Input("input-since-hours", "value")],
+    prevent_initial_call=True
+)
+def save_settings_to_file(exclude, min_prox_sl, interval, since_hours):
+    """Save GUI settings to monitor_gui_settings.json file."""
+    try:
+        settings_file = os.path.join(HERE, "monitor_gui_settings.json")
+        settings = {
+            "exclude_symbols": exclude or "",
+            "min_prox_sl": str(min_prox_sl) if min_prox_sl is not None else "0.25",
+            "since_hours": int(since_hours) if since_hours is not None else 168,
+            "interval": int(interval) if interval is not None else 20
+        }
+        
+        with open(settings_file, 'w') as f:
+            json.dump(settings, f, indent=2)
+            
+        # Update the global settings
+        global GUI_SETTINGS
+        GUI_SETTINGS = settings
+    except Exception:
+        pass  # Fail silently to avoid disrupting the UI
+    
+    return ""
 
 
 @app.callback(Output("since-hours-store", "data"), [Input("input-since-hours", "value")], prevent_initial_call=True)
@@ -304,10 +376,22 @@ def toggle_timelapse(n_clicks, exclude, min_prox_sl):
             cmd += ["--min-prox-sl", mps]
         ctrl.cmd = cmd
         if not ctrl.is_running():
+            # Log the start event with timestamp
+            if logs is not None:
+                try:
+                    logs.append("timelapse", f"UI: Starting process with command: {' '.join(cmd)}\n")
+                except Exception:
+                    pass
             # Immediate feedback
             ctrl.start()
             return "Stop Timelapse", "", "Starting..."
         else:
+            # Log the stop event with timestamp
+            if logs is not None:
+                try:
+                    logs.append("timelapse", "UI: Stopping process\n")
+                except Exception:
+                    pass
             ctrl.stop()
             return "Start Timelapse", "", "Stopping..."
     except Exception as e:
@@ -358,10 +442,22 @@ def autostart_monitors(n):
             cmd = [py, "-u", "timelapse_setups.py", "--watch", "--min-prox-sl", "0.25"]
             # No default exclude; leave empty
             ctrl_tl.cmd = cmd
+            # Log the auto-start event
+            if logs is not None:
+                try:
+                    logs.append("timelapse", "UI: Auto-starting timelapse process\n")
+                except Exception:
+                    pass
             ctrl_tl.start()
         # Hits: start if not running (command already configured in create_controller)
         ctrl_hits = get_controller("hits")
         if ctrl_hits is not None and not ctrl_hits.is_running():
+            # Log the auto-start event
+            if logs is not None:
+                try:
+                    logs.append("hits", "UI: Auto-starting hits process\n")
+                except Exception:
+                    pass
             ctrl_hits.start()
         return ""
     except Exception as e:
@@ -386,24 +482,50 @@ def toggle_hits(n_clicks):
         if ctrl is None:
             return "Start Hits", dbc.Alert("Hits controller not configured", color="warning"), no_update
         if not ctrl.is_running():
+            # Log the start event with timestamp
+            if logs is not None:
+                try:
+                    logs.append("hits", "UI: Starting process\n")
+                except Exception:
+                    pass
             ctrl.start()
             return "Stop Hits", "", "Starting..."
         else:
+            # Log the stop event with timestamp
+            if logs is not None:
+                try:
+                    logs.append("hits", "UI: Stopping process\n")
+                except Exception:
+                    pass
             ctrl.stop()
             return "Start Hits", "", "Stopping..."
     except Exception as e:
         return "Start Hits", dbc.Alert(f"Error toggling hits: {e}", color="danger"), no_update
 
 
-# --- DB refresh callback (uses since-hours) ---
+# --- DB refresh and filter callback (uses since-hours) ---
 @app.callback(
-    Output("db-table", "data"),
-    [Input("interval-refresh", "n_intervals")],
-    [State("since-hours-store", "data"), State("tabs", "active_tab")],
+    [Output("db-table", "data"),
+     Output("btn-filter-running", "outline"),
+     Output("btn-filter-sl", "outline"),
+     Output("btn-filter-tp", "outline")],
+    [Input("interval-refresh", "n_intervals"),
+     Input("btn-filter-running", "n_clicks"),
+     Input("btn-filter-sl", "n_clicks"),
+     Input("btn-filter-tp", "n_clicks")],
+    [State("since-hours-store", "data"), 
+     State("tabs", "active_tab"),
+     State("btn-filter-running", "n_clicks"),
+     State("btn-filter-sl", "n_clicks"),
+     State("btn-filter-tp", "n_clicks")],
 )
-def refresh_db(n, since_hours, active_tab):
+def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, since_hours, active_tab, running_state, sl_state, tp_state):
+    # Handle tab visibility
     if active_tab not in (None, "tab-db"):
-        return no_update
+        return [no_update, True, True, True]
+    
+    # Get data from database
+    data = []
     try:
         if web_db is not None:
             hours = int(since_hours) if since_hours is not None else 168
@@ -420,14 +542,87 @@ def refresh_db(n, since_hours, active_tab):
                 except Exception:
                     copy["_meta"] = ""
                 sanitized.append(copy)
-            return sanitized
+            data = sanitized
     except Exception as e:
         # Surface a compact status alert (do not crash UI)
-        return []  # status-msg will display details from other callbacks as needed
-    return []
+        data = []  # status-msg will display details from other callbacks as needed
+    
+    # Add styling information to rows
+    styled_data = []
+    
+    for row in data:
+        styled_row = row.copy()
+        # Use the 'hit' column from the database to determine styling
+        hit_value = row.get("hit", "")  # This comes from the timelapse_hits table
+        
+        if hit_value == "SL":
+            # SL hit - red background
+            styled_row["row_style"] = "sl_hit"
+        elif hit_value == "TP":
+            # TP hit - green background
+            styled_row["row_style"] = "tp_hit"
+        else:
+            # Running or other - default styling
+            styled_row["row_style"] = "running"
+            
+        styled_data.append(styled_row)
+    
+    # Handle filtering
+    ctx = callback_context
+    if ctx.triggered:
+        button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        
+        # Get the current state of each button (number of clicks)
+        running_clicks = running_clicks or 0
+        sl_clicks = sl_clicks or 0
+        tp_clicks = tp_clicks or 0
+        
+        # Check if the clicked button was already active (odd number of clicks means active)
+        if button_id == "btn-filter-running" and running_clicks % 2 == 1:
+            # Filter for running entries (no hit value)
+            filtered_data = [row for row in styled_data if row.get("row_style") == "running"]
+            return [filtered_data, False, True, True]  # Running active
+        elif button_id == "btn-filter-sl" and sl_clicks % 2 == 1:
+            # Filter for SL hits
+            filtered_data = [row for row in styled_data if row.get("row_style") == "sl_hit"]
+            return [filtered_data, True, False, True]  # SL active
+        elif button_id == "btn-filter-tp" and tp_clicks % 2 == 1:
+            # Filter for TP hits
+            filtered_data = [row for row in styled_data if row.get("row_style") == "tp_hit"]
+            return [filtered_data, True, True, False]  # TP active
+    
+    # Default - show all entries, all buttons outlined
+    return [styled_data, True, True, True]
+    
+    # Handle filtering
+    ctx = callback_context
+    if ctx.triggered:
+        button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        
+        # Get the current state of each button (number of clicks)
+        running_clicks = running_clicks or 0
+        sl_clicks = sl_clicks or 0
+        tp_clicks = tp_clicks or 0
+        
+        # Check if the clicked button was already active (odd number of clicks means active)
+        if button_id == "btn-filter-running" and running_clicks % 2 == 1:
+            # Filter for running entries (no hit value)
+            filtered_data = [row for row in styled_data if row.get("row_style") == "running"]
+            return [filtered_data, False, True, True]  # Running active
+        elif button_id == "btn-filter-sl" and sl_clicks % 2 == 1:
+            # Filter for SL hits
+            filtered_data = [row for row in styled_data if row.get("row_style") == "sl_hit"]
+            return [filtered_data, True, False, True]  # SL active
+        elif button_id == "btn-filter-tp" and tp_clicks % 2 == 1:
+            # Filter for TP hits
+            filtered_data = [row for row in styled_data if row.get("row_style") == "tp_hit"]
+            return [filtered_data, True, True, False]  # TP active
+    
+    # Default - show all entries, all buttons outlined
+    return [styled_data, True, True, True]
 
 
-# --- Logs refresh and Clear Logs ---
+# --- OHLC chart for selected DB row ---
 @app.callback(
     [Output("log-tl", "children"), Output("log-hits", "children")],
     [Input("interval-refresh", "n_intervals"), Input("btn-clear-logs", "n_clicks")],
@@ -440,6 +635,15 @@ def refresh_logs(n_intervals, clear_clicks, active_tab):
     triggered_id = triggered[0]["prop_id"].split(".")[0] if triggered else ""
     try:
         if logs is not None and triggered_id == "btn-clear-logs":
+            # Log the clear event with timestamp
+            try:
+                logs.append("timelapse", "UI: Logs cleared\n")
+            except Exception:
+                pass
+            try:
+                logs.append("hits", "UI: Logs cleared\n")
+            except Exception:
+                pass
             try:
                 logs.clear("timelapse")
             except Exception:

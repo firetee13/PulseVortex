@@ -183,7 +183,7 @@ class InsertResultsDbTests(unittest.TestCase):
 
 
 class SlDistanceFilterTests(unittest.TestCase):
-    @patch('timelapse_setups._get_tick_volume_last_5_bars', return_value=True)
+    @patch('timelapse_setups._get_tick_volume_last_2_bars', return_value=True)
     def test_sell_uses_ask_for_sl_distance(self, mock_volume):
         # Reproduce SA40-like case where using Bid would pass, but Ask should fail
         now = datetime.now(UTC)
@@ -235,39 +235,39 @@ class VolumeFilterTests(unittest.TestCase):
         tls._MT5_IMPORTED = self.original_imported
         tls._MT5_READY = self.original_ready
 
-    def test_get_tick_volume_last_5_bars_high_volume(self):
+    def test_get_tick_volume_last_2_bars_high_volume(self):
         now = datetime.now(UTC)
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where each has high tick volume (>= 10)
         now_ts = int(time.time())
         this_minute_start = (now_ts // 60) * 60
-        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
+        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
         high_volume_m1_rates = [
             {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for t in target_opens
         ]
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = high_volume_m1_rates
         tls.mt5 = fake_mt5
 
-        volume_check = tls._get_tick_volume_last_5_bars('EURUSD')
+        volume_check = tls._get_tick_volume_last_2_bars('EURUSD')
         self.assertTrue(volume_check)
 
-    def test_get_tick_volume_last_5_bars_one_bar_low_volume(self):
+    def test_get_tick_volume_last_2_bars_one_bar_low_volume(self):
         now = datetime.now(UTC)
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where one bar has low tick volume (< 10)
         now_ts = int(time.time())
         this_minute_start = (now_ts // 60) * 60
-        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
+        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
         mixed_volume_m1_rates = [
-            {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for t in target_opens[:-1]
+            {'time': target_opens[0], 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15}
         ]
         mixed_volume_m1_rates.append({'time': target_opens[-1], 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = mixed_volume_m1_rates
         tls.mt5 = fake_mt5
 
-        volume_check = tls._get_tick_volume_last_5_bars('EURUSD')
+        volume_check = tls._get_tick_volume_last_2_bars('EURUSD')
         self.assertFalse(volume_check)
 
     def test_analyze_filters_low_volume_symbol(self):
@@ -278,9 +278,9 @@ class VolumeFilterTests(unittest.TestCase):
         # Simulate M1 bars where one bar has low tick volume (< 10)
         now_ts = int(time.time())
         this_minute_start = (now_ts // 60) * 60
-        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
+        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
         low_volume_m1_rates = [
-            {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15} for t in target_opens[:-1]
+            {'time': target_opens[0], 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 15}
         ]
         low_volume_m1_rates.append({'time': target_opens[-1], 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 5}) # Last bar has low volume
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = low_volume_m1_rates
@@ -312,8 +312,8 @@ class VolumeFilterTests(unittest.TestCase):
         results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, min_sl_pct=0.0, as_of_ts=now, debug=True)
 
         self.assertEqual(results, [])
-        self.assertIn('low_tick_volume_last_5_bars', reasons)
-        self.assertIn(sym, reasons['low_tick_volume_last_5_bars'])
+        self.assertIn('low_tick_volume_last_2_bars', reasons)
+        self.assertIn(sym, reasons['low_tick_volume_last_2_bars'])
 
     def test_analyze_passes_high_volume_symbol(self):
         now = datetime.now(UTC)
@@ -323,7 +323,7 @@ class VolumeFilterTests(unittest.TestCase):
         # Simulate M1 bars where each has high tick volume (>= 10)
         now_ts = int(time.time())
         this_minute_start = (now_ts // 60) * 60
-        target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
+        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
         high_volume_m1_rates = [
             {'time': t, 'close': 1.0, 'high': 1.1, 'low': 0.9, 'tick_volume': 10} for t in target_opens
         ]
@@ -357,7 +357,75 @@ class VolumeFilterTests(unittest.TestCase):
 
         self.assertGreater(len(results), 0)
         self.assertEqual(results[0]['symbol'], sym)
-        self.assertNotIn('low_tick_volume_last_5_bars', reasons)
+        self.assertNotIn('low_tick_volume_last_2_bars', reasons)
+
+
+class UtilityFunctionTests(unittest.TestCase):
+    def test_canonicalize_key_handles_none(self):
+        result = tls.canonicalize_key(None)
+        self.assertEqual(result, "")
+
+    def test_canonicalize_key_normalizes_case(self):
+        result = tls.canonicalize_key("Bid")
+        self.assertEqual(result, "bid")
+
+    def test_canonicalize_key_normalizes_percent_sign(self):
+        result = tls.canonicalize_key("ATR (%) D1")
+        self.assertEqual(result, "atr percent d1")
+
+    def test_canonicalize_key_handles_punctuation(self):
+        result = tls.canonicalize_key("Strength 4H")
+        self.assertEqual(result, "strength 4h")
+
+    def test_fnum_handles_none(self):
+        result = tls.fnum(None)
+        self.assertIsNone(result)
+
+    def test_fnum_parses_float(self):
+        result = tls.fnum("1.2345")
+        self.assertEqual(result, 1.2345)
+
+    def test_fnum_parses_comma_decimal(self):
+        result = tls.fnum("1,2345")
+        self.assertEqual(result, 1.2345)
+
+    def test_fnum_handles_negative_numbers(self):
+        result = tls.fnum("(1.2345)")
+        self.assertEqual(result, -1.2345)
+
+    def test_normalize_spread_pct_handles_none(self):
+        result = tls.normalize_spread_pct(None)
+        self.assertIsNone(result)
+
+    def test_normalize_spread_pct_converts_small_fraction(self):
+        # Small fraction should be converted to percent
+        result = tls.normalize_spread_pct(0.0012)
+        self.assertEqual(result, 0.12)
+
+    def test_normalize_spread_pct_leaves_larger_values_as_is(self):
+        # Larger values should be left as-is
+        result = tls.normalize_spread_pct(0.12)
+        self.assertEqual(result, 0.12)
+
+    def test_spread_class_handles_none(self):
+        result = tls.spread_class(None)
+        self.assertEqual(result, "Unknown")
+
+    def test_spread_class_handles_excellent(self):
+        result = tls.spread_class(0.05)
+        self.assertEqual(result, "Excellent")
+
+    def test_spread_class_handles_good(self):
+        result = tls.spread_class(0.15)
+        self.assertEqual(result, "Good")
+
+    def test_spread_class_handles_acceptable(self):
+        result = tls.spread_class(0.25)
+        self.assertEqual(result, "Acceptable")
+
+    def test_spread_class_handles_avoid(self):
+        result = tls.spread_class(0.35)
+        self.assertEqual(result, "Avoid")
 
 
 if __name__ == '__main__':

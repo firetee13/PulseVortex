@@ -93,13 +93,18 @@ ORDER BY s.inserted_at DESC, s.symbol
             tp = row["tp"]
             sl = row["sl"]
             ep = row["entry_price"]
+            # Format hit_price for display
+            hit_price_val = row["hit_price"]
+            hit_price_display = _fmt_price(hit_price_val)
+            
             display = {
                 "id": sid,
                 "symbol": sym,
                 "direction": direction,
                 "entry_utc3": ent_s,
                 "hit_time_utc3": hit_time_utc3 or (str(hit_time) if hit_time else ""),
-                "hit": str(hit) if hit else "",
+                "hit": hit,  # Add the hit column to the main display data
+                "hit_price": hit_price_display,
                 "tp": _fmt_price(tp),
                 "sl": _fmt_price(sl),
                 "entry_price": _fmt_price(ep),
@@ -114,7 +119,7 @@ ORDER BY s.inserted_at DESC, s.symbol
                     "sl": float(sl) if sl is not None else None,
                     "hit_kind": (str(hit) if hit else None),
                     "hit_time_utc_str": (str(hit_time) if hit_time else None),
-                    "hit_price": float(row["hit_price"]) if row["hit_price"] is not None else None,
+                    "hit_price": float(hit_price_val) if hit_price_val is not None else None,
                 },
             }
             out.append(display)

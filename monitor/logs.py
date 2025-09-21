@@ -1,29 +1,65 @@
 #!/usr/bin/env python3
-"""In-memory log buffers for Dash UI
+"""In-memory log buffers for Dash UI with file persistence
 
 Provides thread-safe LogBuffer and registry helpers. Designed to be attached to ProcController.log_put
-to capture real-time stdout lines for display via web UI.
+to capture real-time stdout lines for display via web UI and file logging.
 """
 from __future__ import annotations
 
 import threading
+import os
+import time
 from collections import deque
 from typing import Dict, List, Tuple, Optional, Callable
+from datetime import datetime
 
 DEFAULT_MAX_LINES = 10000
 
+# Create logs directory if it doesn't exist
+LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+
 
 class LogBuffer:
-    def __init__(self, max_lines: int = DEFAULT_MAX_LINES) -> None:
+    def __init__(self, name: str, max_lines: int = DEFAULT_MAX_LINES) -> None:
+        self.name = name
         self._lock = threading.Lock()
         self._lines: deque[Tuple[int, str]] = deque(maxlen=max_lines)
         self._seq = 0
+        self._log_file = os.path.join(LOGS_DIR, f"{name}.log")
+        self._restore_from_file()
+
+    def _restore_from_file(self) -> None:
+        """Restore log contents from file on startup"""
+        try:
+            if os.path.exists(self._log_file):
+                with open(self._log_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        self._seq += 1
+                        # Store the line as-is (with timestamp) in the buffer
+                        self._lines.append((self._seq, line))
+        except Exception:
+            pass
+
+    def _append_to_file(self, line: str) -> str:
+        """Append a line to the log file with timestamp and return the timestamped line"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_line = f"[{timestamp}] {line}"
+            with open(self._log_file, 'a', encoding='utf-8') as f:
+                f.write(log_line)
+            return log_line
+        except Exception:
+            return line
 
     def append(self, line: str) -> int:
         """Append a line and return its sequence number."""
         with self._lock:
             self._seq += 1
-            self._lines.append((self._seq, line))
+            # Add timestamp to the line before storing in buffer and file
+            timestamped_line = self._append_to_file(line)
+            self._lines.append((self._seq, timestamped_line))
             return self._seq
 
     def tail_lines(self, n: int = 200) -> List[str]:
@@ -48,6 +84,11 @@ class LogBuffer:
         with self._lock:
             self._lines.clear()
             self._seq = 0
+            # Also clear the log file
+            try:
+                open(self._log_file, 'w').close()
+            except Exception:
+                pass
 
     def last_seq(self) -> int:
         with self._lock:
@@ -64,7 +105,7 @@ def get_buffer(name: str) -> LogBuffer:
     with _REG_LOCK:
         buf = _BUFFERS.get(name)
         if buf is None:
-            buf = LogBuffer()
+            buf = LogBuffer(name)
             _BUFFERS[name] = buf
         return buf
 

@@ -71,6 +71,12 @@ Applying settings:
 Status:
 - status-tl and status-hits show Starting.../Stopping... immediately on toggle, and switch to Running/Stopped shortly after, based on the actual process state.
 
+Logging:
+- Logs are saved to the `logs` directory with timestamps
+- Previous logs are restored when the application restarts
+- Log files: `logs/timelapse.log` and `logs/hits.log`
+- UI events (button presses, auto-starts, log clears) are also logged with timestamps
+
 
 ## DB Results tab
 
@@ -160,7 +166,15 @@ Performance
 Run tests:
 
 ```bash
+# Run all tests
+python run_tests.py
+
+# Run specific test modules
 python -m unittest tests.test_timelapse_setups -v
+python -m unittest tests.test_mt5_client -v
+python -m unittest tests.test_db -v
+python -m unittest tests.test_config -v
+python -m unittest tests.test_domain -v
 ```
 
 Code style:

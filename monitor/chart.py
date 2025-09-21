@@ -601,7 +601,7 @@ def pnl_category_figure(times: List[datetime], returns: List[float], cum: List[f
     if losses_x:
         fig.add_trace(go.Scatter(x=losses_x, y=losses_y, mode="markers", marker=dict(symbol="triangle-down", color="red", size=10), name="SL"))
 
-    fig.update_layout(title=title, xaxis_title="Time (UTC+3)", yaxis_title="PnL", legend=dict(orientation="h"))
+    fig.update_layout(title=title, xaxis_title="Time (UTC+3)", yaxis_title="PnL ($)", legend=dict(orientation="h"))
     return fig
 
 
@@ -609,29 +609,50 @@ def pnl_figures_from_series(series: Dict[str, Any]) -> Dict[str, go.Figure]:
     """
     Given a series dict (as returned by monitor.web_db.compute_pnl_series),
     split by category and return figures for forex/crypto/indices.
-    """
-    times = series.get("times", [])
-    norm_returns = series.get("norm_returns", [])
-    symbols = series.get("symbols", [])
-    notional_returns = series.get("notional_returns", [])
-    cum = series.get("cum", [])
-    avg = series.get("avg", [])
-    not_cum = series.get("not_cum", [])
-    not_avg = series.get("not_avg", [])
 
-    # split indices
-    idxs = {"forex": [], "crypto": [], "indices": []}
+    Important corrections:
+    - Use notional returns for plotting when available to match the "10k" title.
+    - Recompute cumulative/average per category; do NOT slice a global cumulative,
+      which produces incorrect category curves.
+    """
+    times: List[datetime] = series.get("times", [])
+    symbols: List[str] = series.get("symbols", [])
+    norm_returns: List[float] = series.get("norm_returns", [])
+    notional_returns: List[float] = series.get("notional_returns", [])
+
+    # Prefer notional returns (10k) when present and aligned; otherwise fall back to normalized/price returns
+    use_notional = len(notional_returns) == len(times) and len(times) > 0
+    base_returns: List[float] = notional_returns if use_notional else norm_returns
+
+    # Build indices per category
+    idxs: Dict[str, List[int]] = {"forex": [], "crypto": [], "indices": []}
     for i, s in enumerate(symbols):
         cls = _classify_symbol(s)
         if cls not in idxs:
             cls = "forex"
         idxs[cls].append(i)
 
-    def sel(idxs_list, seq):
-        return [seq[i] for i in idxs_list]
+    def build_category(cat: str, title: str) -> go.Figure:
+        cat_idxs = idxs.get(cat, [])
+        if not cat_idxs:
+            return pnl_category_figure([], [], [], [], [], title)
 
-    fx_fig = pnl_category_figure(sel(idxs["forex"], times), sel(idxs["forex"], norm_returns), sel(idxs["forex"], cum), sel(idxs["forex"], avg), sel(idxs["forex"], symbols), "PnL (10k - Forex)")
-    crypto_fig = pnl_category_figure(sel(idxs["crypto"], times), sel(idxs["crypto"], norm_returns), sel(idxs["crypto"], cum), sel(idxs["crypto"], avg), sel(idxs["crypto"], symbols), "PnL (10k - Crypto)")
-    indices_fig = pnl_category_figure(sel(idxs["indices"], times), sel(idxs["indices"], norm_returns), sel(idxs["indices"], cum), sel(idxs["indices"], avg), sel(idxs["indices"], symbols), "PnL (10k - Indices)")
+        t_cat = [times[i] for i in cat_idxs]
+        r_cat = [base_returns[i] for i in cat_idxs]
+        s_cat = [symbols[i] for i in cat_idxs]
+
+        # Recompute cumulative and average per category
+        cum_cat: List[float] = []
+        total = 0.0
+        for v in r_cat:
+            total += v
+            cum_cat.append(total)
+        avg_cat: List[float] = [c / (i + 1) for i, c in enumerate(cum_cat)] if cum_cat else []
+
+        return pnl_category_figure(t_cat, r_cat, cum_cat, avg_cat, s_cat, title)
+
+    fx_fig = build_category("forex", "PnL (10k - Forex)")
+    crypto_fig = build_category("crypto", "PnL (10k - Crypto)")
+    indices_fig = build_category("indices", "PnL (10k - Indices)")
 
     return {"forex": fx_fig, "crypto": crypto_fig, "indices": indices_fig}

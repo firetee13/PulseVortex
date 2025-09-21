@@ -569,7 +569,7 @@ def _classify_symbol(sym: str) -> str:
 
 
 def pnl_category_figure(times: List[datetime], returns: List[float], cum: List[float], avg: List[float], symbols: List[str], title: str) -> go.Figure:
-    """Create a PnL figure with cumulative step, avg, and markers for wins/losses."""
+    """Create a PnL figure with smooth curved lines (spline) and markers for wins/losses."""
     fig = go.Figure()
     if not times:
         fig.update_layout(title=title)
@@ -582,14 +582,25 @@ def pnl_category_figure(times: List[datetime], returns: List[float], cum: List[f
         except Exception:
             times_disp.append(t + timedelta(hours=3))
 
-    # Baseline step logic: add a leading point
-    base_time = times_disp[0] - timedelta(seconds=1)
-    times_plot = [base_time] + list(times_disp)
-    cum_plot = [0.0] + list(cum)
-    avg_plot = [0.0] + (list(avg) if avg else [0.0] * len(cum))
-
-    fig.add_trace(go.Scatter(x=times_plot, y=cum_plot, mode="lines", line=dict(shape="hv", color="#1f77b4", width=2), name="Cumulative"))
-    fig.add_trace(go.Scatter(x=times_plot, y=avg_plot, mode="lines", line=dict(shape="hv", color="#ff7f0e", width=1.5, dash="dash"), name="Avg per trade"))
+    # Curved lines (spline) — plot directly without step-leading baseline
+    fig.add_trace(
+        go.Scatter(
+            x=times_disp,
+            y=cum,
+            mode="lines",
+            line=dict(shape="spline", smoothing=1.05, color="#1f77b4", width=2),
+            name="Cumulative",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=times_disp,
+            y=avg if avg else [c / (i + 1) for i, c in enumerate(cum)],
+            mode="lines",
+            line=dict(shape="spline", smoothing=1.0, color="#ff7f0e", width=1.5, dash="dash"),
+            name="Avg per trade",
+        )
+    )
 
     # markers for wins/losses at end of each trade
     wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
@@ -597,9 +608,25 @@ def pnl_category_figure(times: List[datetime], returns: List[float], cum: List[f
     losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
     losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
     if wins_x:
-        fig.add_trace(go.Scatter(x=wins_x, y=wins_y, mode="markers", marker=dict(symbol="triangle-up", color="green", size=10), name="TP"))
+        fig.add_trace(
+            go.Scatter(
+                x=wins_x,
+                y=wins_y,
+                mode="markers",
+                marker=dict(symbol="triangle-up", color="green", size=10),
+                name="TP",
+            )
+        )
     if losses_x:
-        fig.add_trace(go.Scatter(x=losses_x, y=losses_y, mode="markers", marker=dict(symbol="triangle-down", color="red", size=10), name="SL"))
+        fig.add_trace(
+            go.Scatter(
+                x=losses_x,
+                y=losses_y,
+                mode="markers",
+                marker=dict(symbol="triangle-down", color="red", size=10),
+                name="SL",
+            )
+        )
 
     fig.update_layout(title=title, xaxis_title="Time (UTC+3)", yaxis_title="PnL ($)", legend=dict(orientation="h"))
     return fig

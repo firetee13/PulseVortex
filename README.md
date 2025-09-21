@@ -3,7 +3,7 @@
 A comprehensive Python application suite for MT5 trading that includes:
 
 - **CLI Setup Analyzer** (`timelapse_setups.py`): Analyzes MT5 symbols to identify high-confidence trade setups
-- **GUI Monitor** (`monitor_gui.py`): Visual interface for real-time monitoring and analysis
+- **Dash Web UI** (`dash_app.py`): Interactive web interface for real-time monitoring, charts, and controls
 - **TP/SL Hit Checker** (`check_tp_sl_hits.py`): Automated monitoring of take-profit and stop-loss hits
 
 Designed for forex and crypto traders seeking automated setup detection, real-time monitoring, and comprehensive risk management with advanced filtering and visualization features.
@@ -153,7 +153,7 @@ EURUSD | Buy @ 1.0850 | SL 1.0820 | TP 1.0920 | RRR 2.33 | score 3.2
   -> Strength 4H/1D/1W: 2.1/1.8/0.9; ATR: 15.2 pips (1.40%); S/R: S1=1.0820, R1=1.0920 near support; Timelapse: D1 Close up 0.0032; Spread: 0.08% (Excellent)
 ```
 
-## GUI Interface
+## Web UI (Dash)
 
 ### Launching the GUI
 
@@ -164,22 +164,17 @@ Run_Monitors.bat
 
 **Cross-platform**:
 ```bash
-python run_monitor_gui.pyw
+python dash_app.py
 ```
 
-**Direct Python**:
-```bash
-python monitor_gui.py
-```
-
-### GUI Features
+### Web UI Features
 
 - **Monitors Tab**: Control setup detection and hit monitoring with start/stop buttons
 - **DB Results Tab**: View detected setups and hits with filtering by time range
 - **PnL Tab**: Analyze trading performance with charts for Forex, Crypto, and Indices
 - **Settings**: Configure exclude symbols, minimum proximity SL, and auto-refresh intervals
 
-### GUI Workflow
+### Web UI Workflow
 
 1. Launch the GUI application
 2. Configure exclude symbols and settings in the Monitors tab
@@ -329,8 +324,8 @@ python -m unittest tests.test_timelapse_setups -v
    - Setup and hit record management
    - Schema migration and backup support
 
-5. **GUI Application** (`monitor_gui.py`)
-   - Tkinter-based interface with matplotlib charts
+5. **Web UI** (`dash_app.py`)
+   - Dash + Plotly web interface with interactive charts
    - Process management for CLI tools
    - Database visualization and PnL analytics
    - Settings persistence and user preferences
@@ -377,12 +372,12 @@ python -m unittest tests.test_timelapse_setups -v
 - Increase polling interval in watch mode
 - Check MT5 terminal resource usage
 
-#### GUI Issues
-- **Matplotlib not available**: Install matplotlib (`pip install matplotlib`)
-- **Tkinter not available**: Ensure Python installation includes Tkinter (usually included by default)
-- **GUI won't start**: Try running `python monitor_gui.py` directly to see error messages
-- **Charts not rendering**: Check matplotlib backend compatibility
-- **Process control not working**: Ensure subprocess permissions allow process management
+#### Web UI Issues
+- **Web server not starting**: Run `python dash_app.py` from the project root and check the terminal output for errors.
+- **Missing Dash/Plotly**: Install dependencies with `pip install -r requirements.txt`.
+- **Browser cache issues**: Hard-reload the page (Ctrl+F5) or try a private window.
+- **Charts not rendering**: Open browser DevTools console to check for JavaScript errors; verify the server logs.
+- **Process control not working**: Ensure subprocess permissions allow process management.
 
 #### Hit Checker Issues
 - **No hits detected**: Verify MT5 tick history availability for monitored symbols

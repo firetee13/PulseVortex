@@ -1,11 +1,13 @@
 # Core runtime dependencies for the timelapse tools
 # - timelapse_setups.py: uses watchdog for real-time file watching (optional but recommended)
 # - check_tp_sl_hits.py: uses MetaTrader5 to fetch ticks/bars
-# - monitor_gui.py: uses matplotlib for chart rendering in Tkinter
+# - monitor_gui.py: (deprecated) legacy Tkinter GUI — install matplotlib only if you intend to run the legacy GUI
 
 MetaTrader5
-matplotlib
 numpy
 watchdog
 pika
-
+dash>=2.0.0
+plotly>=5.0.0
+dash-bootstrap-components>=1.0.0
+pandas>=1.1.0

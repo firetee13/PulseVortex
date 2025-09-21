@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set SCRIPT=run_monitor_gui.pyw
+set SCRIPT=dash_app.py
 
 REM Prefer the windowed Python launcher (no console)
 where pyw >NUL 2>&1

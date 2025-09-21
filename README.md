@@ -1,4 +1,4 @@
-# EASY Insight Monitor - MT5 Trade Setup Analyzer & Monitor
+# Monitor - MT5 Trade Setup Analyzer & Monitor
 
 A comprehensive Python application suite for MT5 trading that includes:
 

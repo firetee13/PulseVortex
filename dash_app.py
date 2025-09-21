@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dash web UI for EASY Insight - improved UI wiring and polish.
+"""Dash web UI for - improved UI wiring and polish.
 
 Improvements implemented in this version:
 - Table sorting and native filtering enabled for the DB Results table
@@ -182,7 +182,7 @@ def pnl_layout():
 # --- App layout ---
 app.layout = dbc.Container(
     [
-        html.H2("EASY Insight - Timelapse Monitors (Dash)"),
+        html.H2("Timelapse Monitors (Dash)"),
         html.Div(id="status-msg"),
         dcc.Store(id="since-hours-store", data=168),
         dbc.Tabs(
@@ -270,6 +270,7 @@ def update_statuses(n, active_tab):
     [
         Output("btn-tl-toggle", "children"),
         Output("status-msg", "children", allow_duplicate=True),
+        Output("status-tl", "children", allow_duplicate=True),
     ],
     [Input("btn-tl-toggle", "n_clicks")],
     [State("input-exclude", "value"), State("input-min-prox-sl", "value")],
@@ -277,13 +278,13 @@ def update_statuses(n, active_tab):
 )
 def toggle_timelapse(n_clicks, exclude, min_prox_sl):
     if not n_clicks:
-        return "Start Timelapse", ""
+        return "Start Timelapse", "", no_update
     try:
         if get_controller is None:
-            return "Start Timelapse", dbc.Alert("Process controller unavailable", color="warning")
+            return "Start Timelapse", dbc.Alert("Process controller unavailable", color="warning"), no_update
         ctrl = get_controller("timelapse")
         if ctrl is None:
-            return "Start Timelapse", dbc.Alert("Timelapse controller not configured", color="warning")
+            return "Start Timelapse", dbc.Alert("Timelapse controller not configured", color="warning"), no_update
         py = sys.executable or "python"
         cmd = [py, "-u", "timelapse_setups.py", "--watch"]
         try:
@@ -303,41 +304,95 @@ def toggle_timelapse(n_clicks, exclude, min_prox_sl):
             cmd += ["--min-prox-sl", mps]
         ctrl.cmd = cmd
         if not ctrl.is_running():
+            # Immediate feedback
             ctrl.start()
-            return "Stop Timelapse", ""
+            return "Stop Timelapse", "", "Starting..."
         else:
             ctrl.stop()
-            return "Start Timelapse", ""
+            return "Start Timelapse", "", "Stopping..."
     except Exception as e:
-        return "Start Timelapse", dbc.Alert(f"Error toggling timelapse: {e}", color="danger")
+        return "Start Timelapse", dbc.Alert(f"Error toggling timelapse: {e}", color="danger"), no_update
 
 
+# --- Initialize button text based on process status ---
+@app.callback(
+    [Output("btn-tl-toggle", "children", allow_duplicate=True),
+     Output("btn-hits-toggle", "children", allow_duplicate=True)],
+    [Input("interval-refresh", "n_intervals")],
+    prevent_initial_call=True,
+)
+def sync_button_text(n):
+    """Sync button text with actual process status"""
+    try:
+        if get_controller is None:
+            return "Start Timelapse", "Start Hits"
+
+        ctrl_tl = get_controller("timelapse")
+        ctrl_hits = get_controller("hits")
+
+        tl_text = "Stop Timelapse" if (ctrl_tl is not None and ctrl_tl.is_running()) else "Start Timelapse"
+        hits_text = "Stop Hits" if (ctrl_hits is not None and ctrl_hits.is_running()) else "Start Hits"
+
+        return tl_text, hits_text
+    except Exception:
+        return "Start Timelapse", "Start Hits"
+
+
+# --- Auto-start monitors once on app load ---
+@app.callback(
+    Output("status-msg", "children", allow_duplicate=True),
+    [Input("interval-refresh", "n_intervals")],
+    prevent_initial_call='initial_duplicate',
+)
+def autostart_monitors(n):
+    # Run only on initial load (n == 0); ignore subsequent intervals
+    if n != 0:
+        return no_update
+    try:
+        if get_controller is None:
+            return ""
+        # Timelapse: start with safe defaults; user can stop/restart with UI to apply custom values
+        ctrl_tl = get_controller("timelapse")
+        if ctrl_tl is not None and not ctrl_tl.is_running():
+            py = sys.executable or "python"
+            cmd = [py, "-u", "timelapse_setups.py", "--watch", "--min-prox-sl", "0.25"]
+            # No default exclude; leave empty
+            ctrl_tl.cmd = cmd
+            ctrl_tl.start()
+        # Hits: start if not running (command already configured in create_controller)
+        ctrl_hits = get_controller("hits")
+        if ctrl_hits is not None and not ctrl_hits.is_running():
+            ctrl_hits.start()
+        return ""
+    except Exception as e:
+        return dbc.Alert(f"Auto-start error: {e}", color="danger")
 # --- Toggle hits ---
 @app.callback(
     [
         Output("btn-hits-toggle", "children"),
         Output("status-msg", "children", allow_duplicate=True),
+        Output("status-hits", "children", allow_duplicate=True),
     ],
     [Input("btn-hits-toggle", "n_clicks")],
     prevent_initial_call=True,
 )
 def toggle_hits(n_clicks):
     if not n_clicks:
-        return "Start Hits", ""
+        return "Start Hits", "", no_update
     try:
         if get_controller is None:
-            return "Start Hits", dbc.Alert("Process controller unavailable", color="warning")
+            return "Start Hits", dbc.Alert("Process controller unavailable", color="warning"), no_update
         ctrl = get_controller("hits")
         if ctrl is None:
-            return "Start Hits", dbc.Alert("Hits controller not configured", color="warning")
+            return "Start Hits", dbc.Alert("Hits controller not configured", color="warning"), no_update
         if not ctrl.is_running():
             ctrl.start()
-            return "Stop Hits", ""
+            return "Stop Hits", "", "Starting..."
         else:
             ctrl.stop()
-            return "Start Hits", ""
+            return "Start Hits", "", "Stopping..."
     except Exception as e:
-        return "Start Hits", dbc.Alert(f"Error toggling hits: {e}", color="danger")
+        return "Start Hits", dbc.Alert(f"Error toggling hits: {e}", color="danger"), no_update
 
 
 # --- DB refresh callback (uses since-hours) ---

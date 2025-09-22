@@ -153,11 +153,10 @@ def db_layout():
                 align="center",
             ),
             html.Br(),
-            dash_table.DataTable(
+                        dash_table.DataTable(
                 id="db-table",
                 columns=columns,
                 data=[],
-                page_size=20,
                 cell_selectable=True,
                 sort_action="native",
                 filter_action="native",

@@ -82,7 +82,7 @@ def _get_tick_price(tk: Any, direction: str) -> Optional[float]:
         return None
 
 
-def _get_tick_time_utc(tk: Any, server_offset_hours: int) -> Optional[datetime]:
+def _get_tick_time_utc(tk: Any, server_offset_hours: int = 0) -> Optional[datetime]:
     """Return tick timestamp as timezone-aware UTC datetime."""
     tms = _tick_field(tk, "time_msc")
     dt_raw = None
@@ -99,11 +99,9 @@ def _get_tick_time_utc(tk: Any, server_offset_hours: int) -> Optional[datetime]:
             dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
         except Exception:
             return None
-    try:
-        dt_utc = dt_raw - timedelta(hours=server_offset_hours)
-    except Exception:
-        dt_utc = dt_raw
-    return dt_utc
+    if dt_raw.tzinfo is None:
+        return dt_raw.replace(tzinfo=UTC)
+    return dt_raw.astimezone(UTC)
 
 
 def get_ohlc_for_setup(
@@ -179,42 +177,24 @@ def get_ohlc_for_setup(
             pass
 
     # Compute server naive times for mt5 fetch
+    # Fetch ticks (paged to avoid MT5 per-call limits). Use UTC-aware windows for MT5.
     try:
-        offset_h = mt5_client.get_server_offset_hours(mt5_symbol) if hasattr(mt5_client, "get_server_offset_hours") else 0
-    except Exception:
-        offset_h = 0
-
-    try:
-        start_server = mt5_client.to_server_naive(start_utc, offset_h)
-        end_server = mt5_client.to_server_naive(fetch_end_utc, offset_h)
-    except Exception:
-        start_server = start_utc.replace(tzinfo=None)
-        end_server = fetch_end_utc.replace(tzinfo=None)
-
-    # Fetch ticks (paged to avoid MT5 per-call limits). Fall back to UTC-naive range if needed.
-    try:
-        # Use a large page size to minimize calls but ensure we bypass any copy_ticks_range cap.
-        ticks, stats = mt5_client.ticks_paged(
+        ticks, _ = mt5_client.ticks_paged(
             mt5_symbol,
-            start_server,
-            end_server,
+            start_utc,
+            fetch_end_utc,
             page=200000,
-            server_offset_hours=offset_h,
         )
     except Exception:
         ticks = []
-    # Coerce numpy-like arrays to plain Python list to avoid ambiguous truth-value checks
     if ticks is not None:
         try:
             ticks = list(ticks)
         except Exception:
             pass
-    # Fallback: if no ticks, try using UTC-naive range (some brokers interpret naive times as UTC)
     if ticks is None or len(ticks) == 0:
         try:
-            start_naive = start_utc.replace(tzinfo=None)
-            end_naive = fetch_end_utc.replace(tzinfo=None)
-            ticks, _ = mt5_client.ticks_range_all(mt5_symbol, start_naive, end_naive)
+            ticks, _ = mt5_client.ticks_range_all(mt5_symbol, start_utc, fetch_end_utc)
             try:
                 ticks = list(ticks) if ticks is not None else []
             except Exception:
@@ -231,7 +211,7 @@ def get_ohlc_for_setup(
         price = _get_tick_price(tk, direction)
         if price is None:
             continue
-        dt_utc = _get_tick_time_utc(tk, offset_h)
+        dt_utc = _get_tick_time_utc(tk)
         if dt_utc is None:
             continue
         minute = dt_utc.replace(second=0, microsecond=0)

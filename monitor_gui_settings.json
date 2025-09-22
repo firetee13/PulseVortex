@@ -2,5 +2,5 @@
   "exclude_symbols": "",
   "min_prox_sl": "0.25",
   "since_hours": 168,
-  "interval": 120
+  "interval": 5
 }

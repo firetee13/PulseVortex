@@ -204,8 +204,8 @@ def scan_for_hit_with_chunks(
         fetch_start = perf_counter()
         ticks, stats = ticks_range_all(
             symbol,
-            to_server_naive(chunk_start, offset_hours),
-            to_server_naive(chunk_end, offset_hours),
+            chunk_start,
+            chunk_end,
             trace=trace,
         )
         fetch_elapsed = perf_counter() - fetch_start

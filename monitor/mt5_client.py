@@ -17,6 +17,13 @@ except Exception:  # pragma: no cover
 UTC = timezone.utc
 
 
+def _ensure_utc_datetime(dt: datetime) -> datetime:
+    """Return a UTC-aware datetime."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 def has_mt5() -> bool:
     return mt5 is not None
 
@@ -189,28 +196,30 @@ def from_server_naive(dt_naive: datetime, offset_hours: int) -> datetime:
 
 def ticks_paged(
     symbol: str,
-    start_server_naive: datetime,
-    end_server_naive: datetime,
+    start: datetime,
+    end: datetime,
     page: int,
     trace: bool = False,
     server_offset_hours: int = 0,
 ) -> Tuple[List[object], TickFetchStats]:
-    """Fetch ticks from start..end (server-local naive) using copy_ticks_from."""
+    """Fetch ticks from start..end using copy_ticks_from."""
     if mt5 is None:
         return [], TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+    start_utc = _ensure_utc_datetime(start)
+    end_utc = _ensure_utc_datetime(end)
     t0 = perf_counter()
     all_ticks: List[object] = []
-    cur = start_server_naive
+    cur = start_utc
     pages = 0
     fetch_s = 0.0
-    while True:
+    while cur < end_utc:
         call_t0 = perf_counter()
         chunk = mt5.copy_ticks_from(symbol, cur, page, mt5.COPY_TICKS_ALL)
         call_dt = perf_counter() - call_t0
         fetch_s += call_dt
         n = 0 if chunk is None else len(chunk)
         if trace:
-            cur_str = cur.isoformat(sep=' ', timespec='seconds')
+            cur_str = cur.astimezone(UTC).isoformat(sep=' ', timespec='seconds')
             print(f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms")
         if chunk is None or n == 0:
             break
@@ -230,8 +239,8 @@ def ticks_paged(
                 next_ts = int(tse) + 1
             except Exception:
                 break
-        cur = epoch_to_server_naive(next_ts, server_offset_hours)
-        if cur > end_server_naive:
+        cur = datetime.fromtimestamp(next_ts, tz=UTC)
+        if cur >= end_utc:
             break
     elapsed = perf_counter() - t0
     return all_ticks, TickFetchStats(pages=pages, total_ticks=len(all_ticks), elapsed_s=elapsed, fetch_s=fetch_s, early_stop=False)
@@ -239,16 +248,18 @@ def ticks_paged(
 
 def ticks_range_all(
     symbol: str,
-    start_server_naive: datetime,
-    end_server_naive: datetime,
+    start: datetime,
+    end: datetime,
     trace: bool = False,
 ) -> Tuple[List[object], TickFetchStats]:
     """Fetch all ticks for [start, end] using copy_ticks_range."""
     if mt5 is None:
         return [], TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+    start_utc = _ensure_utc_datetime(start)
+    end_utc = _ensure_utc_datetime(end)
     t0 = perf_counter()
     call_t0 = perf_counter()
-    ticks = mt5.copy_ticks_range(symbol, start_server_naive, end_server_naive, mt5.COPY_TICKS_ALL)
+    ticks = mt5.copy_ticks_range(symbol, start_utc, end_utc, mt5.COPY_TICKS_ALL)
     call_dt = perf_counter() - call_t0
     n = 0 if ticks is None else len(ticks)
     if trace:
@@ -261,8 +272,8 @@ def ticks_range_all(
 
 def scan_ticks_paged_for_hit(
     symbol: str,
-    start_server_naive: datetime,
-    end_server_naive: datetime,
+    start: datetime,
+    end: datetime,
     page: int,
     direction: str,
     sl: float,
@@ -273,19 +284,21 @@ def scan_ticks_paged_for_hit(
     """Fetch ticks page-by-page and stop as soon as a hit is detected."""
     if mt5 is None:
         return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+    start_utc = _ensure_utc_datetime(start)
+    end_utc = _ensure_utc_datetime(end)
     pages = 0
     total_ticks = 0
     t0 = perf_counter()
     fetch_s = 0.0
-    cur = start_server_naive
-    while True:
+    cur = start_utc
+    while cur < end_utc:
         call_t0 = perf_counter()
         chunk = mt5.copy_ticks_from(symbol, cur, page, mt5.COPY_TICKS_ALL)
         call_dt = perf_counter() - call_t0
         fetch_s += call_dt
         n = 0 if chunk is None else len(chunk)
         if trace:
-            cur_str = cur.isoformat(sep=' ', timespec='seconds')
+            cur_str = cur.astimezone(UTC).isoformat(sep=' ', timespec='seconds')
             print(f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms")
         if chunk is None or n == 0:
             break
@@ -309,8 +322,8 @@ def scan_ticks_paged_for_hit(
                 next_ts = int(tse) + 1
             except Exception:
                 break
-        cur = epoch_to_server_naive(next_ts, server_offset_hours)
-        if cur > end_server_naive:
+        cur = datetime.fromtimestamp(next_ts, tz=UTC)
+        if cur >= end_utc:
             break
     elapsed = perf_counter() - t0
     return None, TickFetchStats(pages=pages, total_ticks=total_ticks, elapsed_s=elapsed, fetch_s=fetch_s, early_stop=False)
@@ -321,7 +334,7 @@ def earliest_hit_from_ticks(
     direction: str,
     sl: float,
     tp: float,
-    server_offset_hours: int,
+    server_offset_hours: int = 0,
 ) -> Optional[Hit]:
     if ticks is None:
         return None
@@ -375,7 +388,7 @@ def earliest_hit_from_ticks(
             dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
         if dt_raw is None:
             continue
-        dt_utc = dt_raw - timedelta(hours=server_offset_hours)
+        dt_utc = dt_raw if dt_raw.tzinfo is not None else dt_raw.replace(tzinfo=UTC)
         if direction.lower() == 'buy':
             if bid is not None and bid <= sl:
                 return Hit(kind='SL', time_utc=dt_utc, price=bid)

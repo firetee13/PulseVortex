@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 import json
 from typing import Any, List, Dict
 
-from dash import Dash, dcc, html, dash_table, no_update, callback_context
+from dash import Dash, dcc, html, dash_table, no_update, callback_context, Patch
 from dash import Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
@@ -344,6 +344,30 @@ def render_tab(tab):
     return html.Div()
 
 
+
+def _build_table_patch(previous, new):
+    # Create a Patch describing differences between previous and new table data.
+    if not isinstance(previous, list):
+        return None
+    patch = Patch()
+    changed = False
+    prev_len = len(previous)
+    new_len = len(new)
+    for idx in range(min(prev_len, new_len)):
+        if previous[idx] != new[idx]:
+            patch[idx] = new[idx]
+            changed = True
+    if new_len > prev_len:
+        for idx in range(prev_len, new_len):
+            patch.append(new[idx])
+            changed = True
+    elif new_len < prev_len:
+        for idx in range(prev_len - 1, new_len - 1, -1):
+            del patch[idx]
+            changed = True
+    return patch if changed else None
+
+
 # --- Interval control from input ---
 @app.callback(Output("interval-refresh", "interval"), [Input("input-interval-sec", "value")])
 def set_interval_sec(val):
@@ -600,9 +624,10 @@ def toggle_hits(n_clicks):
      State("tabs", "active_tab"),
      State("btn-filter-running", "n_clicks"),
      State("btn-filter-sl", "n_clicks"),
-     State("btn-filter-tp", "n_clicks")],
+     State("btn-filter-tp", "n_clicks"),
+     State("db-table", "data")],
 )
-def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, since_hours, active_tab, running_state, sl_state, tp_state):
+def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, since_hours, active_tab, running_state, sl_state, tp_state, current_table_data):
     # Handle tab visibility
     if active_tab not in (None, "tab-db"):
         return [no_update, True, True, True, {"textAlign": "center", "padding": "2rem", "display": "none"}]
@@ -656,30 +681,31 @@ def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, sin
     
     # Handle filtering
     ctx = callback_context
-    if ctx.triggered:
-        button_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        
-        # Get the current state of each button (number of clicks)
-        running_clicks = running_clicks or 0
-        sl_clicks = sl_clicks or 0
-        tp_clicks = tp_clicks or 0
-        
-        # Check if the clicked button was already active (odd number of clicks means active)
-        if button_id == "btn-filter-running" and running_clicks % 2 == 1:
-            # Filter for running entries (no hit value)
-            filtered_data = [row for row in styled_data if row.get("row_style") == "running"]
-            return [filtered_data, False, True, True, hidden_style]  # Running active
-        elif button_id == "btn-filter-sl" and sl_clicks % 2 == 1:
-            # Filter for SL hits
-            filtered_data = [row for row in styled_data if row.get("row_style") == "sl_hit"]
-            return [filtered_data, True, False, True, hidden_style]  # SL active
-        elif button_id == "btn-filter-tp" and tp_clicks % 2 == 1:
-            # Filter for TP hits
-            filtered_data = [row for row in styled_data if row.get("row_style") == "tp_hit"]
-            return [filtered_data, True, True, False, hidden_style]  # TP active
-    
+    triggered = ctx.triggered
+    button_id = triggered[0]["prop_id"].split(".")[0] if triggered else ""
+
+    # Normalise click counts for modulo arithmetic
+    running_clicks = running_clicks or 0
+    sl_clicks = sl_clicks or 0
+    tp_clicks = tp_clicks or 0
+
+    # Check if a filter button is active (odd number of clicks means active)
+    if button_id == "btn-filter-running" and running_clicks % 2 == 1:
+        filtered_data = [row for row in styled_data if row.get("row_style") == "running"]
+        return [filtered_data, False, True, True, hidden_style]
+    if button_id == "btn-filter-sl" and sl_clicks % 2 == 1:
+        filtered_data = [row for row in styled_data if row.get("row_style") == "sl_hit"]
+        return [filtered_data, True, False, True, hidden_style]
+    if button_id == "btn-filter-tp" and tp_clicks % 2 == 1:
+        filtered_data = [row for row in styled_data if row.get("row_style") == "tp_hit"]
+        return [filtered_data, True, True, False, hidden_style]
+
     # Default - show all entries, all buttons outlined
-    return [styled_data, True, True, True, hidden_style]
+    data_output = styled_data
+    if button_id == "interval-refresh":
+        patch = _build_table_patch(current_table_data, styled_data)
+        data_output = patch if patch is not None else no_update
+    return [data_output, True, True, True, hidden_style]
 
 
 # --- OHLC chart for selected DB row ---

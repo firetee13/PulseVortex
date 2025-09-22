@@ -1498,7 +1498,10 @@ class App(tk.Tk):
             # Common crypto tickers (include broker aliases)
             'BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOGE', 'BNB', 'DOT', 'AVAX', 'LINK',
             'LNK',  # alias used by some brokers for Chainlink (LINK)
-            'LTC', 'BCH', 'XLM', 'TRX', 'ETC', 'UNI', 'ATOM', 'APT', 'SHIB', 'PEPE'
+            'LTC', 'BCH', 'XLM', 'TRX', 'ETC', 'UNI', 'ATOM', 'APT', 'SHIB', 'PEPE',
+            'AVX',  # Avalanche alias
+            'DOG',  # Dogecoin alias
+            'XTZ'   # Tezos
         ]
         if any(t in s for t in crypto_tickers):
             return 'crypto'

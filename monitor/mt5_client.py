@@ -175,11 +175,11 @@ def get_server_offset_hours(symbol_for_probe: str) -> int:
 
 def to_server_naive(dt_utc: datetime, offset_hours: int) -> datetime:
     target_epoch = dt_utc.timestamp() + (offset_hours * 3600.0)
-    return datetime.utcfromtimestamp(target_epoch)
+    return datetime.fromtimestamp(target_epoch, tz=UTC).replace(tzinfo=None)
 
 
 def epoch_to_server_naive(epoch_seconds: float, offset_hours: int) -> datetime:
-    return datetime.utcfromtimestamp(epoch_seconds + (offset_hours * 3600.0))
+    return datetime.fromtimestamp(epoch_seconds + (offset_hours * 3600.0), tz=UTC).replace(tzinfo=None)
 
 
 def from_server_naive(dt_naive: datetime, offset_hours: int) -> datetime:

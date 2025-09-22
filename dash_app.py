@@ -163,16 +163,28 @@ def db_layout():
                 align="center",
                 className="mb-2",
             ),
+            html.Div(
+                [
+                    dbc.Spinner(
+                        color="primary",
+                        type="border",
+                        spinner_style={"width": "3rem", "height": "3rem"}
+                    ),
+                    html.H5("Loading data...", className="mt-2")
+                ],
+                id="table-loading-spinner",
+                style={"textAlign": "center", "padding": "2rem", "display": "none"}
+            ),
             dash_table.DataTable(
                 id="db-table",
                 columns=columns,
                 data=[],
-                page_size=20,
+                page_size=100,
                 cell_selectable=True,
                 sort_action="native",
                 filter_action="native",
                 filter_options={"placeholder_text": "Filter..."},
-                style_table={"overflowX": "auto", "height": "calc(100vh - 250px)", "maxHeight": "unset"},
+                style_table={"overflowX": "auto", "height": "calc(100vh - 200px)", "maxHeight": "unset"},
                 fixed_rows={"headers": True},
                 style_cell={"textAlign": "left", "minWidth": "80px", "width": "120px", "maxWidth": "240px", "whiteSpace": "normal"},
                 css=[
@@ -578,7 +590,8 @@ def toggle_hits(n_clicks):
     [Output("db-table", "data"),
      Output("btn-filter-running", "outline"),
      Output("btn-filter-sl", "outline"),
-     Output("btn-filter-tp", "outline")],
+     Output("btn-filter-tp", "outline"),
+     Output("table-loading-spinner", "style")],
     [Input("interval-refresh", "n_intervals"),
      Input("btn-filter-running", "n_clicks"),
      Input("btn-filter-sl", "n_clicks"),
@@ -592,7 +605,11 @@ def toggle_hits(n_clicks):
 def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, since_hours, active_tab, running_state, sl_state, tp_state):
     # Handle tab visibility
     if active_tab not in (None, "tab-db"):
-        return [no_update, True, True, True]
+        return [no_update, True, True, True, {"textAlign": "center", "padding": "2rem", "display": "none"}]
+    
+    # Show loading spinner
+    loading_style = {"textAlign": "center", "padding": "2rem", "display": "block"}
+    hidden_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
     
     # Get data from database
     data = []
@@ -651,18 +668,18 @@ def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, sin
         if button_id == "btn-filter-running" and running_clicks % 2 == 1:
             # Filter for running entries (no hit value)
             filtered_data = [row for row in styled_data if row.get("row_style") == "running"]
-            return [filtered_data, False, True, True]  # Running active
+            return [filtered_data, False, True, True, hidden_style]  # Running active
         elif button_id == "btn-filter-sl" and sl_clicks % 2 == 1:
             # Filter for SL hits
             filtered_data = [row for row in styled_data if row.get("row_style") == "sl_hit"]
-            return [filtered_data, True, False, True]  # SL active
+            return [filtered_data, True, False, True, hidden_style]  # SL active
         elif button_id == "btn-filter-tp" and tp_clicks % 2 == 1:
             # Filter for TP hits
             filtered_data = [row for row in styled_data if row.get("row_style") == "tp_hit"]
-            return [filtered_data, True, True, False]  # TP active
+            return [filtered_data, True, True, False, hidden_style]  # TP active
     
     # Default - show all entries, all buttons outlined
-    return [styled_data, True, True, True]
+    return [styled_data, True, True, True, hidden_style]
 
 
 # --- OHLC chart for selected DB row ---

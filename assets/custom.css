@@ -1,0 +1,50 @@
+.modal-fullscreen {
+    width: 90vw !important;
+    height: 90vh !important;
+    max-width: 90vw !important;
+    max-height: 90vh !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    position: fixed !important;
+    top: 5vh !important;
+    left: 5vw !important;
+    right: 5vw !important;
+    bottom: 5vh !important;
+}
+
+.modal-fullscreen .modal-dialog {
+    width: 90vw !important;
+    height: 90vh !important;
+    max-width: 90vw !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+}
+
+.modal-fullscreen .modal-content {
+    height: 90vh !important;
+    overflow: hidden !important;
+    width: 90vw !important;
+    margin: 0 !important;
+}
+
+.modal-fullscreen .modal-body {
+    height: calc(90vh - 120px) !important;
+    overflow: hidden !important;
+    padding: 10px !important;
+}
+
+.modal-fullscreen .modal-header,
+.modal-fullscreen .modal-footer {
+    background-color: #f8f9fa;
+    flex-shrink: 0;
+}
+
+.modal-fullscreen .modal-body .js-plotly-plot {
+    height: 100% !important;
+    width: 100% !important;
+}

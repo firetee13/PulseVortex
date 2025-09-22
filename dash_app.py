@@ -62,7 +62,7 @@ if create_controller is not None and logs is not None:
     except Exception:
         pass
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True, assets_folder='assets')
 server = app.server
 
 
@@ -162,7 +162,7 @@ def db_layout():
                 sort_action="native",
                 filter_action="native",
                 filter_options={"placeholder_text": "Filter..."},
-                style_table={"overflowX": "auto", "maxHeight": "500px"},
+                style_table={"overflowX": "auto", "maxHeight": "calc(100vh - 200px)", "height": "calc(100vh - 200px)"},
                 fixed_rows={"headers": True},
                 style_cell={"textAlign": "left", "minWidth": "80px", "width": "120px", "maxWidth": "240px", "whiteSpace": "normal"},
                 css=[
@@ -184,7 +184,25 @@ def db_layout():
                 ],
             ),
             html.Br(),
-            dcc.Graph(id="chart-ohlc"),
+            # Modal for chart popup
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle("Setup Chart"), close_button=True),
+                    dbc.ModalBody(
+                        dcc.Graph(id="chart-ohlc-popup", style={"height": "100%", "width": "100%"})
+                    ),
+                    dbc.ModalFooter(
+                        dbc.Button("Close", id="close-chart-popup", className="ml-auto")
+                    ),
+                ],
+                id="chart-modal",
+                size="lg",
+                centered=True,
+                backdrop=True,
+                fade=True,
+                is_open=False,
+                class_name="modal-fullscreen",
+            ),
         ]
     )
 
@@ -202,7 +220,7 @@ def pnl_layout():
 # --- App layout ---
 app.layout = dbc.Container(
     [
-        html.H2("EASY Insight - Timelapse Monitors "),
+        html.H2("EASY Insight - Timelapse Monitors (Dash)"),
         html.Div(id="status-msg"),
         dcc.Store(id="since-hours-store", data=168),
         dbc.Tabs(
@@ -219,6 +237,9 @@ app.layout = dbc.Container(
     ],
     fluid=True,
 )
+
+# Add custom CSS
+app.css.config.serve_locally = True
 
 
 # --- Tab renderer ---
@@ -439,49 +460,65 @@ def refresh_logs(n_intervals, clear_clicks, active_tab):
 
 
 # --- OHLC chart for selected DB row ---
-@app.callback(Output("chart-ohlc", "figure"), [Input("db-table", "active_cell")], [State("db-table", "data")])
-def on_row_select(active_cell, data):
-    if not active_cell or not data:
-        return go.Figure()
-    try:
-        idx = int(active_cell.get("row")) if isinstance(active_cell, dict) else None
-    except Exception:
-        idx = None
-    if idx is None:
-        return go.Figure()
-    try:
-        row = data[idx]
-    except Exception:
-        return go.Figure()
-    raw_meta = row.get("_meta") if isinstance(row, dict) else None
-    meta = None
-    if isinstance(raw_meta, dict):
-        meta = raw_meta
-    elif isinstance(raw_meta, str) and raw_meta:
+@app.callback(
+    [Output("chart-ohlc-popup", "figure"), Output("chart-modal", "is_open")],
+    [Input("db-table", "active_cell"), Input("close-chart-popup", "n_clicks")],
+    [State("db-table", "data"), State("chart-modal", "is_open")],
+)
+def on_row_select(active_cell, close_clicks, data, is_open):
+    ctx = callback_context
+    if not ctx.triggered:
+        return go.Figure(), False
+        
+    button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    # Handle close button click
+    if button_id == "close-chart-popup":
+        return go.Figure(), False
+    
+    # Handle row selection
+    if button_id == "db-table" and active_cell and data:
         try:
-            meta = json.loads(raw_meta)
+            idx = int(active_cell.get("row")) if isinstance(active_cell, dict) else None
         except Exception:
-            meta = None
-    if meta is None:
-        fig = go.Figure()
-        fig.update_layout(title="No metadata for selected row")
-        return fig
-    try:
-        if chart is None:
+            idx = None
+        if idx is None:
+            return go.Figure(), False
+        try:
+            row = data[idx]
+        except Exception:
+            return go.Figure(), False
+        raw_meta = row.get("_meta") if isinstance(row, dict) else None
+        meta = None
+        if isinstance(raw_meta, dict):
+            meta = raw_meta
+        elif isinstance(raw_meta, str) and raw_meta:
+            try:
+                meta = json.loads(raw_meta)
+            except Exception:
+                meta = None
+        if meta is None:
             fig = go.Figure()
-            fig.update_layout(title=f"{meta.get('symbol', '')} — chart helper unavailable")
-            return fig
-        ohlc = chart.get_ohlc_for_setup(meta)
-        if ohlc is None:
+            fig.update_layout(title="No metadata for selected row")
+            return fig, True
+        try:
+            if chart is None:
+                fig = go.Figure()
+                fig.update_layout(title=f"{meta.get('symbol', '')} — chart helper unavailable")
+                return fig, True
+            ohlc = chart.get_ohlc_for_setup(meta)
+            if ohlc is None:
+                fig = go.Figure()
+                fig.update_layout(title=f"{meta.get('symbol','')} — no tick data")
+                return fig, True
+            fig = chart.candlestick_figure_from_ohlc(ohlc)
+            return fig, True
+        except Exception as e:
             fig = go.Figure()
-            fig.update_layout(title=f"{meta.get('symbol','')} — no tick data")
-            return fig
-        fig = chart.candlestick_figure_from_ohlc(ohlc)
-        return fig
-    except Exception as e:
-        fig = go.Figure()
-        fig.update_layout(title=f"Chart error: {e}")
-        return fig
+            fig.update_layout(title=f"Chart error: {e}")
+            return fig, True
+    
+    return go.Figure(), False
 
 
 # --- PnL charts refresh (uses since-hours) ---

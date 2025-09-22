@@ -169,7 +169,7 @@ python dash_app.py
 
 ### Web UI Features
 
-- **Monitors Tab**: Control setup detection and hit monitoring with start/stop buttons
+- **Monitors Tab**: Control setup detection and hit monitoring with start/stop buttons (processes now start automatically)
 - **DB Results Tab**: View detected setups and hits with filtering by time range
 - **PnL Tab**: Analyze trading performance with charts for Forex, Crypto, and Indices
 - **Settings**: Configure exclude symbols, minimum proximity SL, and auto-refresh intervals
@@ -177,8 +177,8 @@ python dash_app.py
 ### Web UI Workflow
 
 1. Launch the GUI application
-2. Configure exclude symbols and settings in the Monitors tab
-3. Click "Start" buttons for both timelapse and hits monitoring
+2. The timelapse and hits monitoring processes will start automatically
+3. Configure exclude symbols and settings in the Monitors tab if needed
 4. Switch to DB Results tab to view detected setups and hits
 5. Use PnL tab for performance analysis with visual charts
 

@@ -46,13 +46,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Ensure controllers exist and attach named buffers
 if create_controller is not None and logs is not None:
     try:
-        tl_cmd = [sys.executable or "python", "-u", "timelapse_setups.py", "--watch"]
-        create_controller("timelapse", tl_cmd, cwd=HERE, log_put=logs.attach_named("timelapse"))
+        tl_cmd = [sys.executable or "python", "-u", "timelapse_setups.py", "--watch", "--min-prox-sl", "0.25"]
+        ctrl_tl = create_controller("timelapse", tl_cmd, cwd=HERE, log_put=logs.attach_named("timelapse"))
+        # Start timelapse controller automatically
+        if ctrl_tl is not None:
+            ctrl_tl.start()
     except Exception:
         pass
     try:
         hits_cmd = [sys.executable or "python", "-u", "check_tp_sl_hits.py", "--watch"]
-        create_controller("hits", hits_cmd, cwd=HERE, log_put=logs.attach_named("hits"))
+        ctrl_hits = create_controller("hits", hits_cmd, cwd=HERE, log_put=logs.attach_named("hits"))
+        # Start hits controller automatically
+        if ctrl_hits is not None:
+            ctrl_hits.start()
     except Exception:
         pass
 
@@ -62,13 +68,27 @@ server = app.server
 
 # --- Layout pieces ---
 def monitors_layout():
+    # Check initial controller states
+    tl_button_text = "Start Timelapse"
+    hits_button_text = "Start Hits"
+    try:
+        if get_controller is not None:
+            ctrl_tl = get_controller("timelapse")
+            ctrl_hits = get_controller("hits")
+            if ctrl_tl is not None and ctrl_tl.is_running():
+                tl_button_text = "Stop Timelapse"
+            if ctrl_hits is not None and ctrl_hits.is_running():
+                hits_button_text = "Stop Hits"
+    except Exception:
+        pass
+
     return dbc.Row(
         [
             dbc.Col(
                 [
                     dbc.Row(
                         [
-                            dbc.Col(dbc.Button("Start Timelapse", id="btn-tl-toggle", color="primary", className="me-2"), width="auto"),
+                            dbc.Col(dbc.Button(tl_button_text, id="btn-tl-toggle", color="primary", className="me-2"), width="auto"),
                             dbc.Col(html.Span(id="status-tl", children="Unavailable", style={"marginLeft": "8px"}), width="auto"),
                         ],
                         align="center",
@@ -76,7 +96,7 @@ def monitors_layout():
                     html.Br(),
                     dbc.Row(
                         [
-                            dbc.Col(dbc.Button("Start Hits", id="btn-hits-toggle", color="secondary"), width="auto"),
+                            dbc.Col(dbc.Button(hits_button_text, id="btn-hits-toggle", color="secondary"), width="auto"),
                             dbc.Col(html.Span(id="status-hits", children="Unavailable", style={"marginLeft": "8px"}), width="auto"),
                         ],
                         align="center",
@@ -182,7 +202,7 @@ def pnl_layout():
 # --- App layout ---
 app.layout = dbc.Container(
     [
-        html.H2("EASY Insight - Timelapse Monitors (Dash)"),
+        html.H2("EASY Insight - Timelapse Monitors "),
         html.Div(id="status-msg"),
         dcc.Store(id="since-hours-store", data=168),
         dbc.Tabs(
@@ -244,31 +264,45 @@ def sync_since_hours_store(val):
 
 # --- Status badges updated periodically ---
 @app.callback(
-    [Output("status-tl", "children"), Output("status-hits", "children")],
+    [Output("status-tl", "children"), Output("status-hits", "children"),
+     Output("btn-tl-toggle", "children"), Output("btn-hits-toggle", "children")],
     [Input("interval-refresh", "n_intervals")],
     [State("tabs", "active_tab")],
 )
 def update_statuses(n, active_tab):
     if active_tab != "tab-monitors":
-        return no_update, no_update
+        return no_update, no_update, no_update, no_update
     tl_status = "Unavailable"
     hits_status = "Unavailable"
+    tl_button = "Start Timelapse"
+    hits_button = "Start Hits"
     try:
         if get_controller is not None:
             ctrl_tl = get_controller("timelapse")
             ctrl_hits = get_controller("hits")
-            tl_status = "Running" if (ctrl_tl is not None and ctrl_tl.is_running()) else "Stopped"
-            hits_status = "Running" if (ctrl_hits is not None and ctrl_hits.is_running()) else "Stopped"
+            if ctrl_tl is not None:
+                if ctrl_tl.is_running():
+                    tl_status = "Running"
+                    tl_button = "Stop Timelapse"
+                else:
+                    tl_status = "Stopped"
+                    tl_button = "Start Timelapse"
+            if ctrl_hits is not None:
+                if ctrl_hits.is_running():
+                    hits_status = "Running"
+                    hits_button = "Stop Hits"
+                else:
+                    hits_status = "Stopped"
+                    hits_button = "Start Hits"
     except Exception:
         tl_status = "Error"
         hits_status = "Error"
-    return tl_status, hits_status
+    return tl_status, hits_status, tl_button, hits_button
 
 
 # --- Toggle timelapse (uses exclude / min-prox values) ---
 @app.callback(
     [
-        Output("btn-tl-toggle", "children"),
         Output("status-msg", "children", allow_duplicate=True),
     ],
     [Input("btn-tl-toggle", "n_clicks")],
@@ -277,13 +311,13 @@ def update_statuses(n, active_tab):
 )
 def toggle_timelapse(n_clicks, exclude, min_prox_sl):
     if not n_clicks:
-        return "Start Timelapse", ""
+        return [""]
     try:
         if get_controller is None:
-            return "Start Timelapse", dbc.Alert("Process controller unavailable", color="warning")
+            return [dbc.Alert("Process controller unavailable", color="warning")]
         ctrl = get_controller("timelapse")
         if ctrl is None:
-            return "Start Timelapse", dbc.Alert("Timelapse controller not configured", color="warning")
+            return [dbc.Alert("Timelapse controller not configured", color="warning")]
         py = sys.executable or "python"
         cmd = [py, "-u", "timelapse_setups.py", "--watch"]
         try:
@@ -304,18 +338,16 @@ def toggle_timelapse(n_clicks, exclude, min_prox_sl):
         ctrl.cmd = cmd
         if not ctrl.is_running():
             ctrl.start()
-            return "Stop Timelapse", ""
         else:
             ctrl.stop()
-            return "Start Timelapse", ""
+        return [""]
     except Exception as e:
-        return "Start Timelapse", dbc.Alert(f"Error toggling timelapse: {e}", color="danger")
+        return [dbc.Alert(f"Error toggling timelapse: {e}", color="danger")]
 
 
 # --- Toggle hits ---
 @app.callback(
     [
-        Output("btn-hits-toggle", "children"),
         Output("status-msg", "children", allow_duplicate=True),
     ],
     [Input("btn-hits-toggle", "n_clicks")],
@@ -323,21 +355,20 @@ def toggle_timelapse(n_clicks, exclude, min_prox_sl):
 )
 def toggle_hits(n_clicks):
     if not n_clicks:
-        return "Start Hits", ""
+        return [""]
     try:
         if get_controller is None:
-            return "Start Hits", dbc.Alert("Process controller unavailable", color="warning")
+            return [dbc.Alert("Process controller unavailable", color="warning")]
         ctrl = get_controller("hits")
         if ctrl is None:
-            return "Start Hits", dbc.Alert("Hits controller not configured", color="warning")
+            return [dbc.Alert("Hits controller not configured", color="warning")]
         if not ctrl.is_running():
             ctrl.start()
-            return "Stop Hits", ""
         else:
             ctrl.stop()
-            return "Start Hits", ""
+        return [""]
     except Exception as e:
-        return "Start Hits", dbc.Alert(f"Error toggling hits: {e}", color="danger")
+        return [dbc.Alert(f"Error toggling hits: {e}", color="danger")]
 
 
 # --- DB refresh callback (uses since-hours) ---

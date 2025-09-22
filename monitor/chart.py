@@ -572,13 +572,13 @@ def _classify_symbol(sym: str) -> str:
 
 
 def pnl_category_figure(times: List[datetime], returns: List[float], cum: List[float], avg: List[float], symbols: List[str], title: str) -> go.Figure:
-    """Create a PnL figure with cumulative step, avg, and markers for wins/losses."""
+    """Create a PnL figure with cumulative step, avg, and trade markers/labels."""
     fig = go.Figure()
     if not times:
         fig.update_layout(title=title)
         return fig
     # Convert times to display tz for labels (preserve datetimes for x axis)
-    times_disp = []
+    times_disp: List[datetime] = []
     for t in times:
         try:
             times_disp.append(t.astimezone(DISPLAY_TZ))
@@ -589,23 +589,99 @@ def pnl_category_figure(times: List[datetime], returns: List[float], cum: List[f
     base_time = times_disp[0] - timedelta(seconds=1)
     times_plot = [base_time] + list(times_disp)
     cum_plot = [0.0] + list(cum)
-    avg_plot = [0.0] + (list(avg) if avg else [0.0] * len(cum))
+    avg_source = list(avg) if avg else [0.0] * len(cum)
+    avg_plot = [0.0] + avg_source
 
-    fig.add_trace(go.Scatter(x=times_plot, y=cum_plot, mode="lines", line=dict(shape="hv", color="#1f77b4", width=2), name="Cumulative"))
-    fig.add_trace(go.Scatter(x=times_plot, y=avg_plot, mode="lines", line=dict(shape="hv", color="#ff7f0e", width=1.5, dash="dash"), name="Avg per trade"))
+    fig.add_trace(
+        go.Scatter(
+            x=times_plot,
+            y=cum_plot,
+            mode="lines",
+            line=dict(shape="hv", color="#1f77b4", width=2),
+            name="Cumulative (10k)",
+            hovertemplate="Time: %{x|%Y-%m-%d %H:%M}<br>PnL: %{y:.2f}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=times_plot,
+            y=avg_plot,
+            mode="lines",
+            line=dict(shape="hv", color="#ff7f0e", width=1.5, dash="dash"),
+            name="Avg per trade (10k)",
+            hovertemplate="Time: %{x|%Y-%m-%d %H:%M}<br>PnL: %{y:.2f}<extra></extra>",
+        )
+    )
 
-    # markers for wins/losses at end of each trade
-    wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
-    wins_y = [cum[i] for i, v in enumerate(returns) if v > 0]
-    losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
-    losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
-    if wins_x:
-        fig.add_trace(go.Scatter(x=wins_x, y=wins_y, mode="markers", marker=dict(symbol="triangle-up", color="green", size=10), name="TP"))
-    if losses_x:
-        fig.add_trace(go.Scatter(x=losses_x, y=losses_y, mode="markers", marker=dict(symbol="triangle-down", color="red", size=10), name="SL"))
+    # Markers for wins/losses at end of each trade
+    wins_idx = [i for i, v in enumerate(returns) if v > 0]
+    losses_idx = [i for i, v in enumerate(returns) if v < 0]
+    if wins_idx:
+        fig.add_trace(
+            go.Scatter(
+                x=[times_disp[i] for i in wins_idx],
+                y=[cum[i] for i in wins_idx],
+                mode="markers",
+                marker=dict(symbol="triangle-up", color="green", size=10),
+                name="Win",
+                hovertemplate="Time: %{x|%Y-%m-%d %H:%M}<br>Cumulative: %{y:.2f}<extra></extra>",
+            )
+        )
+    if losses_idx:
+        fig.add_trace(
+            go.Scatter(
+                x=[times_disp[i] for i in losses_idx],
+                y=[cum[i] for i in losses_idx],
+                mode="markers",
+                marker=dict(symbol="triangle-down", color="red", size=10),
+                name="Loss",
+                hovertemplate="Time: %{x|%Y-%m-%d %H:%M}<br>Cumulative: %{y:.2f}<extra></extra>",
+            )
+        )
 
-    fig.update_layout(title=title, xaxis_title="Time (UTC+3)", yaxis_title="PnL", legend=dict(orientation="h"))
+    # Optional text labels for symbols to mimic MT5 desktop panels
+    label_points = min(len(symbols), len(cum), len(times_disp))
+    if label_points:
+        fig.add_trace(
+            go.Scatter(
+                x=times_disp[:label_points],
+                y=[cum[i] for i in range(label_points)],
+                mode="text",
+                text=[symbols[i] or "" for i in range(label_points)],
+                textposition="top center",
+                textfont=dict(size=11),
+                name="",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+    if returns:
+        last_idx = len(returns) - 1
+        if last_idx < len(times_disp) and last_idx < len(cum):
+            last_val = returns[last_idx]
+            fig.add_annotation(
+                x=times_disp[last_idx],
+                y=cum[last_idx],
+                text=f"{last_val:+.2f}",
+                showarrow=False,
+                font=dict(color="#333333", size=11),
+                bgcolor="#f5f5f5",
+                bordercolor="#b0b0b0",
+                borderwidth=1,
+                yshift=-18 if last_val < 0 else 18,
+            )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Time (UTC+3)",
+        yaxis_title="PnL (USD)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.0, bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=40, r=20, t=50, b=40),
+    )
     return fig
+
 
 
 def pnl_figures_from_series(series: Dict[str, Any]) -> Dict[str, go.Figure]:
@@ -622,6 +698,15 @@ def pnl_figures_from_series(series: Dict[str, Any]) -> Dict[str, go.Figure]:
     not_cum = series.get("not_cum", [])
     not_avg = series.get("not_avg", [])
 
+    def _select_or_fallback(primary: List[float], fallback: List[float]) -> List[float]:
+        if primary and len(primary) == len(times):
+            return primary
+        return fallback
+
+    returns_series = _select_or_fallback(notional_returns, norm_returns)
+    cum_series = _select_or_fallback(not_cum, cum)
+    avg_series = _select_or_fallback(not_avg, avg)
+
     # split indices
     idxs = {"forex": [], "crypto": [], "indices": []}
     for i, s in enumerate(symbols):
@@ -630,11 +715,29 @@ def pnl_figures_from_series(series: Dict[str, Any]) -> Dict[str, go.Figure]:
             cls = "forex"
         idxs[cls].append(i)
 
-    def sel(idxs_list, seq):
-        return [seq[i] for i in idxs_list]
+    def sel(idxs_list: List[int], seq: List[Any]) -> List[Any]:
+        if not seq:
+            return []
+        return [seq[i] for i in idxs_list if i < len(seq)]
 
-    fx_fig = pnl_category_figure(sel(idxs["forex"], times), sel(idxs["forex"], norm_returns), sel(idxs["forex"], cum), sel(idxs["forex"], avg), sel(idxs["forex"], symbols), "PnL (10k - Forex)")
-    crypto_fig = pnl_category_figure(sel(idxs["crypto"], times), sel(idxs["crypto"], norm_returns), sel(idxs["crypto"], cum), sel(idxs["crypto"], avg), sel(idxs["crypto"], symbols), "PnL (10k - Crypto)")
-    indices_fig = pnl_category_figure(sel(idxs["indices"], times), sel(idxs["indices"], norm_returns), sel(idxs["indices"], cum), sel(idxs["indices"], avg), sel(idxs["indices"], symbols), "PnL (10k - Indices)")
+    def build_category(idxs_list: List[int]):
+        cat_times = sel(idxs_list, times)
+        cat_returns = sel(idxs_list, returns_series)
+        cat_symbols = sel(idxs_list, symbols)
+        if cat_returns:
+            running = 0.0
+            cat_cum: List[float] = []
+            for value in cat_returns:
+                running += value
+                cat_cum.append(running)
+            cat_avg = [c / (i + 1) for i, c in enumerate(cat_cum)]
+        else:
+            cat_cum = sel(idxs_list, cum_series)
+            cat_avg = sel(idxs_list, avg_series)
+        return cat_times, cat_returns, cat_cum, cat_avg, cat_symbols
+
+    fx_fig = pnl_category_figure(*build_category(idxs["forex"]), "PnL (10k - Forex)")
+    crypto_fig = pnl_category_figure(*build_category(idxs["crypto"]), "PnL (10k - Crypto)")
+    indices_fig = pnl_category_figure(*build_category(idxs["indices"]), "PnL (10k - Indices)")
 
     return {"forex": fx_fig, "crypto": crypto_fig, "indices": indices_fig}

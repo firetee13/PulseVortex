@@ -52,7 +52,7 @@ from monitor.mt5_client import (
     init_mt5,
     resolve_symbol,
     shutdown_mt5,
-    ticks_range_all,
+    ticks_paged,
     to_server_naive,
 )
 
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
         "--page",
         type=int,
         default=200000,
-        help="Ignored: kept for backwards compatibility",
+        help="Maximum ticks per MT5 page when scanning history (default 200000)",
     )
     parser.add_argument(
         "--trace-pages",
@@ -176,6 +176,7 @@ def scan_for_hit_with_chunks(
     end_utc: datetime,
     chunk_minutes: Optional[int],
     trace: bool = False,
+    page_size: int = 200000,
 ) -> Tuple[Optional[Hit], TickFetchStats, int]:
     """Fetch ticks in bounded chunks until a hit is found or the range is exhausted."""
     if start_utc >= end_utc:
@@ -202,11 +203,13 @@ def scan_for_hit_with_chunks(
                 f"    [chunk] #{chunk_count} UTC {chunk_start.isoformat(timespec='seconds')} -> {chunk_end.isoformat(timespec='seconds')}"
             )
         fetch_start = perf_counter()
-        ticks, stats = ticks_range_all(
+        ticks, stats = ticks_paged(
             symbol,
             to_server_naive(chunk_start, offset_hours),
             to_server_naive(chunk_end, offset_hours),
+            page=page_size if page_size and page_size > 0 else 200000,
             trace=trace,
+            server_offset_hours=offset_hours,
         )
         fetch_elapsed = perf_counter() - fetch_start
         total_fetch_s += fetch_elapsed
@@ -230,6 +233,7 @@ def scan_for_hit_with_chunks(
         early_stop=hit is not None,
     )
     return hit, stats_out, chunk_count
+
 
 def run_once(args: argparse.Namespace) -> None:
     ids = _parse_ids(getattr(args, "ids", None))
@@ -340,6 +344,7 @@ def run_once(args: argparse.Namespace) -> None:
                     end_utc,
                     chunk_minutes,
                     trace=(args.verbose and args.trace_pages),
+                    page_size=int(getattr(args, "page", 200000)),
                 )
                 if args.verbose and chunk_count > 1 and chunk_minutes:
                     total_minutes = (end_utc - start_utc).total_seconds() / 60.0

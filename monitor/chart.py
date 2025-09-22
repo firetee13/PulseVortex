@@ -510,6 +510,9 @@ def _classify_symbol(sym: str) -> str:
         "APT",
         "SHIB",
         "PEPE",
+        "AVX",
+        "XTZ",
+        "DOG"
     ]
     if any(t in s for t in crypto_tickers):
         return "crypto"

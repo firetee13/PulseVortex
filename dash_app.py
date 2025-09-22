@@ -84,7 +84,7 @@ if create_controller is not None and logs is not None:
     except Exception:
         pass
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True, assets_folder='assets')
 server = app.server
 
 
@@ -172,7 +172,7 @@ def db_layout():
                 sort_action="native",
                 filter_action="native",
                 filter_options={"placeholder_text": "Filter..."},
-                style_table={"overflowX": "auto", "maxHeight": "300px"},
+                style_table={"overflowX": "auto", "height": "calc(100vh - 250px)", "maxHeight": "unset"},
                 fixed_rows={"headers": True},
                 style_cell={"textAlign": "left", "minWidth": "80px", "width": "120px", "maxWidth": "240px", "whiteSpace": "normal"},
                 css=[
@@ -201,10 +201,63 @@ def db_layout():
                     },
                 ],
             ),
-            html.Br(),
-            dcc.Graph(id="chart-ohlc", style={"height": "65vh"}),
+            # Hidden div to store selected row data
+            html.Div(id="selected-row-data", style={"display": "none"}),
+            # Modal for chart display
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(
+                        [
+                            html.H5("Chart View", className="modal-title"),
+                            dbc.Button("×", id="close-chart-modal", className="btn-close", n_clicks=0),
+                        ],
+                        className="modal-header"
+                    ),
+                    dbc.ModalBody(
+                        [
+                            html.Div(
+                                [
+                                    dbc.Spinner(
+                                        color="primary",
+                                        type="border",
+                                        spinner_style={"width": "3rem", "height": "3rem"}
+                                    ),
+                                    html.H5("Loading chart data...", className="mt-2")
+                                ],
+                                id="chart-loading-spinner",
+                                style={"textAlign": "center", "padding": "2rem"}
+                            ),
+                            dcc.Graph(
+                                id="chart-ohlc-modal",
+                                style={"height": "100%", "display": "none"}
+                            )
+                        ]
+                    ),
+                ],
+                id="chart-modal",
+                is_open=False,
+                backdrop="static",
+                keyboard=True,
+                centered=True,
+                size="xl",
+                style={
+                    "margin": "20px",
+                    "maxWidth": "90vw",
+                    "width": "90vw",
+                    "height": "90vh",
+                    "maxHeight": "none",
+                    "left": "50%",
+                    "transform": "translateX(-50%)",
+                    "overflow": "hidden"
+                },
+                content_style={
+                    "height": "100%",
+                    "maxHeight": "none",
+                    "overflow": "hidden"
+                }
+            ),
         ],
-        style={"height": "85vh"}
+        style={"height": "calc(100vh - 150px)"}
     )
 
 
@@ -236,6 +289,23 @@ app.layout = dbc.Container(
         ),
         html.Div(id="tab-content", style={"marginTop": "1rem"}),
         dcc.Interval(id="interval-refresh", interval=5 * 1000, n_intervals=0),
+        # JavaScript for handling ESC key to close modal
+        dcc.Location(id='url', refresh=False),
+        html.Div(id='js-trigger', style={'display': 'none'}),
+        html.Script("""
+            document.addEventListener('keydown', function(evt) {
+                if (evt.key === 'Escape') {
+                    const modal = document.querySelector('#chart-modal');
+                    if (modal && modal.classList.contains('show')) {
+                        // Find the close button and click it
+                        const closeBtn = document.querySelector('#close-chart-modal');
+                        if (closeBtn) {
+                            closeBtn.click();
+                        }
+                    }
+                }
+            });
+        """)
     ],
     fluid=True,
 )
@@ -593,33 +663,6 @@ def refresh_and_filter_db(n_intervals, running_clicks, sl_clicks, tp_clicks, sin
     
     # Default - show all entries, all buttons outlined
     return [styled_data, True, True, True]
-    
-    # Handle filtering
-    ctx = callback_context
-    if ctx.triggered:
-        button_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        
-        # Get the current state of each button (number of clicks)
-        running_clicks = running_clicks or 0
-        sl_clicks = sl_clicks or 0
-        tp_clicks = tp_clicks or 0
-        
-        # Check if the clicked button was already active (odd number of clicks means active)
-        if button_id == "btn-filter-running" and running_clicks % 2 == 1:
-            # Filter for running entries (no hit value)
-            filtered_data = [row for row in styled_data if row.get("row_style") == "running"]
-            return [filtered_data, False, True, True]  # Running active
-        elif button_id == "btn-filter-sl" and sl_clicks % 2 == 1:
-            # Filter for SL hits
-            filtered_data = [row for row in styled_data if row.get("row_style") == "sl_hit"]
-            return [filtered_data, True, False, True]  # SL active
-        elif button_id == "btn-filter-tp" and tp_clicks % 2 == 1:
-            # Filter for TP hits
-            filtered_data = [row for row in styled_data if row.get("row_style") == "tp_hit"]
-            return [filtered_data, True, True, False]  # TP active
-    
-    # Default - show all entries, all buttons outlined
-    return [styled_data, True, True, True]
 
 
 # --- OHLC chart for selected DB row ---
@@ -667,49 +710,111 @@ def refresh_logs(n_intervals, clear_clicks, active_tab):
 
 
 # --- OHLC chart for selected DB row ---
-@app.callback(Output("chart-ohlc", "figure"), [Input("db-table", "active_cell")], [State("db-table", "data")])
-def on_row_select(active_cell, data):
-    if not active_cell or not data:
-        return go.Figure()
-    try:
-        idx = int(active_cell.get("row")) if isinstance(active_cell, dict) else None
-    except Exception:
-        idx = None
-    if idx is None:
-        return go.Figure()
-    try:
-        row = data[idx]
-    except Exception:
-        return go.Figure()
-    raw_meta = row.get("_meta") if isinstance(row, dict) else None
-    meta = None
-    if isinstance(raw_meta, dict):
-        meta = raw_meta
-    elif isinstance(raw_meta, str) and raw_meta:
+
+
+@app.callback(
+    [Output("chart-modal", "is_open"),
+     Output("chart-ohlc-modal", "figure"),
+     Output("selected-row-data", "children"),
+     Output("chart-loading-spinner", "style"),
+     Output("chart-ohlc-modal", "style")],
+    [Input("db-table", "active_cell"),
+     Input("close-chart-modal", "n_clicks")],
+    [State("db-table", "data"),
+     State("chart-modal", "is_open")]
+)
+def on_row_select(active_cell, close_clicks, data, is_open):
+    """Handle row selection and modal display"""
+    ctx = callback_context
+    if not ctx.triggered:
+        # Hide loading spinner, show chart
+        chart_style = {"height": "100%", "display": "none"}
+        spinner_style = {"textAlign": "center", "padding": "2rem"}
+        return is_open, go.Figure(), "", spinner_style, chart_style
+        
+    button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    # Close button clicked
+    if button_id == "close-chart-modal":
+        # Hide loading spinner, hide chart
+        chart_style = {"height": "100%", "display": "none"}
+        spinner_style = {"textAlign": "center", "padding": "2rem"}
+        return False, go.Figure(), "", spinner_style, chart_style
+    
+    # Row selected
+    if button_id == "db-table" and active_cell and data:
+        # Show loading spinner, hide chart
+        spinner_style = {"textAlign": "center", "padding": "2rem", "display": "block"}
+        chart_style = {"height": "100%", "display": "none"}
+        
         try:
-            meta = json.loads(raw_meta)
+            idx = int(active_cell.get("row")) if isinstance(active_cell, dict) else None
         except Exception:
-            meta = None
-    if meta is None:
-        fig = go.Figure()
-        fig.update_layout(title="No metadata for selected row")
-        return fig
-    try:
-        if chart is None:
-            fig = go.Figure()
-            fig.update_layout(title=f"{meta.get('symbol', '')} — chart helper unavailable")
-            return fig
-        ohlc = chart.get_ohlc_for_setup(meta)
-        if ohlc is None:
-            fig = go.Figure()
-            fig.update_layout(title=f"{meta.get('symbol','')} — no tick data")
-            return fig
-        fig = chart.candlestick_figure_from_ohlc(ohlc)
-        return fig
-    except Exception as e:
-        fig = go.Figure()
-        fig.update_layout(title=f"Chart error: {e}")
-        return fig
+            idx = None
+        if idx is not None:
+            try:
+                row = data[idx]
+                raw_meta = row.get("_meta") if isinstance(row, dict) else None
+                meta = None
+                if isinstance(raw_meta, dict):
+                    meta = raw_meta
+                elif isinstance(raw_meta, str) and raw_meta:
+                    try:
+                        meta = json.loads(raw_meta)
+                    except Exception:
+                        meta = None
+                if meta is None:
+                    fig = go.Figure()
+                    fig.update_layout(title="No metadata for selected row")
+                    # Hide loading spinner, show chart
+                    spinner_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
+                    chart_style = {"height": "100%", "display": "block"}
+                    return True, fig, json.dumps(row), spinner_style, chart_style
+                try:
+                    if chart is None:
+                        fig = go.Figure()
+                        fig.update_layout(title=f"{meta.get('symbol', '')} — chart helper unavailable")
+                        # Hide loading spinner, show chart
+                        spinner_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
+                        chart_style = {"height": "100%", "display": "block"}
+                        return True, fig, json.dumps(row), spinner_style, chart_style
+                    ohlc = chart.get_ohlc_for_setup(meta)
+                    if ohlc is None:
+                        fig = go.Figure()
+                        fig.update_layout(title=f"{meta.get('symbol','')} — no tick data")
+                        # Hide loading spinner, show chart
+                        spinner_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
+                        chart_style = {"height": "100%", "display": "block"}
+                        return True, fig, json.dumps(row), spinner_style, chart_style
+                    fig = chart.candlestick_figure_from_ohlc(ohlc)
+                    # Hide loading spinner, show chart
+                    spinner_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
+                    chart_style = {"height": "100%", "display": "block"}
+                    return True, fig, json.dumps(row), spinner_style, chart_style
+                except Exception as e:
+                    fig = go.Figure()
+                    fig.update_layout(title=f"Chart error: {e}")
+                    # Hide loading spinner, show chart
+                    spinner_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
+                    chart_style = {"height": "100%", "display": "block"}
+                    return True, fig, json.dumps(row), spinner_style, chart_style
+            except Exception as e:
+                fig = go.Figure()
+                fig.update_layout(title=f"Error processing row: {e}")
+                # Hide loading spinner, show chart
+                spinner_style = {"textAlign": "center", "padding": "2rem", "display": "none"}
+                chart_style = {"height": "100%", "display": "block"}
+                return True, fig, "", spinner_style, chart_style
+        else:
+            # Hide loading spinner, hide chart
+            chart_style = {"height": "100%", "display": "none"}
+            spinner_style = {"textAlign": "center", "padding": "2rem"}
+            return is_open, go.Figure(), "", spinner_style, chart_style
+    
+    # Hide loading spinner, hide chart
+    chart_style = {"height": "100%", "display": "none"}
+    spinner_style = {"textAlign": "center", "padding": "2rem"}
+    return is_open, go.Figure(), "", spinner_style, chart_style
 
 
 # --- PnL charts refresh (uses since-hours) ---

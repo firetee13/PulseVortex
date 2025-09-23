@@ -290,6 +290,7 @@ def run_once(args: argparse.Namespace) -> None:
             resolve_cache: dict[str, Optional[str]] = {}
             checked = 0
             hits = 0
+            hit_symbols = []  # Track symbols with hits
 
             for setup in setups:
                 if setup.id in recorded:
@@ -391,8 +392,14 @@ def run_once(args: argparse.Namespace) -> None:
                         f"store={t_store*1000:.1f}ms resolve={t_resolve*1000:.1f}ms{extra} | ticks {stats.total_ticks} pages {stats.pages}"
                     )
                 hits += 1
+                hit_symbols.append(setup.symbol)  # Track the symbol with hit
 
-            print(f"Checked {checked} setup(s); hits recorded: {hits}.")
+            # Print the enhanced summary message
+            if hit_symbols:
+                symbols_str = " ".join(sorted(set(hit_symbols)))
+                print(f"Checked {checked} setup(s); hits recorded: {hits}. {symbols_str}")
+            else:
+                print(f"Checked {checked} setup(s); hits recorded: {hits}.")
         finally:
             shutdown_mt5()
     finally:

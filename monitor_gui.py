@@ -380,6 +380,15 @@ class App(tk.Tk):
         top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
 
         # DB config (variables already created in __init__)
+        # Add filter variables
+        self.var_symbol_category = tk.StringVar(value="All")
+        self.var_hit_status = tk.StringVar(value="All")
+        # Trace changes to filter variables to trigger refresh
+        try:
+            self.var_symbol_category.trace_add("write", self._on_filter_changed)
+            self.var_hit_status.trace_add("write", self._on_filter_changed)
+        except Exception:
+            pass
 
         def add_labeled(parent, label, widget):
             f = ttk.Frame(parent)
@@ -394,6 +403,16 @@ class App(tk.Tk):
         ttk.Checkbutton(row1, text="Auto", variable=self.var_auto, command=self._db_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
         add_labeled(row1, "Every(s):", ttk.Spinbox(row1, from_=5, to=3600, textvariable=self.var_interval, width=6)).pack(side=tk.LEFT)
         ttk.Button(row1, text="Restart", command=self._restart_monitors).pack(side=tk.RIGHT, padx=(10, 0))
+
+        # Add filter row
+        row2 = ttk.Frame(top)
+        row2.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
+        add_labeled(row2, "Category:", ttk.Combobox(row2, textvariable=self.var_symbol_category, 
+                                                  values=["All", "Forex", "Crypto", "Indices"], 
+                                                  state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
+        add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status, 
+                                                 values=["All", "TP", "SL", "Running", "Hits"], 
+                                                 state="readonly", width=10)).pack(side=tk.LEFT)
 
         # Tree (table)
         # Splitter: top table, bottom chart
@@ -504,6 +523,8 @@ class App(tk.Tk):
         self.pnl_crypto_chart_frame = None
         self.pnl_indices_status = None
         self.pnl_indices_chart_frame = None
+        # Filter refresh job
+        self._filter_refresh_job = None
 
         # PnL helper methods moved to class level (avoids nested defs in __init__)
 
@@ -1434,6 +1455,10 @@ class App(tk.Tk):
     def _db_fetch_thread(self) -> None:
         dbname = self.var_db_name.get().strip()
         hours = max(1, int(self.var_since_hours.get()))
+        
+        # Get filter values
+        symbol_category = self.var_symbol_category.get()
+        hit_status = self.var_hit_status.get()
 
         rows_display: list[tuple[str, str, str, str, str, str, str, str]] = []
         rows_meta: list[dict] = []
@@ -1467,7 +1492,35 @@ class App(tk.Tk):
                         """
                     )
                     cur.execute(sql, (thr,))
-                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) in cur.fetchall() or []:
+                    all_rows = cur.fetchall() or []
+                    
+                    # Apply filters in Python code instead of SQL
+                    filtered_rows = []
+                    for row in all_rows:
+                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) = row
+                        
+                        # Apply symbol category filter
+                        if symbol_category != "All":
+                            classified_category = self._classify_symbol(sym).title()
+                            if classified_category != symbol_category:
+                                continue
+                        
+                        # Apply hit status filter
+                        if hit_status != "All":
+                            if hit_status == "Running":
+                                if hit is not None:
+                                    continue
+                            elif hit_status == "Hits":
+                                if hit is None:
+                                    continue
+                            else:  # TP or SL
+                                if hit != hit_status:
+                                    continue
+                        
+                        filtered_rows.append(row)
+                    
+                    # Process filtered rows
+                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''
                         dir_s = str(direction) if direction is not None else ''
                         try:
@@ -2264,6 +2317,19 @@ class App(tk.Tk):
                 self.var_interval.set(interval)
             except Exception:
                 pass
+        # Load filter settings
+        symbol_category = data.get("symbol_category")
+        if isinstance(symbol_category, str):
+            try:
+                self.var_symbol_category.set(symbol_category)
+            except Exception:
+                pass
+        hit_status = data.get("hit_status")
+        if isinstance(hit_status, str):
+            try:
+                self.var_hit_status.set(hit_status)
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         data = {
@@ -2271,6 +2337,8 @@ class App(tk.Tk):
             "min_prox_sl": self.var_min_prox_sl.get() if self.var_min_prox_sl is not None else "0.25",
             "since_hours": self.var_since_hours.get() if self.var_since_hours is not None else 168,
             "interval": self.var_interval.get() if self.var_interval is not None else 60,
+            "symbol_category": self.var_symbol_category.get() if self.var_symbol_category is not None else "All",
+            "hit_status": self.var_hit_status.get() if self.var_hit_status is not None else "All",
         }
         try:
             with open(self._settings_path(), "w", encoding="utf-8") as f:
@@ -2289,6 +2357,17 @@ class App(tk.Tk):
             self._save_settings()
         except Exception:
             pass
+
+
+    def _on_filter_changed(self, *args) -> None:
+        """Trigger refresh when filter values change."""
+        # Schedule a refresh with a small delay to avoid excessive refreshes
+        if hasattr(self, '_filter_refresh_job') and self._filter_refresh_job is not None:
+            try:
+                self.after_cancel(self._filter_refresh_job)
+            except Exception:
+                pass
+        self._filter_refresh_job = self.after(300, self._db_refresh)
 
 
 

@@ -109,9 +109,10 @@ CANONICAL_KEYS: Dict[str, str] = {}
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Analyze MT5 symbols for trade setups (MT5 is the only source)")
     p.add_argument("--symbols", default="", help="Comma-separated symbols (default: all visible in MarketWatch)")
-    p.add_argument("--min-rrr", type=float, default=1.0, help="Minimum risk-reward ratio (default: 1.0)")
+    p.add_argument("--min-rrr", type=float, default=1.0, help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering")
     # Optional guards (disabled by default). Primary fix is bid/ask backfill.
-    p.add_argument("--min-prox-sl", type=float, default=0.0, help="Optional: require entry to be at least this fraction away from SL relative to SL..TP range")
+    p.add_argument("--min-prox-sl", type=float, default=0.0, help="Optional: require entry to be at least this fraction away from SL relative to SL/TP range")
+    p.add_argument("--max-prox-sl", type=float, default=1.0, help="Optional: require entry to be at most this fraction away from SL relative to SL/TP range")
     p.add_argument("--min-sl-pct", type=float, default=0.0, help="Optional: require |price-SL| to exceed this percent of price (units in %%)")
     p.add_argument("--top", type=int, default=None, help="Limit to top N setups (after filtering)")
     p.add_argument("--brief", action="store_true", help="Brief output without detailed explanation")
@@ -803,6 +804,7 @@ def process_once(
     symbols: List[str],
     min_rrr: float,
     min_prox_sl: float,
+    max_prox_sl: float,
     min_sl_pct: float,
     top: Optional[int],
     brief: bool,
@@ -831,6 +833,7 @@ def process_once(
         series,
         min_rrr=min_rrr,
         min_prox_sl=min_prox_sl,
+        max_prox_sl=max_prox_sl,
         min_sl_pct=min_sl_pct,
         as_of_ts=as_of_ts,
         debug=debug,
@@ -887,6 +890,7 @@ def watch_loop(
     interval: float,
     min_rrr: float,
     min_prox_sl: float,
+    max_prox_sl: float,
     min_sl_pct: float,
     top: Optional[int],
     brief: bool,
@@ -906,6 +910,7 @@ def watch_loop(
                 symbols,
                 min_rrr=min_rrr,
                 min_prox_sl=min_prox_sl,
+                max_prox_sl=max_prox_sl,
                 min_sl_pct=min_sl_pct,
                 top=top,
                 brief=brief,
@@ -922,6 +927,7 @@ def _watch_loop_events(
     symbols: List[str],
     min_rrr: float,
     min_prox_sl: float,
+    max_prox_sl: float,
     min_sl_pct: float,
     top: Optional[int],
     brief: bool,
@@ -935,6 +941,7 @@ def _watch_loop_events(
         interval=1.0,
         min_rrr=min_rrr,
         min_prox_sl=min_prox_sl,
+        max_prox_sl=max_prox_sl,
         min_sl_pct=min_sl_pct,
         top=top,
         brief=brief,
@@ -948,6 +955,7 @@ def analyze(
     series: Dict[str, List[Snapshot]],
     min_rrr: float,
     min_prox_sl: float,
+    max_prox_sl: float,
     min_sl_pct: float,
     as_of_ts: Optional[datetime],
     debug: bool = False,
@@ -1115,11 +1123,19 @@ def analyze(
                 prox = (price - sl) / (tp - sl)
                 # Gate: require minimum distance from SL as fraction of range
                 try:
-                    thr = max(0.0, min(0.49, float(min_prox_sl)))
+                    min_thr = max(0.0, min(0.49, float(min_prox_sl)))
                 except Exception:
-                    thr = 0.0
-                if prox < thr:
+                    min_thr = 0.0
+                if prox < min_thr:
                     bump("too_close_to_sl_prox")
+                    continue
+                # Gate: require maximum distance from SL as fraction of range
+                try:
+                    max_thr = max(0.0, min(1.0, float(max_prox_sl)))
+                except Exception:
+                    max_thr = 1.0
+                if prox > max_thr:
+                    bump("too_far_from_sl_prox")
                     continue
                 if prox <= 0.35:
                     prox_flag = "near_support"
@@ -1144,11 +1160,19 @@ def analyze(
                 prox = (sl - price) / (sl - tp)
                 # Gate: require minimum distance from SL as fraction of range
                 try:
-                    thr = max(0.0, min(0.49, float(min_prox_sl)))
+                    min_thr = max(0.0, min(0.49, float(min_prox_sl)))
                 except Exception:
-                    thr = 0.0
-                if prox < thr:
+                    min_thr = 0.0
+                if prox < min_thr:
                     bump("too_close_to_sl_prox")
+                    continue
+                # Gate: require maximum distance from SL as fraction of range
+                try:
+                    max_thr = max(0.0, min(1.0, float(max_prox_sl)))
+                except Exception:
+                    max_thr = 1.0
+                if prox > max_thr:
+                    bump("too_far_from_sl_prox")
                     continue
                 if prox <= 0.35:
                     prox_flag = "near_resistance"
@@ -1214,10 +1238,6 @@ def analyze(
                     continue
             except Exception:
                 pass
-
-        if rrr is None or rrr < min_rrr:
-            bump("rrr_too_low")
-            continue
 
         # Composite score
         score = 0.0
@@ -1547,6 +1567,7 @@ def main() -> None:
                 symbols=syms,
                 min_rrr=args.min_rrr,
                 min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
+                max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
                 min_sl_pct=max(0.0, args.min_sl_pct),
                 top=args.top,
                 brief=args.brief,
@@ -1560,6 +1581,7 @@ def main() -> None:
                 interval=max(0.5, args.interval),
                 min_rrr=args.min_rrr,
                 min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
+                max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
                 min_sl_pct=max(0.0, args.min_sl_pct),
                 top=args.top,
                 brief=args.brief,
@@ -1572,6 +1594,7 @@ def main() -> None:
         symbols=syms,
         min_rrr=args.min_rrr,
         min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
+        max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
         min_sl_pct=max(0.0, args.min_sl_pct),
         top=args.top,
         brief=args.brief,

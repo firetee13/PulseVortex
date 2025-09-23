@@ -1,6 +1,7 @@
 {
   "exclude_symbols": "",
   "min_prox_sl": "0.32",
+  "max_prox_sl": "0.5",
   "since_hours": 168,
   "interval": 20
 }

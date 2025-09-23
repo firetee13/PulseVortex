@@ -209,6 +209,8 @@ class App(tk.Tk):
         self.var_exclude_symbols = tk.StringVar(value="")
         # Min prox SL for timelapse setups
         self.var_min_prox_sl = tk.StringVar(value="0.25")
+        # Max prox SL for timelapse setups
+        self.var_max_prox_sl = tk.StringVar(value="0.5")
         # DB tab variables
         self.var_db_name = tk.StringVar(value=str(default_db_path()))
         self.var_since_hours = tk.IntVar(value=168)
@@ -223,6 +225,7 @@ class App(tk.Tk):
         try:
             self.var_exclude_symbols.trace_add("write", self._on_exclude_changed)
             self.var_min_prox_sl.trace_add("write", self._on_min_prox_changed)
+            self.var_max_prox_sl.trace_add("write", self._on_max_prox_changed)
         except Exception:
             pass
 
@@ -291,6 +294,12 @@ class App(tk.Tk):
         ttk.Label(mps_frame, text="Min Prox SL:").pack(side=tk.LEFT)
         ent_mps = ttk.Entry(mps_frame, textvariable=self.var_min_prox_sl)
         ent_mps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+        # Max Prox SL input
+        mxps_frame = ttk.Frame(tl)
+        mxps_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        ttk.Label(mxps_frame, text="Max Prox SL:").pack(side=tk.LEFT)
+        ent_mxps = ttk.Entry(mxps_frame, textvariable=self.var_max_prox_sl)
+        ent_mxps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
         # TP/SL Hits controls
         ht = ttk.LabelFrame(frm, text="TP/SL Hits --watch")
@@ -1112,7 +1121,7 @@ class App(tk.Tk):
                     label='Cumulative PnL (sum of +RRR/-1)', marker='o', markersize=3)
             ax.plot(times_plot, avg_plot, color='#ff7f0e', linewidth=1.2, linestyle='--',
                     label='Avg PnL per trade', marker='s', markersize=2)
-            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
+            ax.axhline(0.0, color='#888888', linewidth=2.0, linestyle='-', alpha=0.9)
         except Exception:
             pass
 
@@ -1298,8 +1307,8 @@ class App(tk.Tk):
         try:
             ax.set_title(title)
             ax.plot(times_plot, cum_plot, color='#2c7fb8', linewidth=2, label='Cumulative (10k)', marker='o', markersize=3)
-            ax.plot(times_plot, avg_plot, color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)', marker='s', markersize=2)
-            ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
+            # ax.plot(times_plot, avg_plot, color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)', marker='s', markersize=2)
+            ax.axhline(0.0, color='#888888', linewidth=2.0, linestyle='-', alpha=0.9)
         except Exception:
             pass
 
@@ -2159,7 +2168,7 @@ class App(tk.Tk):
 
     # Button handlers
     def _start_timelapse(self) -> None:
-        # Build command dynamically to include exclude list and min prox sl if provided
+        # Build command dynamically to include exclude list and prox sl if provided
         py = sys.executable or "python"
         cmd = [py, "-u", "timelapse_setups.py", "--watch"]
         try:
@@ -2174,6 +2183,12 @@ class App(tk.Tk):
             mps = ""
         if mps:
             cmd += ["--min-prox-sl", mps]
+        try:
+            mxps = (self.var_max_prox_sl.get() or "").strip()
+        except Exception:
+            mxps = ""
+        if mxps:
+            cmd += ["--max-prox-sl", mxps]
         self.timelapse.cmd = cmd
         self.timelapse.start()
 
@@ -2305,6 +2320,12 @@ class App(tk.Tk):
                 self.var_min_prox_sl.set(mps)
             except Exception:
                 pass
+        mxps = data.get("max_prox_sl")
+        if isinstance(mxps, str):
+            try:
+                self.var_max_prox_sl.set(mxps)
+            except Exception:
+                pass
         since = data.get("since_hours")
         if isinstance(since, int):
             try:
@@ -2335,6 +2356,7 @@ class App(tk.Tk):
         data = {
             "exclude_symbols": self.var_exclude_symbols.get() if self.var_exclude_symbols is not None else "",
             "min_prox_sl": self.var_min_prox_sl.get() if self.var_min_prox_sl is not None else "0.25",
+            "max_prox_sl": self.var_max_prox_sl.get() if self.var_max_prox_sl is not None else "0.5",
             "since_hours": self.var_since_hours.get() if self.var_since_hours is not None else 168,
             "interval": self.var_interval.get() if self.var_interval is not None else 60,
             "symbol_category": self.var_symbol_category.get() if self.var_symbol_category is not None else "All",
@@ -2353,6 +2375,12 @@ class App(tk.Tk):
             pass
 
     def _on_min_prox_changed(self, *args) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+
+    def _on_max_prox_changed(self, *args) -> None:
         try:
             self._save_settings()
         except Exception:

@@ -1085,12 +1085,12 @@ class App(tk.Tk):
             cum_plot = list(cum)
             avg_plot = list(avg) if avg else list(cum)
 
-        # Use step plots to emphasize per-trade jumps; add breakeven line
+        # Use smooth curves to show trends; add breakeven line
         try:
-            ax.step(times_plot, cum_plot, where='post', color='#1f77b4', linewidth=2,
-                    label='Cumulative PnL (sum of +RRR/-1)')
-            ax.step(times_plot, avg_plot, where='post', color='#ff7f0e', linewidth=1.2, linestyle='--',
-                    label='Avg PnL per trade')
+            ax.plot(times_plot, cum_plot, color='#1f77b4', linewidth=2,
+                    label='Cumulative PnL (sum of +RRR/-1)', marker='o', markersize=3)
+            ax.plot(times_plot, avg_plot, color='#ff7f0e', linewidth=1.2, linestyle='--',
+                    label='Avg PnL per trade', marker='s', markersize=2)
             ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
         except Exception:
             pass
@@ -1273,11 +1273,11 @@ class App(tk.Tk):
             cum_plot = list(cum_abs)
             avg_plot = list(avg_abs) if avg_abs else list(cum_abs)
 
-        # Plot cumulative and avg as steps, add breakeven line
+        # Plot cumulative and avg as smooth curves, add breakeven line
         try:
             ax.set_title(title)
-            ax.step(times_plot, cum_plot, where='post', color='#2c7fb8', linewidth=2, label='Cumulative (10k)')
-            ax.step(times_plot, avg_plot, where='post', color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)')
+            ax.plot(times_plot, cum_plot, color='#2c7fb8', linewidth=2, label='Cumulative (10k)', marker='o', markersize=3)
+            ax.plot(times_plot, avg_plot, color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)', marker='s', markersize=2)
             ax.axhline(0.0, color='#888888', linewidth=0.8, linestyle=':', alpha=0.8)
         except Exception:
             pass

@@ -2119,11 +2119,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Legend
-        try:
-            ax.legend(loc='lower right')
-        except Exception:
-            pass
+        # Legend - REMOVED as per request
 
         # Tight layout
         try:

@@ -26,12 +26,17 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter, sleep
 import os
 import sys
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     import sqlite3  # type: ignore
 except Exception:
     sqlite3 = None  # type: ignore
+
+try:
+    import redis  # type: ignore
+except Exception:
+    redis = None  # type: ignore
 
 from monitor.domain import Hit, TickFetchStats
 from monitor.config import db_path_str
@@ -53,6 +58,9 @@ from monitor.mt5_client import (
 )
 
 UTC = timezone.utc
+REALTIME_WINDOW_SECONDS = 1.0
+REALTIME_BACKTRACK_SECONDS = 0.2
+REDIS_DEFAULT_PREFIX = "timelapse:last_tick"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -112,6 +120,18 @@ def parse_args() -> argparse.Namespace:
         default=_env_bool("MT5_PORTABLE", False),
         help="Pass portable=True to MT5 (env: MT5_PORTABLE)",
     )
+    parser.add_argument(
+        "--redis-url",
+        dest="redis_url",
+        default=os.environ.get("TIMELAPSE_REDIS_URL", "redis://localhost:6379"),
+        help="Optional Redis URL for caching last-seen ticks (env: TIMELAPSE_REDIS_URL)",
+    )
+    parser.add_argument(
+        "--redis-prefix",
+        dest="redis_prefix",
+        default=os.environ.get("TIMELAPSE_REDIS_PREFIX", REDIS_DEFAULT_PREFIX),
+        help="Redis key prefix for cached ticks (default/env: timelapse:last_tick)",
+    )
     return parser.parse_args()
 
 
@@ -135,155 +155,241 @@ def _parse_symbols(symbols_arg: Optional[str]) -> Optional[List[str]]:
     return [s.strip() for s in symbols_arg.split(",") if s.strip()]
 
 
-def scan_for_hit_with_chunks(
+
+
+
+
+def fetch_recent_ticks(
     symbol: str,
-    direction: str,
-    sl: float,
-    tp: float,
     offset_hours: int,
-    start_utc: datetime,
-    end_utc: datetime,
-    chunk_minutes: Optional[int],
+    window_end_utc: datetime,
+    window_start_utc: Optional[datetime] = None,
+    window_seconds: float = REALTIME_WINDOW_SECONDS,
     trace: bool = False,
-) -> Tuple[Optional[Hit], TickFetchStats, int]:
-    """Fetch ticks in bounded chunks until a hit is found or the range is exhausted."""
-    if start_utc >= end_utc:
-        return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False), 0
-    chunk_span = 0 if chunk_minutes is None else max(0, int(chunk_minutes))
-    chunk_count = 0
-    total_ticks = 0
-    total_pages = 0
-    total_fetch_s = 0.0
-    total_scan_s = 0.0
-    hit: Optional[Hit] = None
-    chunk_start = start_utc
-    t0 = perf_counter()
-    while chunk_start < end_utc and hit is None:
-        chunk_count += 1
-        if chunk_span <= 0:
-            chunk_end = end_utc
-        else:
-            chunk_end = min(end_utc, chunk_start + timedelta(minutes=chunk_span))
-        if chunk_end <= chunk_start:
-            break
-        if trace:
-            print(
-                f"    [chunk] #{chunk_count} UTC {chunk_start.isoformat(timespec='seconds')} -> {chunk_end.isoformat(timespec='seconds')}"
-            )
-        fetch_start = perf_counter()
-        ticks, stats = ticks_range_all(
-            symbol,
-            to_server_naive(chunk_start, offset_hours),
-            to_server_naive(chunk_end, offset_hours),
-            trace=trace,
-        )
-        fetch_elapsed = perf_counter() - fetch_start
-        total_fetch_s += fetch_elapsed
-        total_ticks += stats.total_ticks
-        total_pages += stats.pages
-        scan_start = perf_counter()
-        candidate = earliest_hit_from_ticks(ticks, direction, sl, tp, offset_hours)
-        total_scan_s += perf_counter() - scan_start
-        if candidate is not None:
-            hit = candidate
-            break
-        chunk_start = chunk_end
-    elapsed = perf_counter() - t0
-    if elapsed == 0.0:
-        elapsed = total_fetch_s + total_scan_s
-    stats_out = TickFetchStats(
-        pages=total_pages,
-        total_ticks=total_ticks,
-        elapsed_s=elapsed,
-        fetch_s=total_fetch_s,
-        early_stop=hit is not None,
-    )
-    return hit, stats_out, chunk_count
-
-
-def check_realtime_ticks(
-    symbol: str,
-    direction: str,
-    sl: float,
-    tp: float,
-    offset_hours: int,
-    trace: bool = False,
-) -> Tuple[Optional[Hit], TickFetchStats]:
-    """
-    Check for hits in the last 1 second of ticks (real-time monitoring).
-    """
-    now_utc = datetime.now(UTC)
-    start_utc = now_utc - timedelta(seconds=1)
-
-    if start_utc >= now_utc:
-        return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+) -> Tuple[List[object], TickFetchStats]:
+    """Fetch MT5 ticks for the recent real-time monitoring window."""
+    if window_start_utc is None:
+        window_start_utc = window_end_utc - timedelta(seconds=window_seconds)
+    if window_start_utc >= window_end_utc:
+        empty_stats = TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+        return [], empty_stats
 
     if trace:
-        print(f"    [realtime] Checking last 1 second: {start_utc.isoformat()} -> {now_utc.isoformat()}")
+        window_len = (window_end_utc - window_start_utc).total_seconds()
+        print(
+            f"    [realtime] Checking window ({window_len:.3f}s): "
+            f"{window_start_utc.isoformat()} -> {window_end_utc.isoformat()}"
+        )
 
-    fetch_start = perf_counter()
     ticks, stats = ticks_range_all(
         symbol,
-        to_server_naive(start_utc, offset_hours),
-        to_server_naive(now_utc, offset_hours),
+        to_server_naive(window_start_utc, offset_hours),
+        to_server_naive(window_end_utc, offset_hours),
         trace=trace,
     )
-    fetch_elapsed = perf_counter() - fetch_start
 
-    scan_start = perf_counter()
-    hit = earliest_hit_from_ticks(ticks, direction, sl, tp, offset_hours)
-    scan_elapsed = perf_counter() - scan_start
-
-    total_elapsed = fetch_elapsed + scan_elapsed
-    stats_out = TickFetchStats(
+    fetch_stats = TickFetchStats(
         pages=stats.pages,
         total_ticks=stats.total_ticks,
-        elapsed_s=total_elapsed,
-        fetch_s=fetch_elapsed,
-        early_stop=hit is not None,
+        elapsed_s=stats.elapsed_s,
+        fetch_s=stats.fetch_s,
+        early_stop=False,
     )
+    return ticks, fetch_stats
 
-    return hit, stats_out
+
+def _tick_to_utc_prices(tick: object, server_offset_hours: int) -> Tuple[Optional[datetime], Optional[float], Optional[float]]:
+    bid = getattr(tick, 'bid', None)
+    if bid is None:
+        try:
+            bid = tick['bid']  # type: ignore[index]
+        except Exception:
+            if isinstance(tick, dict):
+                bid = tick.get('bid')
+    ask = getattr(tick, 'ask', None)
+    if ask is None:
+        try:
+            ask = tick['ask']  # type: ignore[index]
+        except Exception:
+            if isinstance(tick, dict):
+                ask = tick.get('ask')
+    if bid is None and ask is None:
+        return None, None, None
+
+    tms = getattr(tick, 'time_msc', None)
+    if tms is None:
+        try:
+            tms = tick['time_msc']  # type: ignore[index]
+        except Exception:
+            if isinstance(tick, dict):
+                tms = tick.get('time_msc')
+    dt_raw: Optional[datetime] = None
+    if tms is not None:
+        dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
+    else:
+        tse = getattr(tick, 'time', None)
+        if tse is None:
+            try:
+                tse = tick['time']  # type: ignore[index]
+            except Exception:
+                if isinstance(tick, dict):
+                    tse = tick.get('time')
+        if tse is None:
+            return None, None, None
+        dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
+
+    dt_utc = dt_raw - timedelta(hours=server_offset_hours)
+    return dt_utc, bid, ask
 
 
-def run_initial_check(args: argparse.Namespace, conn) -> Dict[str, List[Setup]]:
-    """
-    Perform initial historical check and return active symbols with their setups.
-    """
-    ids = _parse_ids(getattr(args, "ids", None))
-    symbols = _parse_symbols(getattr(args, "symbols", None))
+def _prepare_tick_data(ticks: List[object], server_offset_hours: int) -> List[Tuple[datetime, Optional[float], Optional[float]]]:
+    data: List[Tuple[datetime, Optional[float], Optional[float]]] = []
+    for tick in ticks:
+        dt_utc, bid, ask = _tick_to_utc_prices(tick, server_offset_hours)
+        if dt_utc is None:
+            continue
+        data.append((dt_utc, bid, ask))
+    return data
+
+
+def _find_hit_in_tick_data(
+    tick_data: List[Tuple[datetime, Optional[float], Optional[float]]],
+    direction: str,
+    sl: float,
+    tp: float,
+    start_utc: datetime,
+) -> Optional[Hit]:
+    direction_lower = direction.lower()
+    for dt_utc, bid, ask in tick_data:
+        if dt_utc < start_utc:
+            continue
+        if direction_lower == 'buy':
+            if bid is not None and bid <= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=bid)
+            if bid is not None and bid >= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=bid)
+        else:
+            if ask is not None and ask >= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=ask)
+            if ask is not None and ask <= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=ask)
+    return None
+
+
+def create_redis_client(args: argparse.Namespace) -> Optional[Any]:
+    redis_url = getattr(args, 'redis_url', None)
+    if not redis_url:
+        return None
+    if redis is None:
+        print('WARNING: redis package not available; ignoring --redis-url parameter.')
+        return None
+    try:
+        client = redis.Redis.from_url(
+            redis_url,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+            decode_responses=True,
+        )
+        client.ping()
+    except Exception as exc:  # pragma: no cover - depends on redis availability
+        print(
+            f'WARNING: Failed to connect to Redis at {redis_url} ({exc}). Continuing without Redis caching.'
+        )
+        return None
+    return client
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _redis_key(prefix: str, symbol: str) -> str:
+    sanitized = symbol.replace(' ', '_')
+    return f'{prefix}:{sanitized}'
+
+
+def _read_last_tick(redis_client: Any, prefix: str, symbol: str) -> Optional[datetime]:
+    if redis_client is None:
+        return None
+    try:
+        value = redis_client.get(_redis_key(prefix, symbol))
+    except Exception:
+        return None
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
+    return _ensure_utc(dt)
+
+
+def _write_last_tick(redis_client: Any, prefix: str, symbol: str, dt: datetime) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.set(_redis_key(prefix, symbol), _ensure_utc(dt).isoformat())
+    except Exception:
+        pass
+
+
+def _latest_tick_time_utc(ticks: Sequence[object], server_offset_hours: int) -> Optional[datetime]:
+    try:
+        length = len(ticks)
+    except Exception:
+        length = None
+    if length:
+        for idx in range(length - 1, -1, -1):
+            try:
+                tick = ticks[idx]
+            except Exception:
+                continue
+            dt_utc, _, _ = _tick_to_utc_prices(tick, server_offset_hours)
+            if dt_utc is not None:
+                return dt_utc
+        return None
+    latest: Optional[datetime] = None
+    for tick in ticks:
+        dt_utc, _, _ = _tick_to_utc_prices(tick, server_offset_hours)
+        if dt_utc is not None:
+            latest = dt_utc
+    return latest
+
+def run_initial_check(args: argparse.Namespace, conn, redis_client: Optional[Any] = None, redis_prefix: str = REDIS_DEFAULT_PREFIX) -> Dict[str, List[Setup]]:
+    """Perform initial historical check and return active symbols with their setups."""
+    ids = _parse_ids(getattr(args, 'ids', None))
+    symbols = _parse_symbols(getattr(args, 'symbols', None))
 
     ensure_hits_table_sqlite(conn)
-    backfill_hit_columns_sqlite(conn, "timelapse_setups")
+    backfill_hit_columns_sqlite(conn, 'timelapse_setups')
 
     setups = load_setups_sqlite(
         conn,
-        "timelapse_setups",
-        None if ids else getattr(args, "since_hours", None),
+        'timelapse_setups',
+        None if ids else getattr(args, 'since_hours', None),
         ids,
         symbols,
     )
 
     if not setups:
-        print("No setups to check.")
+        print('No setups to check.')
         return {}
 
     id_list = [setup.id for setup in setups]
     recorded = load_recorded_ids_sqlite(conn, id_list)
 
-    # Group setups by symbol
     symbol_setups: Dict[str, List[Setup]] = {}
     for setup in setups:
         if setup.id not in recorded:
-            if setup.symbol not in symbol_setups:
-                symbol_setups[setup.symbol] = []
-            symbol_setups[setup.symbol].append(setup)
+            symbol_setups.setdefault(setup.symbol, []).append(setup)
 
     if not symbol_setups:
-        print("All setups already have hits recorded.")
+        print('All setups already have hits recorded.')
         return {}
 
-    print(f"Performing initial historical check for {len(symbol_setups)} symbols...")
+    print(f'Performing initial historical check for {len(symbol_setups)} symbols...')
 
     resolve_cache: dict[str, Optional[str]] = {}
     checked = 0
@@ -314,96 +420,147 @@ def run_initial_check(args: argparse.Namespace, conn) -> Dict[str, List[Setup]]:
         mt5_offset_s = perf_counter() - t_off_start
 
         if args.verbose:
-            sign = "+" if offset_h >= 0 else "-"
+            sign = '+' if offset_h >= 0 else '-'
             print(f"[offset] {sym_name} server offset {sign}{abs(offset_h)}h")
 
-        active_setups_for_symbol = []
+        pending_setups = sorted(symbol_setups_list, key=lambda s: s.as_of_utc)
+        if not pending_setups:
+            continue
 
-        for setup in symbol_setups_list:
-            start_utc = setup.as_of_utc
-            end_utc = now_utc
+        setup_states = {
+            setup.id: {
+                'ticks': 0,
+                'pages': 0,
+                'fetch_s': 0.0,
+                'scan_s': 0.0,
+                'chunks': 0,
+            }
+            for setup in pending_setups
+        }
 
-            if args.verbose:
-                print(
-                    f"[historical] #{setup.id} {setup.symbol} {setup.direction} | "
-                    f"UTC {start_utc.isoformat(timespec='seconds')} -> {end_utc.isoformat(timespec='seconds')}"
-                )
+        chunk_minutes = 60
+        chunk_delta = timedelta(minutes=chunk_minutes)
+        chunk_start = min(setup.as_of_utc for setup in pending_setups)
 
-            hit, stats, chunk_count = scan_for_hit_with_chunks(
+        while pending_setups and chunk_start < now_utc:
+            chunk_end = min(now_utc, chunk_start + chunk_delta)
+
+            ticks, chunk_stats = ticks_range_all(
                 sym_name,
-                setup.direction,
-                setup.sl,
-                setup.tp,
-                offset_h,
-                start_utc,
-                end_utc,
-                chunk_minutes=60,  # Use 60-minute chunks for historical scan
+                to_server_naive(chunk_start, offset_h),
+                to_server_naive(chunk_end, offset_h),
                 trace=args.verbose,
             )
 
-            if args.verbose and chunk_count > 1:
-                total_minutes = (end_utc - start_utc).total_seconds() / 60.0
-                print(
-                    f"[chunks] #{setup.id} scanned {chunk_count} chunk(s) (max 60 mins each, total {total_minutes:.1f} mins)"
+            tick_data = _prepare_tick_data(ticks, offset_h)
+
+            if redis_client is not None:
+                latest_tick_dt = _latest_tick_time_utc(ticks, offset_h)
+                if latest_tick_dt is None:
+                    latest_tick_dt = _ensure_utc(chunk_end)
+                _write_last_tick(redis_client, redis_prefix, sym_name, latest_tick_dt)
+
+            for setup in list(pending_setups):
+                if setup.as_of_utc > chunk_end:
+                    continue
+
+                state = setup_states[setup.id]
+                state['chunks'] += 1
+                state['ticks'] += chunk_stats.total_ticks
+                state['pages'] += chunk_stats.pages
+                state['fetch_s'] += chunk_stats.fetch_s
+
+                scan_start_time = perf_counter()
+                hit_candidate = _find_hit_in_tick_data(
+                    tick_data,
+                    setup.direction,
+                    setup.sl,
+                    setup.tp,
+                    setup.as_of_utc,
                 )
+                state['scan_s'] += perf_counter() - scan_start_time
 
-            thr = (stats.total_ticks / stats.elapsed_s) if stats.elapsed_s > 0 else 0.0
-            avg_per_page = (stats.total_ticks / stats.pages) if stats.pages > 0 else 0.0
-            t_fetch_ms = stats.fetch_s * 1000.0
-            t_scan_ms = max(0.0, (stats.elapsed_s - stats.fetch_s) * 1000.0)
+                if hit_candidate is not None and hit_candidate.time_utc <= setup.as_of_utc + timedelta(milliseconds=1):
+                    hit_candidate = None
 
-            if args.verbose:
-                print(
-                    f"[fetch] #{setup.id} ticks={stats.total_ticks} pages={stats.pages} "
-                    f"time={stats.elapsed_s*1000:.1f}ms thr={thr:,.0f} t/s avg_pg={avg_per_page:,.1f}"
-                )
+                if hit_candidate is None:
+                    continue
 
-            checked += 1
+                total_ticks = state['ticks']
+                total_pages = state['pages']
+                elapsed_s = state['fetch_s'] + state['scan_s']
+                thr = (total_ticks / elapsed_s) if elapsed_s > 0 else 0.0
+                avg_per_page = (total_ticks / total_pages) if total_pages > 0 else 0.0
+                t_fetch_ms = state['fetch_s'] * 1000.0
+                t_scan_ms = state['scan_s'] * 1000.0
+                total_minutes = (hit_candidate.time_utc - setup.as_of_utc).total_seconds() / 60.0
 
-            if hit is not None:
-                try:
-                    if hit.time_utc <= setup.as_of_utc + timedelta(milliseconds=1):
-                        if args.verbose:
-                            print(
-                                f"[IGNORED HIT] #{setup.id} {setup.symbol} {setup.direction} -> {hit.kind} "
-                                f"at {hit.time_utc.isoformat()} (<= as_of)"
-                            )
-                        hit = None
-                except Exception:
-                    pass
-
-            if hit is None:
-                if args.verbose:
-                    duration = (now_utc - setup.as_of_utc).total_seconds()
-                    extra = " cache" if cache_used else ""
+                if args.verbose and state['chunks'] > 1:
                     print(
-                        f"[NO HIT] #{setup.id} {setup.symbol} {setup.direction} | "
-                        f"window {duration/60:.1f} mins | ticks {stats.total_ticks} | pages {stats.pages} | "
-                        f"fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms resolve={t_resolve*1000:.1f}ms{extra}"
+                        f"[chunks] #{setup.id} scanned {int(state['chunks'])} chunk(s) "
+                        f"(max {chunk_minutes} mins each, total {total_minutes:.1f} mins)"
                     )
-                active_setups_for_symbol.append(setup)
-            else:
-                t_store_start = perf_counter()
-                record_hit_sqlite(conn, setup, hit, args.dry_run, args.verbose)
-                t_store = perf_counter() - t_store_start
                 if args.verbose:
-                    extra = " cache" if cache_used else ""
+                    print(
+                        f"[fetch] #{setup.id} ticks={total_ticks} pages={total_pages} "
+                        f"time={elapsed_s*1000:.1f}ms thr={thr:,.0f} t/s avg_pg={avg_per_page:,.1f}"
+                    )
+
+                t_store_start = perf_counter()
+                record_hit_sqlite(conn, setup, hit_candidate, args.dry_run, args.verbose)
+                t_store = perf_counter() - t_store_start
+
+                if args.verbose:
+                    extra = ' cache' if cache_used else ''
                     print(
                         f"[HIT TIMING] #{setup.id} fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms "
-                        f"store={t_store*1000:.1f}ms resolve={t_resolve*1000:.1f}ms{extra} | ticks {stats.total_ticks} pages {stats.pages}"
+                        f"store={t_store*1000:.1f}ms resolve={t_resolve*1000:.1f}ms{extra} | "
+                        f"ticks {total_ticks} pages {total_pages}"
                     )
+
                 hits += 1
+                pending_setups.remove(setup)
 
-        if active_setups_for_symbol:
-            active_symbol_setups[symbol] = active_setups_for_symbol
+            if not pending_setups:
+                break
 
-    print(f"Initial check complete. Checked {checked} setup(s); hits recorded: {hits}.")
-    print(f"Active symbols for real-time monitoring: {len(active_symbol_setups)}")
+            future_starts = [s.as_of_utc for s in pending_setups if s.as_of_utc > chunk_end]
+            if future_starts:
+                chunk_start = min(future_starts)
+            else:
+                chunk_start = chunk_end
+
+        remaining_setups: List[Setup] = []
+        for setup in pending_setups:
+            state = setup_states[setup.id]
+            total_ticks = state['ticks']
+            total_pages = state['pages']
+            elapsed_s = state['fetch_s'] + state['scan_s']
+            thr = (total_ticks / elapsed_s) if elapsed_s > 0 else 0.0
+            avg_per_page = (total_ticks / total_pages) if total_pages > 0 else 0.0
+            t_fetch_ms = state['fetch_s'] * 1000.0
+            t_scan_ms = state['scan_s'] * 1000.0
+            duration = (now_utc - setup.as_of_utc).total_seconds()
+            if args.verbose:
+                extra = ' cache' if cache_used else ''
+                print(
+                    f"[NO HIT] #{setup.id} {setup.symbol} {setup.direction} | "
+                    f"window {duration/60:.1f} mins | ticks {total_ticks} | pages {total_pages} | "
+                    f"fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms resolve={t_resolve*1000:.1f}ms{extra}"
+                )
+            remaining_setups.append(setup)
+
+        if remaining_setups:
+            active_symbol_setups[symbol] = remaining_setups
+
+        checked += len(symbol_setups_list)
+
+    print(f'Initial check complete. Checked {checked} setup(s); hits recorded: {hits}.')
+    print(f'Active symbols for real-time monitoring: {len(active_symbol_setups)}')
 
     return active_symbol_setups
 
-
-def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setups: Dict[str, List[Setup]]) -> None:
+def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setups: Dict[str, List[Setup]], redis_client: Optional[Any] = None, redis_prefix: str = REDIS_DEFAULT_PREFIX) -> None:
     """
     Main real-time monitoring loop that runs every 200ms.
     """
@@ -415,6 +572,7 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
 
     resolve_cache: dict[str, Optional[str]] = {}
     offset_cache: Dict[str, int] = {}
+    last_poll_end: Dict[str, datetime] = {}
 
     try:
         while True:
@@ -441,6 +599,11 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
                     symbols_to_remove.append(symbol)
                     continue
 
+                if redis_client is not None and sym_name not in last_poll_end:
+                    cached_dt = _read_last_tick(redis_client, redis_prefix, sym_name)
+                    if cached_dt is not None:
+                        last_poll_end[sym_name] = cached_dt
+
                 # Get server offset
                 offset_h = offset_cache.get(sym_name)
                 if offset_h is None:
@@ -449,18 +612,40 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
 
                 setups_to_remove = []
 
+                prev_poll_end = last_poll_end.get(sym_name)
+                if prev_poll_end is None:
+                    window_start_utc = now_utc - timedelta(seconds=REALTIME_WINDOW_SECONDS)
+                else:
+                    window_start_utc = prev_poll_end - timedelta(seconds=REALTIME_BACKTRACK_SECONDS)
+                    min_start = now_utc - timedelta(seconds=REALTIME_WINDOW_SECONDS)
+                    if window_start_utc < min_start:
+                        window_start_utc = min_start
+
+                ticks, fetch_stats = fetch_recent_ticks(
+                    sym_name,
+                    offset_h,
+                    now_utc,
+                    window_start_utc=window_start_utc,
+                    window_seconds=REALTIME_WINDOW_SECONDS,
+                    trace=args.verbose,
+                )
+
+                latest_tick_dt = _latest_tick_time_utc(ticks, offset_h)
+                if latest_tick_dt is None:
+                    latest_tick_dt = _ensure_utc(now_utc)
+
                 for setup in setups:
                     total_checks += 1
 
-                    # Check for hits in the last 1 second
-                    hit, stats = check_realtime_ticks(
-                        sym_name,
+                    scan_start = perf_counter()
+                    hit = earliest_hit_from_ticks(
+                        ticks,
                         setup.direction,
                         setup.sl,
                         setup.tp,
                         offset_h,
-                        trace=args.verbose,
                     )
+                    scan_elapsed = perf_counter() - scan_start
 
                     if hit is not None:
                         # Validate hit timestamp (should be very recent)
@@ -477,6 +662,13 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
                             )
 
                             if args.verbose:
+                                stats = TickFetchStats(
+                                    pages=fetch_stats.pages,
+                                    total_ticks=fetch_stats.total_ticks,
+                                    elapsed_s=fetch_stats.elapsed_s + scan_elapsed,
+                                    fetch_s=fetch_stats.fetch_s,
+                                    early_stop=True,
+                                )
                                 t_fetch_ms = stats.fetch_s * 1000.0
                                 t_scan_ms = max(0.0, (stats.elapsed_s - stats.fetch_s) * 1000.0)
                                 print(
@@ -493,6 +685,10 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
                 # Remove symbol if no more setups
                 if not setups:
                     symbols_to_remove.append(symbol)
+
+                last_poll_end[sym_name] = latest_tick_dt
+                if redis_client is not None:
+                    _write_last_tick(redis_client, redis_prefix, sym_name, latest_tick_dt)
 
             # Clean up removed symbols
             for symbol in symbols_to_remove:
@@ -521,6 +717,9 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
 def main() -> None:
     args = parse_args()
 
+    redis_client = create_redis_client(args)
+    redis_prefix = getattr(args, "redis_prefix", REDIS_DEFAULT_PREFIX)
+
     if sqlite3 is None:
         print("ERROR: sqlite3 not available.")
         sys.exit(2)
@@ -548,11 +747,11 @@ def main() -> None:
 
         try:
             # Perform initial historical check
-            active_symbol_setups = run_initial_check(args, conn)
+            active_symbol_setups = run_initial_check(args, conn, redis_client, redis_prefix)
 
             # Start real-time monitoring if there are active symbols
             if active_symbol_setups:
-                realtime_monitoring_loop(args, conn, active_symbol_setups)
+                realtime_monitoring_loop(args, conn, active_symbol_setups, redis_client, redis_prefix)
             else:
                 print("No active symbols found for real-time monitoring.")
 

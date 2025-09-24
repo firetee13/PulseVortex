@@ -2,7 +2,7 @@
 """
 Simple GUI launcher for:
  - timelapse_setups.py --watch
- - check_tp_sl_hits.py --watch
+ - realtime_check_tp_sl_hits.py
 
 Provides Start/Stop buttons and a shared log output.
 
@@ -264,7 +264,7 @@ class App(tk.Tk):
         )
         self.hits = ProcController(
             name="hits",
-            cmd=[py, "-u", "check_tp_sl_hits.py", "--watch"],
+            cmd=[py, "-u", "realtime_check_tp_sl_hits.py"],
             log_put=self._enqueue_log,
         )
 
@@ -301,8 +301,8 @@ class App(tk.Tk):
         ent_mxps = ttk.Entry(mxps_frame, textvariable=self.var_max_prox_sl)
         ent_mxps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
-        # TP/SL Hits controls
-        ht = ttk.LabelFrame(frm, text="TP/SL Hits --watch")
+        # Real-time TP/SL Hits controls
+        ht = ttk.LabelFrame(frm, text="Real-time TP/SL Hits")
         ht.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.X, expand=True)
         self.btn_hits_toggle = ttk.Button(ht, text="Start", command=self._toggle_hits)
         self.btn_hits_toggle.pack(side=tk.LEFT, padx=4, pady=6)
@@ -416,11 +416,11 @@ class App(tk.Tk):
         # Add filter row
         row2 = ttk.Frame(top)
         row2.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
-        add_labeled(row2, "Category:", ttk.Combobox(row2, textvariable=self.var_symbol_category, 
-                                                  values=["All", "Forex", "Crypto", "Indices"], 
+        add_labeled(row2, "Category:", ttk.Combobox(row2, textvariable=self.var_symbol_category,
+                                                  values=["All", "Forex", "Crypto", "Indices"],
                                                   state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
-        add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status, 
-                                                 values=["All", "TP", "SL", "Running", "Hits"], 
+        add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status,
+                                                 values=["All", "TP", "SL", "Running", "Hits"],
                                                  state="readonly", width=10)).pack(side=tk.LEFT)
 
         # Tree (table)
@@ -1464,7 +1464,7 @@ class App(tk.Tk):
     def _db_fetch_thread(self) -> None:
         dbname = self.var_db_name.get().strip()
         hours = max(1, int(self.var_since_hours.get()))
-        
+
         # Get filter values
         symbol_category = self.var_symbol_category.get()
         hit_status = self.var_hit_status.get()
@@ -1502,18 +1502,18 @@ class App(tk.Tk):
                     )
                     cur.execute(sql, (thr,))
                     all_rows = cur.fetchall() or []
-                    
+
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
                         (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) = row
-                        
+
                         # Apply symbol category filter
                         if symbol_category != "All":
                             classified_category = self._classify_symbol(sym).title()
                             if classified_category != symbol_category:
                                 continue
-                        
+
                         # Apply hit status filter
                         if hit_status != "All":
                             if hit_status == "Running":
@@ -1525,9 +1525,9 @@ class App(tk.Tk):
                             else:  # TP or SL
                                 if hit != hit_status:
                                     continue
-                        
+
                         filtered_rows.append(row)
-                    
+
                     # Process filtered rows
                     for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''

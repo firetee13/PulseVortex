@@ -4,7 +4,7 @@ A comprehensive Python application suite for MT5 trading that includes:
 
 - **CLI Setup Analyzer** (`timelapse_setups.py`): Analyzes MT5 symbols to identify high-confidence trade setups
 - **GUI Monitor** (`monitor_gui.py`): Visual interface for real-time monitoring and analysis
-- **TP/SL Hit Checker** (`check_tp_sl_hits.py`): Automated monitoring of take-profit and stop-loss hits
+- **Real-time TP/SL Hit Checker** (`realtime_check_tp_sl_hits.py`): Real-time monitoring of take-profit and stop-loss hits every 200ms for active symbols
 
 Designed for forex and crypto traders seeking automated setup detection, real-time monitoring, and comprehensive risk management with advanced filtering and visualization features.
 
@@ -215,25 +215,26 @@ python timelapse_setups.py [OPTIONS]
 - `--brief`: Brief output without detailed explanations
 - `--debug`: Enable debug output with filtering diagnostics
 
-### TP/SL Hit Checker (`check_tp_sl_hits.py`)
+### Real-time TP/SL Hit Checker (`realtime_check_tp_sl_hits.py`)
 
-Monitor existing setups for take-profit and stop-loss hits:
+Monitor existing setups for take-profit and stop-loss hits in real-time:
 
 ```bash
-python check_tp_sl_hits.py --since-hours 24
-python check_tp_sl_hits.py --ids 1,2,3 --verbose
-python check_tp_sl_hits.py --symbols EURUSD,GBPUSD --watch --interval 30
+python realtime_check_tp_sl_hits.py --since-hours 24
+python realtime_check_tp_sl_hits.py --ids 1,2,3 --verbose
+python realtime_check_tp_sl_hits.py --symbols EURUSD,GBPUSD
 ```
 
-#### Hit Checker Options
+#### Real-time Hit Checker Options
 - `--since-hours HOURS`: Check setups from last N hours (default: all)
 - `--ids IDS`: Comma-separated setup IDs to check
 - `--symbols SYMBOLS`: Filter by specific symbols
-- `--max-mins MINS`: Maximum history to scan (default: 1440 minutes)
-- `--watch`: Run continuously with polling
-- `--interval SEC`: Polling interval for watch mode (default: 60)
+- Runs continuously every 200ms for active symbols (no --watch needed)
+- Performs initial historical check on startup
 - `--dry-run`: Test without saving to database
 - `--verbose`: Detailed output with timing information
+- Real-time mode: Checks every 200ms for new ticks in the last second
+- Initial historical scan on startup for all active setups
 
 ## Configuration
 
@@ -319,10 +320,11 @@ python -m unittest tests.test_timelapse_setups -v
    - ATR-based volatility assessment
    - Setup scoring and risk-reward validation
 
-3. **Hit Monitoring Engine** (`check_tp_sl_hits.py`)
-   - Real-time TP/SL detection using tick data
-   - Performance-optimized tick range fetching
-   - Hit deduplication and timestamp validation
+3. **Real-time Hit Monitoring Engine** (`realtime_check_tp_sl_hits.py`)
+   - Real-time TP/SL detection every 200ms for active symbols
+   - Efficient latest-tick fetching (last 1 second only)
+   - Initial historical scan on startup
+   - Active symbol tracking (only monitors symbols without hits)
 
 4. **Data Persistence Layer** (`monitor/db.py`)
    - SQLite database operations

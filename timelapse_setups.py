@@ -26,7 +26,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set, TypedDict, Union
 # DB backend: SQLite only
 try:
     import sqlite3  # type: ignore
@@ -87,7 +87,7 @@ def _symbol_digits(symbol: str, price: Optional[float]) -> int:
     try:
         if _MT5_IMPORTED and _mt5_ensure_init():
             try:
-                info = mt5.symbol_info(symbol)
+                info = mt5.symbol_info(symbol)  # type: ignore[union-attr, reportUnknownMember]
                 if info is not None:
                     d = int(getattr(info, "digits", 0) or 0)
                     if 0 <= d <= 10:
@@ -137,9 +137,9 @@ _LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[dat
 # Cache MT5 rate data with lightweight TTLs per timeframe to reduce IPC churn
 _RATE_CACHE: Dict[Tuple[str, int, int], Tuple[float, Any]] = {}
 # Reusable SQLite connection handle (populated lazily)
-_DB_CONN: Optional["sqlite3.Connection"] = None
+_DB_CONN: Optional[Any] = None
 
-def _get_db_connection() -> Optional["sqlite3.Connection"]:
+def _get_db_connection() -> Optional[Any]:
     global _DB_CONN
     if sqlite3 is None:
         return None
@@ -205,6 +205,8 @@ def _mt5_ensure_init() -> bool:
     portable = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower() in {"1", "true", "yes", "on"}
     try:
         mt5_client.init_mt5(timeout=timeout, retries=retries, portable=portable)
+        global mt5
+        mt5 = mt5_client.mt5
         _MT5_READY = True
     except RuntimeError:
         _MT5_READY = False
@@ -234,7 +236,7 @@ def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask
         out_ask: Optional[float] = None
         while looked < max_lookback_sec and ((need_bid and out_bid is None) or (need_ask and out_ask is None)):
             start_utc = end_utc - timedelta(seconds=min(window, max_lookback_sec - looked))
-            ticks = mt5.copy_ticks_range(symbol, start_utc, end_utc, mt5.COPY_TICKS_ALL)
+            ticks = mt5.copy_ticks_range(symbol, start_utc, end_utc, mt5.COPY_TICKS_ALL)  # type: ignore[union-attr, reportUnknownMember]
             if ticks is not None and len(ticks) > 0:
                 # Scan backwards for last updates
                 for t in reversed(ticks):
@@ -279,7 +281,7 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     if cached is not None and (now - cached[0]) <= ttl:
         return cached[1]
     try:
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)  # type: ignore[union-attr, reportUnknownMember]
     except Exception:
         rates = None
     if rates is not None:
@@ -312,7 +314,7 @@ def _get_tick_volume_last_2_bars(symbol: str) -> Optional[bool]:
         dt_from = datetime.fromtimestamp(target_opens[-1], tz=UTC)
         dt_to = datetime.fromtimestamp(this_minute_start, tz=UTC)
         try:
-            rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1, dt_from, dt_to)
+            rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1, dt_from, dt_to)  # type: ignore[union-attr, reportUnknownMember]
         except Exception:
             rates = None
 
@@ -516,12 +518,12 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
     latest_ts = now_utc.astimezone(INPUT_TZ)
     for sym in symbols:
         try:
-            mt5.symbol_select(sym, True)
+            mt5.symbol_select(sym, True)  # type: ignore[union-attr, reportUnknownMember]
         except Exception:
             pass
         tick = None
         try:
-            tick = mt5.symbol_info_tick(sym)
+            tick = mt5.symbol_info_tick(sym)  # type: ignore[union-attr, reportUnknownMember]
         except Exception:
             tick = None
         bid: Optional[float] = None
@@ -600,11 +602,11 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             # Try to also refresh tick_time_utc using the last tick in a short window
             # so downstream freshness checks reflect what we used.
             try:
-                ticks_recent = mt5.copy_ticks_range(
+                ticks_recent = mt5.copy_ticks_range(  # type: ignore[union-attr, reportUnknownMember]
                     sym,
                     now_utc - timedelta(seconds=5),
                     now_utc,
-                    mt5.COPY_TICKS_ALL,
+                    mt5.COPY_TICKS_ALL,  # type: ignore[union-attr, reportUnknownMember]
                 )
                 if ticks_recent is not None and len(ticks_recent) > 0:
                     lt = ticks_recent[-1]
@@ -637,11 +639,11 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
 
         if not has_recent_tick:
             try:
-                recent = mt5.copy_ticks_range(
+                recent = mt5.copy_ticks_range(  # type: ignore[union-attr, reportUnknownMember]
                     sym,
                     now_utc - timedelta(seconds=TICK_FRESHNESS_SEC),
                     now_utc,
-                    mt5.COPY_TICKS_ALL,
+                    mt5.COPY_TICKS_ALL,  # type: ignore[union-attr, reportUnknownMember]
                 )
                 has_recent_tick = bool(recent is not None and len(recent) > 0)
             except Exception:
@@ -654,11 +656,11 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
                 cache_ts = prev[2] if prev else None
             _LAST_TICK_CACHE[sym] = (bid, ask, cache_ts)
 
-        d1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_D1, 20)
-        h4 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H4, 4)
-        w1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_W1, 4)
-        h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 1)
-        m15 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_M15, 1)
+        d1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_D1, 20)  # type: ignore[union-attr, reportUnknownMember]
+        h4 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H4, 4)  # type: ignore[union-attr, reportUnknownMember]
+        w1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_W1, 4)  # type: ignore[union-attr, reportUnknownMember]
+        h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 1)  # type: ignore[union-attr, reportUnknownMember]
+        m15 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_M15, 1)  # type: ignore[union-attr, reportUnknownMember]
 
         d1_close = float(d1[-1]['close']) if (d1 is not None and len(d1) >= 1) else None
         d1_high = float(d1[-1]['high']) if (d1 is not None and len(d1) >= 1) else None
@@ -963,7 +965,7 @@ def analyze(
     reasons: Dict[str, List[str]] = {}
     def bump(key: str) -> None:
         reasons.setdefault(key, []).append(sym)
-    results: List[Dict[str, object]] = []
+    results: List[Dict[str, Any]] = []
     for sym, snaps in series.items():
         if not snaps:
             continue
@@ -1546,7 +1548,7 @@ def main() -> None:
             # Default to visible MarketWatch symbols
             if _mt5_ensure_init():
                 try:
-                    infos = mt5.symbols_get()
+                    infos = mt5.symbols_get()  # type: ignore[union-attr, reportUnknownMember]
                 except Exception:
                     infos = []
                 for info in (infos or []):

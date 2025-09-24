@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter, sleep
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 
 try:
     import sqlite3  # type: ignore
@@ -38,7 +38,7 @@ try:
 except Exception:
     redis = None  # type: ignore
 
-from monitor.domain import Hit, TickFetchStats
+from monitor.domain import Hit, Setup, TickFetchStats
 from monitor.config import db_path_str
 from monitor.db import (
     backfill_hit_columns_sqlite,
@@ -61,6 +61,7 @@ UTC = timezone.utc
 REALTIME_WINDOW_SECONDS = 1.0
 REALTIME_BACKTRACK_SECONDS = 0.2
 REDIS_DEFAULT_PREFIX = "timelapse:last_tick"
+REFRESH_INTERVAL_SECONDS = 60.0
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -303,6 +304,54 @@ def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+
+
+def _format_db_timestamp(dt: datetime) -> str:
+    dt_utc = _ensure_utc(dt)
+    return dt_utc.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _load_new_setups_since(
+    conn,
+    cutoff_dt: datetime,
+    symbols: Optional[List[str]],
+    active_setup_ids: Set[int],
+    verbose: bool,
+) -> List[Setup]:
+    cutoff_str = _format_db_timestamp(cutoff_dt)
+    where_clauses = ["inserted_at > ?"]
+    params: List[object] = [cutoff_str]
+    if symbols:
+        placeholders = ",".join(["?"] * len(symbols))
+        where_clauses.append(f"symbol IN ({placeholders})")
+        params.extend(symbols)
+    sql = "SELECT id FROM timelapse_setups WHERE " + " AND ".join(where_clauses) + " ORDER BY inserted_at ASC, id ASC"
+    cur = conn.cursor()
+    try:
+        rows = cur.execute(sql, params).fetchall()
+    except Exception:
+        return []
+    new_ids = [int(row[0]) for row in rows or [] if row and row[0] is not None]
+    new_ids = [sid for sid in new_ids if sid not in active_setup_ids]
+    if not new_ids:
+        return []
+    recorded = load_recorded_ids_sqlite(conn, new_ids)
+    pending_ids = [sid for sid in new_ids if sid not in recorded]
+    if not pending_ids:
+        return []
+    setups = load_setups_sqlite(
+        conn,
+        "timelapse_setups",
+        None,
+        pending_ids,
+        symbols,
+    )
+    if verbose and setups:
+        ids_str = ", ".join(str(setup.id) for setup in setups)
+        print(f"[refresh] Loaded {len(setups)} new setup(s): {ids_str}")
+    return setups
 
 
 def _redis_key(prefix: str, symbol: str) -> str:
@@ -570,6 +619,12 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
 
     print(f"Starting real-time monitoring for {len(active_symbol_setups)} symbols...")
 
+    parsed_ids = _parse_ids(getattr(args, "ids", None))
+    parsed_symbols = _parse_symbols(getattr(args, "symbols", None))
+    refresh_enabled = parsed_ids is None
+    refresh_last_ts = datetime.now(UTC)
+    active_setup_ids: Set[int] = {setup.id for setups in active_symbol_setups.values() for setup in setups}
+
     resolve_cache: dict[str, Optional[str]] = {}
     offset_cache: Dict[str, int] = {}
     last_poll_end: Dict[str, datetime] = {}
@@ -582,6 +637,23 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
             symbols_to_remove = []
             total_checks = 0
             total_hits = 0
+
+            if refresh_enabled and (now_utc - refresh_last_ts).total_seconds() >= REFRESH_INTERVAL_SECONDS:
+                new_setups = _load_new_setups_since(conn, refresh_last_ts, parsed_symbols, active_setup_ids, args.verbose)
+                if new_setups:
+                    added_ids = []
+                    for new_setup in new_setups:
+                        if new_setup.id in active_setup_ids:
+                            continue
+                        bucket = active_symbol_setups.setdefault(new_setup.symbol, [])
+                        bucket.append(new_setup)
+                        bucket.sort(key=lambda s: s.as_of_utc)
+                        active_setup_ids.add(new_setup.id)
+                        added_ids.append(new_setup.id)
+                    if args.verbose and added_ids:
+                        ids_str = ", ".join(str(sid) for sid in added_ids)
+                        print(f"[refresh] Added {len(added_ids)} setup(s) to monitoring: {ids_str}")
+                refresh_last_ts = now_utc
 
             for symbol, setups in list(active_symbol_setups.items()):
                 if not setups:
@@ -681,6 +753,7 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
                 # Remove hit setups
                 for setup in setups_to_remove:
                     setups.remove(setup)
+                    active_setup_ids.discard(setup.id)
 
                 # Remove symbol if no more setups
                 if not setups:

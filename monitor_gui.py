@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Simple GUI launcher for:
- - timelapse_setups.py --watch
- - realtime_check_tp_sl_hits.py
+PulseVortex GUI Launcher for:
+  - timelapse_setups.py --watch
+  - realtime_check_tp_sl_hits.py
 
 Provides Start/Stop buttons and a shared log output.
 
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed arguments
     """
-    parser = argparse.ArgumentParser(description="MT5 Monitor GUI")
+    parser = argparse.ArgumentParser(description="PulseVortex GUI")
     parser.add_argument("--restore-timelapse-log",
                        help="Path to timelapse log file to restore on startup")
     parser.add_argument("--restore-hits-log",
@@ -181,7 +181,7 @@ class App(tk.Tk):
     def __init__(self, restore_timelapse_log: str | None = None,
                  restore_hits_log: str | None = None) -> None:
         super().__init__()
-        self.title("MT5 Timelapse Monitors")
+        self.title("PulseVortex")
         self.geometry("1000x600")
         self.minsize(800, 400)
         self._set_initial_window_state()
@@ -278,8 +278,8 @@ class App(tk.Tk):
         frm = ttk.Frame(parent)
         frm.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
 
-        # Timelapse controls
-        tl = ttk.LabelFrame(frm, text="Timelapse Setups --watch")
+        # PulseVortex controls
+        tl = ttk.LabelFrame(frm, text="PulseVortex Timelapse Setups --watch")
         tl.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.Y, expand=True)
         self.btn_tl_toggle = ttk.Button(tl, text="Start", command=self._toggle_timelapse)
         self.btn_tl_toggle.pack(side=tk.TOP, padx=4, pady=6)
@@ -303,7 +303,7 @@ class App(tk.Tk):
         ent_mxps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
 
         # Real-time TP/SL Hits controls
-        ht = ttk.LabelFrame(frm, text="Real-time TP/SL Hits")
+        ht = ttk.LabelFrame(frm, text="PulseVortex Real-time TP/SL Hits")
         ht.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.X, expand=True)
         self.btn_hits_toggle = ttk.Button(ht, text="Start", command=self._toggle_hits)
         self.btn_hits_toggle.pack(side=tk.LEFT, padx=4, pady=6)

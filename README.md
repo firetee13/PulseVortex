@@ -1,9 +1,9 @@
-# MT5 Trade Setup Analyzer & Monitor
+# PulseVortex: Trade Setup Analyzer & Monitor
 
-A comprehensive Python application suite for MT5 trading that includes:
+A comprehensive Python application suite for PulseVortex trading that includes:
 
 - **CLI Setup Analyzer** (`timelapse_setups.py`): Analyzes MT5 symbols to identify high-confidence trade setups
-- **GUI Monitor** (`monitor_gui.py`): Visual interface for real-time monitoring and analysis
+- **PulseVortex GUI Monitor** (`monitor_gui.py`): Visual interface for real-time monitoring and analysis
 - **Real-time TP/SL Hit Checker** (`realtime_check_tp_sl_hits.py`): Real-time monitoring of take-profit and stop-loss hits every 200ms for active symbols
 
 Designed for forex and crypto traders seeking automated setup detection, real-time monitoring, and comprehensive risk management with advanced filtering and visualization features.
@@ -67,7 +67,7 @@ Designed for forex and crypto traders seeking automated setup detection, real-ti
 
 ### GUI Interface Features
 
-- **Real-time Monitoring Dashboard**: Visual interface with live logs for setup detection and hit monitoring
+- **PulseVortex Real-time Monitoring Dashboard**: Visual interface with live logs for setup detection and hit monitoring
 - **Database Results Viewer**: Browse detected setups and TP/SL hits with filtering and sorting
 - **PnL Analytics**: Comprehensive profit/loss charts with ATR-normalized returns and category breakdowns (Forex, Crypto, Indices)
 - **Chart Visualization**: Interactive 1-minute candlestick charts with SL/TP overlays for individual setups

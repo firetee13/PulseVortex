@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed arguments
     """
-    parser = argparse.ArgumentParser(description="EASY Insight Monitor GUI")
+    parser = argparse.ArgumentParser(description="MT5 Monitor GUI")
     parser.add_argument("--restore-timelapse-log",
                        help="Path to timelapse log file to restore on startup")
     parser.add_argument("--restore-hits-log",
@@ -181,7 +181,7 @@ class App(tk.Tk):
     def __init__(self, restore_timelapse_log: str | None = None,
                  restore_hits_log: str | None = None) -> None:
         super().__init__()
-        self.title("EASY Insight - Timelapse Monitors")
+        self.title("MT5 Timelapse Monitors")
         self.geometry("1000x600")
         self.minsize(800, 400)
         self._set_initial_window_state()

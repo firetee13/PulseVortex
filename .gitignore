@@ -4,3 +4,4 @@ __pycache__/
 backup
 *en.md
 *ts.md
+*.csv

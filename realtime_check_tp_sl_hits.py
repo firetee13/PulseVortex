@@ -60,6 +60,11 @@ from monitor.mt5_client import (
 UTC = timezone.utc
 REALTIME_WINDOW_SECONDS = 1.0
 REALTIME_BACKTRACK_SECONDS = 0.2
+# Allow widening the fetch window when the script falls behind (e.g., MT5 lag
+# or the loop sleeping longer than expected). This limits each catch-up pull to
+# a bounded slice so we don't request the entire history on every iteration.
+REALTIME_MAX_CATCHUP_SECONDS = 60.0
+REALTIME_STALE_HIT_WARNING_SECONDS = 5.0
 REDIS_DEFAULT_PREFIX = "timelapse:last_tick"
 REFRESH_INTERVAL_SECONDS = 60.0
 
@@ -689,16 +694,23 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
                     window_start_utc = now_utc - timedelta(seconds=REALTIME_WINDOW_SECONDS)
                 else:
                     window_start_utc = prev_poll_end - timedelta(seconds=REALTIME_BACKTRACK_SECONDS)
-                    min_start = now_utc - timedelta(seconds=REALTIME_WINDOW_SECONDS)
-                    if window_start_utc < min_start:
-                        window_start_utc = min_start
+                    # If we fell behind, widen the window (up to the configured
+                    # cap) so we can replay missed ticks instead of skipping
+                    # straight to "now" and losing earlier hits.
+                    max_lookback = timedelta(seconds=REALTIME_MAX_CATCHUP_SECONDS)
+                    earliest_allowed = now_utc - max_lookback
+                    if window_start_utc < earliest_allowed:
+                        window_start_utc = earliest_allowed
 
                 ticks, fetch_stats = fetch_recent_ticks(
                     sym_name,
                     offset_h,
                     now_utc,
                     window_start_utc=window_start_utc,
-                    window_seconds=REALTIME_WINDOW_SECONDS,
+                    window_seconds=max(
+                        REALTIME_WINDOW_SECONDS,
+                        (now_utc - window_start_utc).total_seconds(),
+                    ),
                     trace=args.verbose,
                 )
 
@@ -720,35 +732,39 @@ def realtime_monitoring_loop(args: argparse.Namespace, conn, active_symbol_setup
                     scan_elapsed = perf_counter() - scan_start
 
                     if hit is not None:
-                        # Validate hit timestamp (should be very recent)
                         time_diff = (now_utc - hit.time_utc).total_seconds()
-                        if time_diff <= 2.0:  # Hit within last 2 seconds
-                            t_store_start = perf_counter()
-                            record_hit_sqlite(conn, setup, hit, args.dry_run, args.verbose)
-                            t_store = perf_counter() - t_store_start
-
-                            # Always print basic hit notification
+                        if abs(time_diff) > REALTIME_STALE_HIT_WARNING_SECONDS and args.verbose:
+                            sign = 'behind' if time_diff > 0 else 'ahead'
                             print(
-                                f"[REALTIME HIT] #{setup.id} {setup.symbol} {setup.direction} -> {hit.kind} "
-                                f"at {hit.time_utc.isoformat(timespec='seconds')}"
+                                f"  [WARNING] Detected {setup.symbol} {hit.kind} tick {abs(time_diff):.1f}s {sign} current time; recording anyway"
                             )
 
-                            if args.verbose:
-                                stats = TickFetchStats(
-                                    pages=fetch_stats.pages,
-                                    total_ticks=fetch_stats.total_ticks,
-                                    elapsed_s=fetch_stats.elapsed_s + scan_elapsed,
-                                    fetch_s=fetch_stats.fetch_s,
-                                    early_stop=True,
-                                )
-                                t_fetch_ms = stats.fetch_s * 1000.0
-                                t_scan_ms = max(0.0, (stats.elapsed_s - stats.fetch_s) * 1000.0)
-                                print(
-                                    f"  [DETAILS] fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms store={t_store*1000:.1f}ms"
-                                )
+                        t_store_start = perf_counter()
+                        record_hit_sqlite(conn, setup, hit, args.dry_run, args.verbose)
+                        t_store = perf_counter() - t_store_start
 
-                            total_hits += 1
-                            setups_to_remove.append(setup)
+                        # Always print basic hit notification
+                        print(
+                            f"[REALTIME HIT] #{setup.id} {setup.symbol} {setup.direction} -> {hit.kind} "
+                            f"at {hit.time_utc.isoformat(timespec='seconds')}"
+                        )
+
+                        if args.verbose:
+                            stats = TickFetchStats(
+                                pages=fetch_stats.pages,
+                                total_ticks=fetch_stats.total_ticks,
+                                elapsed_s=fetch_stats.elapsed_s + scan_elapsed,
+                                fetch_s=fetch_stats.fetch_s,
+                                early_stop=True,
+                            )
+                            t_fetch_ms = stats.fetch_s * 1000.0
+                            t_scan_ms = max(0.0, (stats.elapsed_s - stats.fetch_s) * 1000.0)
+                            print(
+                                f"  [DETAILS] fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms store={t_store*1000:.1f}ms"
+                            )
+
+                        total_hits += 1
+                        setups_to_remove.append(setup)
 
                 # Remove hit setups
                 for setup in setups_to_remove:

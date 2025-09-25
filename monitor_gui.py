@@ -184,6 +184,7 @@ class App(tk.Tk):
         self.title("EASY Insight - Timelapse Monitors")
         self.geometry("1000x600")
         self.minsize(800, 400)
+        self._set_initial_window_state()
 
         # Store restore log paths for later cleanup
         self.restore_timelapse_log = restore_timelapse_log
@@ -2294,6 +2295,15 @@ class App(tk.Tk):
     # --- Settings persistence ---
     def _settings_path(self) -> str:
         return os.path.join(HERE, "monitor_gui_settings.json")
+
+    def _set_initial_window_state(self) -> None:
+        try:
+            self.state("zoomed")
+        except Exception:
+            try:
+                self.attributes("-zoomed", True)
+            except Exception:
+                pass
 
     def _load_settings(self) -> None:
         path = self._settings_path()

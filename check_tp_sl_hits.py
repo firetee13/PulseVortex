@@ -15,6 +15,7 @@ Usage examples:
   python check_tp_sl_hits.py --since-hours 24
   python check_tp_sl_hits.py --ids 9,10,11,12
   python check_tp_sl_hits.py --symbols SOLUSD,BTCUSD
+  python check_tp_sl_hits.py --redis-rt --redis-poll-ms 500
 
 Notes:
   - `as_of` in DB is UTC stored as ISO text; we apply UTC+3 for display-only fields.
@@ -56,6 +57,7 @@ from monitor.mt5_client import (
     to_server_naive,
 )
 from monitor.quiet_hours import iter_active_utc_ranges, iter_quiet_utc_ranges
+from monitor.realtime_exit import RedisRealtimeExitManager, SetupFilters
 
 UTC = timezone.utc
 
@@ -134,6 +136,39 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=_env_bool("MT5_PORTABLE", False),
         help="Pass portable=True to MT5 (env: MT5_PORTABLE)",
+    )
+    parser.add_argument(
+        "--redis-rt",
+        action="store_true",
+        help="Enable Redis-backed real-time exit monitoring (disables --watch)",
+    )
+    parser.add_argument(
+        "--redis-url",
+        default=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        help="Redis connection URL for --redis-rt mode (default/env: redis://localhost:6379/0)",
+    )
+    parser.add_argument(
+        "--redis-tick-window",
+        type=int,
+        default=int(os.environ.get("REDIS_TICK_WINDOW", "10")),
+        help="Seconds of ticks to retain per symbol in Redis (default/env: 10)",
+    )
+    parser.add_argument(
+        "--redis-poll-ms",
+        type=int,
+        default=int(os.environ.get("REDIS_POLL_MS", "500")),
+        help="Poll interval in milliseconds for MT5 tick fetch in --redis-rt mode (default/env: 500)",
+    )
+    parser.add_argument(
+        "--redis-fallback-secs",
+        type=int,
+        default=int(os.environ.get("REDIS_FALLBACK_SECS", "30")),
+        help="Fallback resync interval seconds for --redis-rt mode (default/env: 30)",
+    )
+    parser.add_argument(
+        "--redis-prefix",
+        default=os.environ.get("REDIS_PREFIX", "monitor"),
+        help="Redis key prefix for --redis-rt mode (default/env: monitor)",
     )
     parser.add_argument("--watch", action="store_true", help="Run continuously, polling every --interval seconds")
     parser.add_argument(
@@ -453,8 +488,75 @@ def run_once(args: argparse.Namespace) -> None:
         )
 
 
+def run_realtime(args: argparse.Namespace) -> None:
+    ids = _parse_ids(getattr(args, "ids", None))
+    symbols = _parse_symbols(getattr(args, "symbols", None))
+
+    if sqlite3 is None:
+        print("ERROR: sqlite3 not available.")
+        sys.exit(2)
+
+    db_path = db_path_from_args(args)
+    filters = SetupFilters(
+        since_hours=None if ids else getattr(args, "since_hours", None),
+        ids=ids,
+        symbols=symbols,
+    )
+
+    manager = RedisRealtimeExitManager(
+        redis_url=getattr(args, "redis_url", "redis://localhost:6379/0"),
+        db_path=db_path,
+        filters=filters,
+        tick_window_seconds=int(getattr(args, "redis_tick_window", 10)),
+        poll_interval_ms=int(getattr(args, "redis_poll_ms", 500)),
+        fallback_interval_s=int(getattr(args, "redis_fallback_secs", 30)),
+        dry_run=bool(getattr(args, "dry_run", False)),
+        verbose=bool(getattr(args, "verbose", False)),
+        redis_prefix=str(getattr(args, "redis_prefix", "monitor")),
+    )
+
+    try:
+        init_mt5(
+            path=getattr(args, "mt5_path", None),
+            timeout=int(getattr(args, "mt5_timeout", 90)),
+            retries=int(getattr(args, "mt5_retries", 2)),
+            portable=bool(getattr(args, "mt5_portable", False)),
+            verbose=bool(getattr(args, "verbose", False)),
+        )
+    except RuntimeError as exc:
+        print(f"ERROR: Failed to initialize MetaTrader5 ({exc})")
+        print(
+            "Hints: set --mt5-path or MT5_TERMINAL_PATH to your terminal64.exe; "
+            "increase --mt5-timeout; ensure the terminal isn't updating and that only one Python process is using MT5."
+        )
+        return
+
+    print(
+        "Starting Redis real-time loop: poll={} ms, window={} s, fallback={} s".format(
+            int(getattr(args, "redis_poll_ms", 500)),
+            int(getattr(args, "redis_tick_window", 10)),
+            int(getattr(args, "redis_fallback_secs", 30)),
+        )
+    )
+
+    try:
+        manager.start()
+    except KeyboardInterrupt:
+        if getattr(args, "verbose", False):
+            print("Interrupted real-time loop.")
+    finally:
+        manager.stop()
+        shutdown_mt5()
+
+
 def main() -> None:
     args = parse_args()
+    if getattr(args, "redis_rt", False):
+        if getattr(args, "watch", False):
+            print("ERROR: --watch cannot be combined with --redis-rt")
+            sys.exit(2)
+        run_realtime(args)
+        return
     if args.watch:
         print(f"Watch mode enabled. Polling every {args.interval} seconds...")
         try:

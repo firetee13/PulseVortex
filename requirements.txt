@@ -4,8 +4,9 @@
 # - monitor_gui.py: uses matplotlib for chart rendering in Tkinter
 
 MetaTrader5
+fakeredis
 matplotlib
 numpy
-watchdog
 pika
-
+redis
+watchdog

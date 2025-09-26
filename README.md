@@ -80,6 +80,7 @@ Designed for forex and crypto traders seeking automated setup detection, real-ti
 - **Database Integration**: Stores hit records with timestamps and price data
 - **Watch Mode Support**: Continuous polling for new hits with configurable intervals
 - **Performance Optimized**: Efficient tick fetching with server offset handling
+- **Redis Real-Time Mode**: Optional `--redis-rt` loop buffers ticks in Redis for sub-second exit checks with 500 ms MT5 polling and 10 s tick windows
 
 ### Data Persistence
 
@@ -109,6 +110,8 @@ Designed for forex and crypto traders seeking automated setup detection, real-ti
 - `numpy` (numerical computations)
 - `watchdog` (optional, for file watching)
 - `pika` (message queuing support)
+- `redis` (real-time TP/SL mode)
+- `fakeredis` (test-only Redis stub)
 
 ### System Requirements
 

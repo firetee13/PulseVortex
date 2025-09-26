@@ -288,25 +288,25 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
         _RATE_CACHE.pop(key, None)
     return rates
 
-def _get_tick_volume_last_2_bars(symbol: str) -> Optional[bool]:
-    """Check tick volume for each of the last 2 completed minutes (M1 bars).
-
-    For each minute in the last 2 minutes (excluding the current open minute),
-    ensures the M1 bar exists and has tick_volume >= 10. Missing bars are treated
-    as zero volume and fail the check.
-
-    Returns:
-        True  -> all 2 completed minutes have tick_volume >= 10
-        False -> any minute missing or tick_volume < 10
-        None  -> MT5 not available/initialized
-    """
+def _get_tick_volume_last_n_bars(
+    symbol: str,
+    bars: int,
+    reference: Optional[datetime] = None,
+) -> Optional[bool]:
+    """Return whether the last ``bars`` completed M1 bars meet the tick-volume floor."""
+    if bars <= 0:
+        return True
     if not _mt5_ensure_init():
         return None
     try:
-        now_ts = int(time.time())
+        if reference is None:
+            ref_dt = datetime.now(UTC)
+        else:
+            ref_dt = reference if reference.tzinfo is not None else reference.replace(tzinfo=UTC)
+            ref_dt = ref_dt.astimezone(UTC)
+        now_ts = int(ref_dt.timestamp())
         this_minute_start = (now_ts // 60) * 60
-        # Minutes to check: t-60, t-120
-        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
+        target_opens = [this_minute_start - i * 60 for i in range(1, bars + 1)]
 
         # Fetch bars covering exactly that window
         dt_from = datetime.fromtimestamp(target_opens[-1], tz=UTC)
@@ -352,6 +352,16 @@ def _get_tick_volume_last_2_bars(symbol: str) -> Optional[bool]:
         return True
     except Exception:
         return None
+
+
+def _get_tick_volume_last_2_bars(symbol: str, reference: Optional[datetime] = None) -> Optional[bool]:
+    """Historic shim that checks the last 2 completed one-minute bars."""
+    return _get_tick_volume_last_n_bars(symbol, 2, reference=reference)
+
+
+def _get_tick_volume_last_5_bars(symbol: str, reference: Optional[datetime] = None) -> Optional[bool]:
+    """Ensure the last five completed M1 bars meet the minimum tick volume."""
+    return _get_tick_volume_last_n_bars(symbol, 5, reference=reference)
 
 def canonicalize_key(s: Optional[str]) -> str:
     """Canonicalize CSV header / lookup keys for case-insensitive, punctuation-robust matching.
@@ -804,10 +814,10 @@ def process_once(
     symbols: List[str],
     min_rrr: float,
     min_prox_sl: float,
-    max_prox_sl: float,
-    min_sl_pct: float,
-    top: Optional[int],
-    brief: bool,
+    max_prox_sl: float = 1.0,
+    min_sl_pct: float = 0.0,
+    top: Optional[int] = None,
+    brief: bool = False,
     debug: bool = False,
     exclude_set: Optional[Set[str]] = None,
     detected_at: Optional[datetime] = None,
@@ -955,9 +965,9 @@ def analyze(
     series: Dict[str, List[Snapshot]],
     min_rrr: float,
     min_prox_sl: float,
-    max_prox_sl: float,
-    min_sl_pct: float,
-    as_of_ts: Optional[datetime],
+    max_prox_sl: float = 1.0,
+    min_sl_pct: float = 0.0,
+    as_of_ts: Optional[datetime] = None,
     debug: bool = False,
 ) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
     reasons: Dict[str, List[str]] = {}
@@ -1042,12 +1052,12 @@ def analyze(
                 print(f"[DEBUG] no_recent_ticks for {sym}")
             continue
 
-        # Filter out symbols with low tick volume in the last 2 M1 bars
-        volume_check_passed = _get_tick_volume_last_2_bars(sym)
+        # Filter out symbols with low tick volume in the last 5 M1 bars
+        volume_check_passed = _get_tick_volume_last_5_bars(sym, reference=last.ts)
         if volume_check_passed is not None and not volume_check_passed:
-            bump("low_tick_volume_last_2_bars")
+            bump("low_tick_volume_last_5_bars")
             if debug:
-                print(f"[DEBUG] low_tick_volume_last_2_bars for {sym}: insufficient tick volume detected in the last 2 bars")
+                print(f"[DEBUG] low_tick_volume_last_5_bars for {sym}: insufficient tick volume detected in the last 5 bars")
             continue
 
         # Timelapse deltas (context)

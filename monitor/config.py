@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
+_DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+_DEFAULT_REDIS_PREFIX = "monitor"
+_DEFAULT_REDIS_MAX_AGE_MS = 1500
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_FILENAME = "timelapse.db"
 
@@ -38,3 +42,34 @@ def resolve_db_path(candidate: Optional[str]) -> Path:
 def db_path_str(candidate: Optional[str] = None) -> str:
     """Return the resolved database path as a string for sqlite3.connect and CLI args."""
     return str(resolve_db_path(candidate))
+
+
+def redis_url(default: Optional[str] = None) -> Optional[str]:
+    """Return the Redis URL for shared tick cache if configured."""
+    value = os.environ.get("TIMELAPSE_REDIS_URL")
+    if value:
+        return value
+    return default if default is not None else _DEFAULT_REDIS_URL
+
+
+def redis_prefix(default: Optional[str] = None) -> str:
+    """Return the Redis key prefix (`monitor` by default)."""
+    value = os.environ.get("TIMELAPSE_REDIS_PREFIX")
+    if value:
+        return value
+    return default if default is not None else _DEFAULT_REDIS_PREFIX
+
+
+def redis_tick_max_age_ms(default: Optional[int] = None) -> int:
+    """Maximum tick staleness (milliseconds) accepted from Redis cache."""
+    value = os.environ.get("TIMELAPSE_REDIS_MAX_AGE_MS")
+    if value:
+        try:
+            parsed = int(float(value))
+            if parsed > 0:
+                return parsed
+        except Exception:
+            pass
+    if default is not None and default > 0:
+        return default
+    return _DEFAULT_REDIS_MAX_AGE_MS

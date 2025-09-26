@@ -130,7 +130,7 @@ class ReadSeriesMT5Tests(unittest.TestCase):
 
 class SnapshotHelpersTests(unittest.TestCase):
     def test_snapshot_g_returns_numeric_without_parsing(self):
-        now = datetime.now(UTC)
+        now = datetime(2024, 5, 1, 18, 0, tzinfo=UTC)
         row = {tls.canonicalize_key('Bid'): 1.2345, tls.HEADER_SYMBOL: 'EURUSD'}
         snap = tls.Snapshot(ts=now, row=row)
         self.assertEqual(snap.g('Bid'), 1.2345)
@@ -186,7 +186,7 @@ class SlDistanceFilterTests(unittest.TestCase):
     @patch('timelapse_setups._get_tick_volume_last_5_bars', return_value=True)
     def test_sell_uses_ask_for_sl_distance(self, mock_volume):
         # Reproduce SA40-like case where using Bid would pass, but Ask should fail
-        now = datetime.now(UTC)
+        now = datetime(2024, 5, 1, 18, 0, tzinfo=UTC)
         sym = 'TESTIDX'
         bid = 97239.9
         ask = 97271.9  # spread = 32.0
@@ -236,11 +236,11 @@ class VolumeFilterTests(unittest.TestCase):
         tls._MT5_READY = self.original_ready
 
     def test_get_tick_volume_last_5_bars_high_volume(self):
-        now = datetime.now(UTC)
+        now = datetime(2024, 5, 1, 18, 0, tzinfo=UTC)
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where each has high tick volume (>= 10)
-        now_ts = int(time.time())
+        now_ts = int(now.timestamp())
         this_minute_start = (now_ts // 60) * 60
         target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         high_volume_m1_rates = [
@@ -249,15 +249,15 @@ class VolumeFilterTests(unittest.TestCase):
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = high_volume_m1_rates
         tls.mt5 = fake_mt5
 
-        volume_check = tls._get_tick_volume_last_5_bars('EURUSD')
+        volume_check = tls._get_tick_volume_last_5_bars('EURUSD', reference=now)
         self.assertTrue(volume_check)
 
     def test_get_tick_volume_last_5_bars_one_bar_low_volume(self):
-        now = datetime.now(UTC)
+        now = datetime(2024, 5, 1, 18, 0, tzinfo=UTC)
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where one bar has low tick volume (< 10)
-        now_ts = int(time.time())
+        now_ts = int(now.timestamp())
         this_minute_start = (now_ts // 60) * 60
         target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         mixed_volume_m1_rates = [
@@ -267,16 +267,16 @@ class VolumeFilterTests(unittest.TestCase):
         fake_mt5.rates_return[FakeMT5.TIMEFRAME_M1] = mixed_volume_m1_rates
         tls.mt5 = fake_mt5
 
-        volume_check = tls._get_tick_volume_last_5_bars('EURUSD')
+        volume_check = tls._get_tick_volume_last_5_bars('EURUSD', reference=now)
         self.assertFalse(volume_check)
 
     def test_analyze_filters_low_volume_symbol(self):
-        now = datetime.now(UTC)
+        now = datetime(2024, 5, 1, 18, 0, tzinfo=UTC)
         sym = 'LOWVOL'
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where one bar has low tick volume (< 10)
-        now_ts = int(time.time())
+        now_ts = int(now.timestamp())
         this_minute_start = (now_ts // 60) * 60
         target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         low_volume_m1_rates = [
@@ -316,12 +316,12 @@ class VolumeFilterTests(unittest.TestCase):
         self.assertIn(sym, reasons['low_tick_volume_last_5_bars'])
 
     def test_analyze_passes_high_volume_symbol(self):
-        now = datetime.now(UTC)
+        now = datetime(2024, 5, 1, 18, 0, tzinfo=UTC)
         sym = 'HIGHVOL'
         fake_mt5 = FakeMT5(now)
 
         # Simulate M1 bars where each has high tick volume (>= 10)
-        now_ts = int(time.time())
+        now_ts = int(now.timestamp())
         this_minute_start = (now_ts // 60) * 60
         target_opens = [this_minute_start - i * 60 for i in range(1, 6)]
         high_volume_m1_rates = [

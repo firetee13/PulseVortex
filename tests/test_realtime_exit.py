@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -12,6 +13,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from monitor.domain import TickFetchStats
 from monitor.realtime_exit import RedisRealtimeExitManager, SetupFilters
+from monitor.redis_ticks import RedisTickCache, TICKS_KEY_FMT
 
 UTC = timezone.utc
 
@@ -173,6 +175,24 @@ class RedisRealtimeExitTests(unittest.TestCase):
 
             active = manager._redis.smembers("test:trades:active")
             self.assertNotIn("1", active)
+
+    def test_tick_cache_window(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        cache = RedisTickCache(
+            redis_url="redis://localhost:6379/0",
+            prefix="test",
+            client=fake,
+            test_connection=False,
+        )
+        key = TICKS_KEY_FMT.format(prefix="test", symbol="BTCUSD")
+        payload1 = json.dumps({"time_msc": 1000, "bid": 1.1, "ask": 1.2}, separators=(",", ":"))
+        payload2 = json.dumps({"time_msc": 2000, "bid": 1.3, "ask": 1.4}, separators=(",", ":"))
+        fake.zadd(key, {payload1: 1000, payload2: 2000})
+
+        ticks = cache.window("BTCUSD", 500, 2500)
+        self.assertEqual(len(ticks), 2)
+        self.assertAlmostEqual(ticks[0].bid or 0.0, 1.1)
+        self.assertEqual(ticks[1].time_msc, 2000)
 
 
 if __name__ == "__main__":  # pragma: no cover

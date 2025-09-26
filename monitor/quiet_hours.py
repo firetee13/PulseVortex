@@ -23,7 +23,7 @@ class QuietWindow:
 
 # Default blackout: 23:30 -> 01:00 (UTC+3) to avoid rollover spread spikes
 QUIET_WINDOWS_UTC3: Tuple[QuietWindow, ...] = (
-    QuietWindow(start=time(hour=23, minute=45), end=time(hour=0, minute=59)),
+    QuietWindow(start=time(hour=23, minute=30), end=time(hour=1, minute=0)),
 )
 
 

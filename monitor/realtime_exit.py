@@ -21,6 +21,7 @@ from .mt5_client import (
     ticks_range_all,
     to_server_naive,
 )
+from .redis_ticks import LAST_TICK_KEY_FMT, TICKS_KEY_FMT
 
 UTC = timezone.utc
 
@@ -86,10 +87,10 @@ class RedisRealtimeExitManager:
         return f"{self._prefix}:trades:active"
 
     def _key_ticks(self, symbol: str) -> str:
-        return f"{self._prefix}:ticks:{symbol}"
+        return TICKS_KEY_FMT.format(prefix=self._prefix, symbol=symbol)
 
     def _key_last_tick(self, symbol: str) -> str:
-        return f"{self._prefix}:state:last_tick:{symbol}"
+        return LAST_TICK_KEY_FMT.format(prefix=self._prefix, symbol=symbol)
 
     # Lifecycle ---------------------------------------------------------
 

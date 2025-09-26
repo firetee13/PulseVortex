@@ -33,7 +33,13 @@ import argparse
 import tempfile
 import shutil
 from typing import List, Sequence
-from monitor.config import db_path_str, default_db_path
+from monitor.config import (
+    db_path_str,
+    default_db_path,
+    redis_prefix,
+    redis_tick_max_age_ms,
+    redis_url,
+)
 from monitor.mt5_client import resolve_symbol as _RESOLVE, get_server_offset_hours as _GET_OFFS, to_server_naive as _TO_SERVER
 from monitor.quiet_hours import (
     iter_active_utc_ranges,
@@ -41,6 +47,7 @@ from monitor.quiet_hours import (
     is_quiet_time,
     next_quiet_transition,
 )
+from monitor.redis_ticks import CacheUnavailable, RedisTickCache, ticks_to_dicts
 
 # Plotting
 try:
@@ -192,6 +199,14 @@ class App(tk.Tk):
         self.geometry("1000x600")
         self.minsize(800, 400)
 
+        # Thread-safe log queue and Redis cache state
+        self.log_q: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._redis_cache: RedisTickCache | None = None
+        self._redis_cache_error: str | None = None
+        self._redis_max_age_ms = redis_tick_max_age_ms()
+        self._redis_grace_ms = max(250, self._redis_max_age_ms)
+        self._init_redis_cache()
+
         # Store restore log paths for later cleanup
         self.restore_timelapse_log = restore_timelapse_log
         self.restore_hits_log = restore_hits_log
@@ -259,8 +274,6 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Log queue for thread-safe updates
-        self.log_q: queue.Queue[tuple[str, str]] = queue.Queue()
         self.after(50, self._drain_log)
 
         py = sys.executable or "python"
@@ -286,6 +299,20 @@ class App(tk.Tk):
 
         # Autostart both services shortly after UI loads
         self.after(300, self._auto_start)
+
+    def _init_redis_cache(self) -> None:
+        url = redis_url()
+        if not url:
+            return
+        prefix = redis_prefix()
+        try:
+            self._redis_cache = RedisTickCache(redis_url=url, prefix=prefix)
+            self._redis_cache_error = None
+            self._enqueue_log("gui", "[redis] GUI tick cache ready\n")
+        except CacheUnavailable as exc:
+            self._redis_cache = None
+            self._redis_cache_error = str(exc)
+            self._enqueue_log("gui", f"[redis] cache disabled: {exc}\n")
 
     def _make_controls(self, parent) -> None:
         frm = ttk.Frame(parent)
@@ -1827,6 +1854,33 @@ class App(tk.Tk):
         # Fallback: naive from timestamp shifted by offset hours
         return datetime.fromtimestamp(dt_utc.timestamp() + offset_h * 3600.0)
 
+    def _redis_fetch_window(
+        self,
+        symbol: str,
+        offset_h: int,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> list[dict[str, float | int]]:
+        cache = self._redis_cache
+        if cache is None:
+            return []
+        start_ms = int((start_utc + timedelta(hours=offset_h)).timestamp() * 1000)
+        end_ms = int((end_utc + timedelta(hours=offset_h)).timestamp() * 1000)
+        if end_ms < start_ms:
+            end_ms = start_ms
+        try:
+            ticks = cache.window(symbol, start_ms, end_ms)
+        except CacheUnavailable as exc:
+            if self._redis_cache_error != str(exc):
+                self._redis_cache_error = str(exc)
+                self._enqueue_log("gui", f"[redis] cache disabled: {exc}\n")
+            self._redis_cache = None
+            return []
+        self._redis_cache_error = None
+        if not ticks:
+            return []
+        return ticks_to_dicts(ticks)
+
     def _fetch_and_render_chart_thread(self, rid: int, symbol: str, direction: str, start_utc: datetime, end_utc: datetime,
                                         entry_utc: datetime, entry_price, sl, tp,
                                         hit_kind, hit_time_utc_str, hit_price) -> None:
@@ -1874,6 +1928,16 @@ class App(tk.Tk):
             self.after(0, self._set_chart_message, f"Fetching ticks for {sym_name}…")
             ticks_aggregate: List[object] = []
             for window_start, window_end in active_ranges:
+                cache_ticks = self._redis_fetch_window(sym_name, offset_h, window_start, window_end)
+                if cache_ticks:
+                    start_ms = int((window_start + timedelta(hours=offset_h)).timestamp() * 1000)
+                    end_ms = int((window_end + timedelta(hours=offset_h)).timestamp() * 1000)
+                    first_ms = cache_ticks[0]["time_msc"]
+                    last_ms = cache_ticks[-1]["time_msc"]
+                    if first_ms <= start_ms + self._redis_grace_ms and last_ms >= end_ms - self._redis_grace_ms:
+                        ticks_aggregate.extend(cache_ticks)
+                        continue
+
                 start_srv = self._to_server_naive(window_start, offset_h)
                 end_srv = self._to_server_naive(window_end, offset_h)
                 part = mt5.copy_ticks_range(sym_name, start_srv, end_srv, mt5.COPY_TICKS_ALL)

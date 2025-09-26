@@ -55,6 +55,7 @@ from monitor.mt5_client import (
     ticks_range_all,
     to_server_naive,
 )
+from monitor.quiet_hours import iter_active_utc_ranges, iter_quiet_utc_ranges
 
 UTC = timezone.utc
 
@@ -331,17 +332,55 @@ def run_once(args: argparse.Namespace) -> None:
                     )
 
                 chunk_minutes = args.max_mins if args.max_mins and args.max_mins > 0 else None
-                hit, stats, chunk_count = scan_for_hit_with_chunks(
-                    sym_name,
-                    setup.direction,
-                    setup.sl,
-                    setup.tp,
-                    offset_h,
-                    start_utc,
-                    end_utc,
-                    chunk_minutes,
-                    trace=(args.verbose and args.trace_pages),
+                quiet_segments = list(iter_quiet_utc_ranges(start_utc, end_utc)) if args.verbose else []
+                if args.verbose and quiet_segments:
+                    for q_start, q_end in quiet_segments:
+                        print(
+                            f"[quiet] skipping ticks {q_start.isoformat(timespec='seconds')} -> {q_end.isoformat(timespec='seconds')} UTC"
+                        )
+
+                active_ranges = list(iter_active_utc_ranges(start_utc, end_utc))
+                total_pages = 0
+                total_ticks = 0
+                total_elapsed = 0.0
+                total_fetch = 0.0
+                chunk_count = 0
+                hit: Optional[Hit] = None
+
+                if not active_ranges and args.verbose:
+                    print(
+                        f"[quiet] #{setup.id} window {start_utc.isoformat(timespec='seconds')} -> {end_utc.isoformat(timespec='seconds')} fully inside quiet hours"
+                    )
+
+                for window_start, window_end in active_ranges:
+                    candidate, stats_partial, chunk_partial = scan_for_hit_with_chunks(
+                        sym_name,
+                        setup.direction,
+                        setup.sl,
+                        setup.tp,
+                        offset_h,
+                        window_start,
+                        window_end,
+                        chunk_minutes,
+                        trace=(args.verbose and args.trace_pages),
+                    )
+                    total_pages += stats_partial.pages
+                    total_ticks += stats_partial.total_ticks
+                    total_elapsed += stats_partial.elapsed_s
+                    total_fetch += stats_partial.fetch_s
+                    chunk_count += chunk_partial
+                    if candidate is not None:
+                        hit = candidate
+                        break
+
+                stats = TickFetchStats(
+                    pages=total_pages,
+                    total_ticks=total_ticks,
+                    elapsed_s=total_elapsed,
+                    fetch_s=total_fetch,
+                    early_stop=hit is not None,
                 )
+
                 if args.verbose and chunk_count > 1 and chunk_minutes:
                     total_minutes = (end_utc - start_utc).total_seconds() / 60.0
                     print(

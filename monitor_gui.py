@@ -32,8 +32,15 @@ import json
 import argparse
 import tempfile
 import shutil
+from typing import List, Sequence
 from monitor.config import db_path_str, default_db_path
 from monitor.mt5_client import resolve_symbol as _RESOLVE, get_server_offset_hours as _GET_OFFS, to_server_naive as _TO_SERVER
+from monitor.quiet_hours import (
+    iter_active_utc_ranges,
+    iter_quiet_utc_ranges,
+    is_quiet_time,
+    next_quiet_transition,
+)
 
 # Plotting
 try:
@@ -267,6 +274,13 @@ class App(tk.Tk):
             cmd=[py, "-u", "check_tp_sl_hits.py", "--watch"],
             log_put=self._enqueue_log,
         )
+
+        self._hits_should_run = True
+        self._hits_quiet_paused = False
+        try:
+            self.after(1000, self._hits_quiet_guard)
+        except Exception:
+            pass
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1846,17 +1860,42 @@ class App(tk.Tk):
                 offset_h = 0
                 start_server = start_utc.replace(tzinfo=None)
                 end_server = end_utc.replace(tzinfo=None)
-            # Step 4: Fetch ticks
-            self.after(0, self._set_chart_message, f"Fetching ticks for {sym_name}…")
-            ticks = mt5.copy_ticks_range(sym_name, start_server, end_server, mt5.COPY_TICKS_ALL)
-            # Fallback: try UTC-naive window if nothing returned
-            if ticks is None or len(ticks) == 0:
-                start_naive = start_utc.replace(tzinfo=None)
-                end_naive = end_utc.replace(tzinfo=None)
-                ticks = mt5.copy_ticks_range(sym_name, start_naive, end_naive, mt5.COPY_TICKS_ALL)
-            if ticks is None or len(ticks) == 0:
-                self.after(0, self._chart_render_error, "No ticks for requested range.")
+            # Step 4: Fetch ticks, skipping quiet windows entirely
+            quiet_segments = list(iter_quiet_utc_ranges(start_utc, fetch_end_utc))
+            active_ranges = list(iter_active_utc_ranges(start_utc, fetch_end_utc))
+            if not active_ranges:
+                self.after(
+                    0,
+                    self._chart_render_error,
+                    "Requested window falls entirely inside quiet trading hours (23:30–01:00 UTC+3).",
+                )
                 return
+
+            self.after(0, self._set_chart_message, f"Fetching ticks for {sym_name}…")
+            ticks_aggregate: List[object] = []
+            for window_start, window_end in active_ranges:
+                start_srv = self._to_server_naive(window_start, offset_h)
+                end_srv = self._to_server_naive(window_end, offset_h)
+                part = mt5.copy_ticks_range(sym_name, start_srv, end_srv, mt5.COPY_TICKS_ALL)
+                if part is None or len(part) == 0:
+                    start_naive = window_start.replace(tzinfo=None)
+                    end_naive = window_end.replace(tzinfo=None)
+                    part = mt5.copy_ticks_range(sym_name, start_naive, end_naive, mt5.COPY_TICKS_ALL)
+                if part is None or len(part) == 0:
+                    continue
+                try:
+                    for row in part:
+                        ticks_aggregate.append(row)
+                except Exception:
+                    ticks_aggregate.extend(list(part))
+            if not ticks_aggregate:
+                self.after(
+                    0,
+                    self._chart_render_error,
+                    "No ticks found outside quiet trading hours for requested range.",
+                )
+                return
+            ticks = ticks_aggregate
             # Aggregate ticks into 1m OHLC
             minute_data = defaultdict(list)
             for tk in ticks:
@@ -1948,7 +1987,7 @@ class App(tk.Tk):
                     return
                 self._chart_render_draw(symbol, times, opens, highs, lows, closes,
                                         entry_utc, entry_price, sl, tp, hit_kind, hit_dt, hit_price,
-                                        start_utc, end_utc)
+                                        start_utc, end_utc, quiet_segments)
             self.after(0, _finish)
         except Exception as e:
             self.after(0, self._chart_render_error, f"Chart thread error: {e}")
@@ -1957,10 +1996,25 @@ class App(tk.Tk):
         self._ohlc_loading = False
         self._set_chart_message(f"Chart error: {msg}")
 
-    def _chart_render_draw(self, symbol: str, times, opens, highs, lows, closes,
-                            entry_utc: datetime, entry_price, sl, tp,
-                            hit_kind, hit_dt, hit_price,
-                            start_utc: datetime, end_utc: datetime) -> None:
+    def _chart_render_draw(
+        self,
+        symbol: str,
+        times,
+        opens,
+        highs,
+        lows,
+        closes,
+        entry_utc: datetime,
+        entry_price,
+        sl,
+        tp,
+        hit_kind,
+        hit_dt,
+        hit_price,
+        start_utc: datetime,
+        end_utc: datetime,
+        quiet_segments: Sequence[tuple[datetime, datetime]] | None,
+    ) -> None:
         self._ohlc_loading = False
         if self._chart_ax is None or self._chart_canvas is None:
             self._init_chart_widgets()
@@ -1970,6 +2024,8 @@ class App(tk.Tk):
         ax = self._chart_ax
         ax.clear()
         ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        if quiet_segments is None:
+            quiet_segments = []
         # Convert all times to display timezone (UTC+3)
         try:
             times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
@@ -2128,7 +2184,15 @@ class App(tk.Tk):
         except Exception:
             pass
         self._chart_canvas.draw_idle()
-        self._set_chart_message(f"Rendered {symbol} | 1m bars: {len(times)} (using inserted time)")
+        quiet_note = ""
+        try:
+            if quiet_segments:
+                quiet_note = " | quiet window skipped"
+        except Exception:
+            quiet_note = ""
+        self._set_chart_message(
+            f"Rendered {symbol} | 1m bars: {len(times)} (using inserted time){quiet_note}"
+        )
 
     # Toggle button helpers
     def _update_buttons(self) -> None:
@@ -2162,6 +2226,41 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def _hits_quiet_guard(self) -> None:
+        """Pause/resume the hits monitor when the quiet window is active."""
+
+        now_utc = datetime.now(UTC)
+        quiet_active = is_quiet_time(now_utc)
+        try:
+            transition = next_quiet_transition(now_utc)
+            delta_ms = int(max(1.0, min(60.0, (transition - now_utc).total_seconds())) * 1000)
+        except Exception:
+            delta_ms = 30000
+
+        if quiet_active:
+            if self.hits.is_running():
+                self.hits.stop()
+            if self._hits_should_run and not self._hits_quiet_paused:
+                self._enqueue_log(
+                    "hits",
+                    "Quiet trading window active (23:30–01:00 UTC+3); hits monitor paused.\n",
+                )
+            self._hits_quiet_paused = True
+        else:
+            was_paused = self._hits_quiet_paused
+            self._hits_quiet_paused = False
+            if was_paused and self._hits_should_run and not self.hits.is_running():
+                self._enqueue_log("hits", "Quiet window ended; resuming hits monitor.\n")
+                self.hits.start()
+        try:
+            self._update_buttons()
+        except Exception:
+            pass
+        try:
+            self.after(max(5000, min(60000, delta_ms)), self._hits_quiet_guard)
+        except Exception:
+            pass
+
     # Button handlers
     def _start_timelapse(self) -> None:
         # Build command dynamically to include exclude list and prox sl if provided
@@ -2192,10 +2291,34 @@ class App(tk.Tk):
         self.timelapse.stop()
 
     def _start_hits(self) -> None:
+        self._hits_should_run = True
+        now_utc = datetime.now(UTC)
+        if is_quiet_time(now_utc):
+            if not self._hits_quiet_paused:
+                self._enqueue_log(
+                    "hits",
+                    "Quiet trading window active (23:30–01:00 UTC+3); deferring hits monitor start.\n",
+                )
+            self._hits_quiet_paused = True
+            try:
+                self._update_buttons()
+            except Exception:
+                pass
+            return
         self.hits.start()
+        try:
+            self._update_buttons()
+        except Exception:
+            pass
 
     def _stop_hits(self) -> None:
+        self._hits_should_run = False
+        self._hits_quiet_paused = False
         self.hits.stop()
+        try:
+            self._update_buttons()
+        except Exception:
+            pass
 
     def _restart_monitors(self) -> None:
         # Stop the current subprocesses

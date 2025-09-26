@@ -1,9 +1,9 @@
 {
   "exclude_symbols": "",
   "min_prox_sl": "0.33",
-  "max_prox_sl": "0.51",
+  "max_prox_sl": "0.49",
   "since_hours": 168,
   "interval": 20,
   "symbol_category": "All",
-  "hit_status": "Running"
+  "hit_status": "Hits"
 }

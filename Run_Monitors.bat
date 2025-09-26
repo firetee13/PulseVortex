@@ -1,6 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+
+REM Activate virtual environment
+call .venv\Scripts\activate.bat
+
 set SCRIPT=run_monitor_gui.pyw
 
 REM Prefer the windowed Python launcher (no console)

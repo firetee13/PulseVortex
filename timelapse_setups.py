@@ -130,7 +130,7 @@ UTC = timezone.utc
 UTC3 = timezone(timedelta(hours=3))
 # Consider market "alive" only if there's at least one tick
 # within this many seconds. Avoid creating entries for closed markets.
-TICK_FRESHNESS_SEC = 30  # 30 seconds
+TICK_FRESHNESS_SEC = 60  # 60 seconds
 # Cache last tick data to minimize expensive history lookups
 _LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[datetime]]] = {}
 

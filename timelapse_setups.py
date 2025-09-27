@@ -113,7 +113,6 @@ def parse_args() -> argparse.Namespace:
     # Optional guards (disabled by default). Primary fix is bid/ask backfill.
     p.add_argument("--min-prox-sl", type=float, default=0.0, help="Optional: require entry to be at least this fraction away from SL relative to SL/TP range")
     p.add_argument("--max-prox-sl", type=float, default=1.0, help="Optional: require entry to be at most this fraction away from SL relative to SL/TP range")
-    p.add_argument("--min-sl-pct", type=float, default=0.0, help="Optional: require |price-SL| to exceed this percent of price (units in %%)")
     p.add_argument("--top", type=int, default=None, help="Limit to top N setups (after filtering)")
     p.add_argument("--brief", action="store_true", help="Brief output without detailed explanation")
     p.add_argument("--watch", action="store_true", help="Run continuously and poll MT5 for updates")
@@ -805,7 +804,6 @@ def process_once(
     min_rrr: float,
     min_prox_sl: float,
     max_prox_sl: float,
-    min_sl_pct: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -834,7 +832,6 @@ def process_once(
         min_rrr=min_rrr,
         min_prox_sl=min_prox_sl,
         max_prox_sl=max_prox_sl,
-        min_sl_pct=min_sl_pct,
         as_of_ts=as_of_ts,
         debug=debug,
     )
@@ -891,7 +888,6 @@ def watch_loop(
     min_rrr: float,
     min_prox_sl: float,
     max_prox_sl: float,
-    min_sl_pct: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -911,7 +907,6 @@ def watch_loop(
                 min_rrr=min_rrr,
                 min_prox_sl=min_prox_sl,
                 max_prox_sl=max_prox_sl,
-                min_sl_pct=min_sl_pct,
                 top=top,
                 brief=brief,
                 debug=debug,
@@ -928,7 +923,6 @@ def _watch_loop_events(
     min_rrr: float,
     min_prox_sl: float,
     max_prox_sl: float,
-    min_sl_pct: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -942,7 +936,6 @@ def _watch_loop_events(
         min_rrr=min_rrr,
         min_prox_sl=min_prox_sl,
         max_prox_sl=max_prox_sl,
-        min_sl_pct=min_sl_pct,
         top=top,
         brief=brief,
         debug=debug,
@@ -956,7 +949,6 @@ def analyze(
     min_rrr: float,
     min_prox_sl: float,
     max_prox_sl: float,
-    min_sl_pct: float,
     as_of_ts: Optional[datetime],
     debug: bool = False,
 ) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
@@ -1223,21 +1215,6 @@ def analyze(
                         print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
                     continue
 
-        # Additional SL distance gate in percent of price (works even without Bid/Ask)
-        if min_sl_pct and price is not None and sl is not None:
-            try:
-                dist = (price - sl) if direction == "Buy" else (sl - price)
-                if dist <= 0:
-                    bump("sl_distance_nonpositive")
-                    continue
-                pct = (dist / abs(price)) * 100.0
-                if pct < float(min_sl_pct):
-                    bump("sl_distance_pct_too_small")
-                    if debug:
-                        print(f"[DEBUG] SL pct too small: sym={sym}, dir={direction}, price={price}, sl={sl}, pct={pct:.5f} < {min_sl_pct}")
-                    continue
-            except Exception:
-                pass
 
         # Composite score
         score = 0.0
@@ -1568,7 +1545,6 @@ def main() -> None:
                 min_rrr=args.min_rrr,
                 min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
                 max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-                min_sl_pct=max(0.0, args.min_sl_pct),
                 top=args.top,
                 brief=args.brief,
                 debug=args.debug,
@@ -1582,7 +1558,6 @@ def main() -> None:
                 min_rrr=args.min_rrr,
                 min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
                 max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-                min_sl_pct=max(0.0, args.min_sl_pct),
                 top=args.top,
                 brief=args.brief,
                 debug=args.debug,
@@ -1595,7 +1570,6 @@ def main() -> None:
         min_rrr=args.min_rrr,
         min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
         max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-        min_sl_pct=max(0.0, args.min_sl_pct),
         top=args.top,
         brief=args.brief,
         debug=args.debug,

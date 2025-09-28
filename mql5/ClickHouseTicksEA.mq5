@@ -75,17 +75,32 @@ int OnInit()
       }
    }
 
-   //--- Get historical ticks if requested or if resume is enabled
-   if(InpHistoricalTicksDays > 0 || m_resume_enabled)
+   //--- Get historical ticks if requested
+   if(InpHistoricalTicksDays > 0)
    {
-      if(m_resume_enabled)
-         Print("Retrieving missing ticks since last recorded timestamp...");
-      else
-         Print("Retrieving historical ticks for the last ", InpHistoricalTicksDays, " days...");
+      Print("Retrieving historical ticks for the last ", InpHistoricalTicksDays, " days...");
 
       if(!GetHistoricalTicks())
       {
-         Print("Failed to retrieve historical ticks. EA will continue with real-time ticks only.");
+         Print("Failed to retrieve historical ticks.");
+      }
+      else
+      {
+         Print("Historical ticks retrieval completed. EA will now stop.");
+         // Deinitialize the EA after backfilling
+         ExpertRemove();
+         return(INIT_SUCCEEDED);
+      }
+   }
+
+   //--- Resume from last tick if enabled (only if not doing historical backfill)
+   if(m_resume_enabled)
+   {
+      Print("Retrieving missing ticks since last recorded timestamp...");
+
+      if(!GetHistoricalTicks())
+      {
+         Print("Failed to retrieve missing ticks. EA will continue with real-time ticks only.");
       }
    }
 
@@ -250,21 +265,22 @@ bool GetHistoricalTicks()
    //--- Calculate end time (current time)
    datetime end_time = TimeCurrent();
 
-   //--- Determine start time based on settings
-   if(m_resume_enabled)
+   //--- Determine mode based on settings
+   if(InpHistoricalTicksDays > 0)
    {
-      //--- For resume mode, we'll get the latest timestamp for each symbol individually
-      if(InpDebugMode)
-         Print("Resume mode enabled. Will retrieve ticks from last recorded timestamp for each symbol.");
-   }
-   else
-   {
-      //--- For historical mode, use fixed days
-      datetime start_time = end_time - (InpHistoricalTicksDays * 24 * 60 * 60);
-
+      //--- Historical mode
       if(InpDebugMode)
       {
-         Print("Retrieving historical ticks from ", TimeToString(start_time), " to ", TimeToString(end_time));
+         Print("Historical mode enabled: retrieving ticks for the last ", InpHistoricalTicksDays, " days.");
+         Print("Total symbols to process: ", m_symbols.Total());
+      }
+   }
+   else if(m_resume_enabled)
+   {
+      //--- Resume mode
+      if(InpDebugMode)
+      {
+         Print("Resume mode enabled. Will retrieve ticks from last recorded timestamp for each symbol.");
          Print("Total symbols to process: ", m_symbols.Total());
       }
    }
@@ -280,8 +296,16 @@ bool GetHistoricalTicks()
    {
       string symbol = m_symbols.At(i);
       datetime start_time = 0;
+      datetime historical_start_time = 0;
+      datetime resume_start_time = 0;
 
-      //--- Determine start time for this symbol
+      //--- Calculate historical start time if requested
+      if(InpHistoricalTicksDays > 0)
+      {
+         historical_start_time = end_time - (InpHistoricalTicksDays * 24 * 60 * 60);
+      }
+
+      //--- Calculate resume start time if enabled
       if(m_resume_enabled)
       {
          //--- Get the latest timestamp for this symbol from ClickHouse
@@ -290,24 +314,45 @@ bool GetHistoricalTicks()
          if(symbol_start_time > 0)
          {
             //--- Add 1 second to the latest time to avoid duplicates
-            start_time = symbol_start_time + 1;
+            resume_start_time = symbol_start_time + 1;
 
             if(InpDebugMode)
-               Print("Resuming from ", TimeToString(start_time), " for symbol: ", symbol);
+               Print("Resume mode: would resume from ", TimeToString(resume_start_time), " for symbol: ", symbol);
          }
          else
          {
             //--- No previous data for this symbol, use current time
-            start_time = end_time;
+            resume_start_time = end_time;
 
             if(InpDebugMode)
-               Print("No previous data found for symbol: ", symbol, ". Starting from current time.");
+               Print("No previous data found for symbol: ", symbol, ". Will use historical mode if enabled.");
          }
+      }
+
+      //--- Determine the actual start time based on enabled modes
+      if(InpHistoricalTicksDays > 0)
+      {
+         //--- Historical mode
+         start_time = historical_start_time;
+
+         if(InpDebugMode)
+            Print("Historical mode: retrieving from ", TimeToString(start_time), " for symbol: ", symbol);
+      }
+      else if(m_resume_enabled)
+      {
+         //--- Resume mode
+         start_time = resume_start_time;
+
+         if(InpDebugMode)
+            Print("Resume mode: retrieving from ", TimeToString(start_time), " for symbol: ", symbol);
       }
       else
       {
-         //--- For historical mode, use fixed days
-         start_time = end_time - (InpHistoricalTicksDays * 24 * 60 * 60);
+         //--- No mode specified, use current time
+         start_time = end_time;
+
+         if(InpDebugMode)
+            Print("No mode specified: starting from current time for symbol: ", symbol);
       }
 
       //--- Skip if start time is after or equal to end time
@@ -319,7 +364,7 @@ bool GetHistoricalTicks()
       }
 
       if(InpDebugMode)
-         Print("Collecting ticks for symbol: ", symbol, " from ", TimeToString(start_time), " to ", TimeToString(end_time));
+         Print("Collecting main ticks for symbol: ", symbol, " from ", TimeToString(start_time), " to ", TimeToString(end_time));
 
       //--- Get historical ticks for this symbol
       MqlTick ticks_array[];
@@ -329,32 +374,33 @@ bool GetHistoricalTicks()
       if(ticks_count <= 0)
       {
          if(InpDebugMode)
-            Print("No ticks found for symbol: ", symbol, " in the specified time range. Error: ", GetLastError());
-         continue;
+            Print("No main ticks found for symbol: ", symbol, " in the specified time range. Error: ", GetLastError());
       }
-
-      if(InpDebugMode)
-         Print("Retrieved ", ticks_count, " ticks for symbol: ", symbol);
-
-      //--- Process each tick immediately without delays
-      for(int j = 0; j < ticks_count; j++)
+      else
       {
-         //--- Filter ticks by the requested time range (CopyTicks can sometimes return extra data)
-         datetime tick_time = ticks_array[j].time;
-         if(tick_time < start_time || tick_time > end_time)
-            continue;
+         if(InpDebugMode)
+            Print("Retrieved ", ticks_count, " main ticks for symbol: ", symbol);
 
-         //--- Format tick data as JSON
-         string tick_json = FormatTickAsJson(symbol, ticks_array[j]);
-
-         //--- Add to array
-         AddTickToArray(tick_json);
-         total_ticks_retrieved++;
-
-         //--- Send batch if it's full
-         if(total_ticks_retrieved % InpMaxTicksPerBatch == 0)
+         //--- Process each tick immediately without delays
+         for(int j = 0; j < ticks_count; j++)
          {
-            SendTicksToClickHouse();
+            //--- Filter ticks by the requested time range (CopyTicks can sometimes return extra data)
+            datetime tick_time = ticks_array[j].time;
+            if(tick_time < start_time || tick_time > end_time)
+               continue;
+
+            //--- Format tick data as JSON
+            string tick_json = FormatTickAsJson(symbol, ticks_array[j]);
+
+            //--- Add to array
+            AddTickToArray(tick_json);
+            total_ticks_retrieved++;
+
+            //--- Send batch if it's full
+            if(total_ticks_retrieved % InpMaxTicksPerBatch == 0)
+            {
+               SendTicksToClickHouse();
+            }
          }
       }
    }
@@ -362,10 +408,12 @@ bool GetHistoricalTicks()
    //--- Send any remaining ticks after processing all symbols
    SendTicksToClickHouse();
 
-   if(m_resume_enabled)
+   if(InpHistoricalTicksDays > 0)
+      Print("Historical ticks retrieval completed. Total ticks retrieved: ", total_ticks_retrieved);
+   else if(m_resume_enabled)
       Print("Resume ticks retrieval completed. Total ticks retrieved: ", total_ticks_retrieved);
    else
-      Print("Historical ticks retrieval completed. Total ticks retrieved: ", total_ticks_retrieved);
+      Print("Ticks retrieval completed. Total ticks retrieved: ", total_ticks_retrieved);
 
    return true;
 }

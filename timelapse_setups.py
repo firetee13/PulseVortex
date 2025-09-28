@@ -528,7 +528,6 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         tick_time_utc: Optional[datetime] = None
         tick_age: Optional[float] = None
         has_recent_tick = False
-        used_backfill = False
 
         if tick is not None:
             try:
@@ -560,98 +559,6 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
                         has_recent_tick = True
                 except Exception:
                     tick_age = None
-
-        if not has_recent_tick:
-            cached_tick = _LAST_TICK_CACHE.get(sym)
-            if cached_tick is not None:
-                _, _, cached_ts = cached_tick
-                if cached_ts is not None:
-                    try:
-                        cache_age = abs((now_utc - cached_ts).total_seconds())
-                        if cache_age <= TICK_FRESHNESS_SEC:
-                            has_recent_tick = True
-                    except Exception:
-                        pass
-
-        # Ensure Bid/Ask represent the latest available tick values.
-        # Previous behavior only backfilled when a side was None, which could
-        # leave us with stale prices if symbol_info_tick had both sides but an
-        # old or missing timestamp. To honor the "previous second" intent,
-        # refresh from tick history when the tick is stale or un-timestamped.
-        STALE_TICK_THRESHOLD_SEC = 2.0
-        needs_refresh = (
-            (bid is None or ask is None)
-            or (tick_age is None)  # missing/unknown tick time
-            or (tick_age is not None and tick_age > STALE_TICK_THRESHOLD_SEC)
-        )
-        if needs_refresh:
-            used_backfill = True
-            mt5_bid, mt5_ask = _mt5_backfill_bid_ask(
-                sym,
-                now_utc,
-                need_bid=True,
-                need_ask=True,
-            )
-            if mt5_bid is not None:
-                bid = mt5_bid
-            if mt5_ask is not None:
-                ask = mt5_ask
-            # Try to also refresh tick_time_utc using the last tick in a short window
-            # so downstream freshness checks reflect what we used.
-            try:
-                ticks_recent = mt5.copy_ticks_range(
-                    sym,
-                    now_utc - timedelta(seconds=5),
-                    now_utc,
-                    mt5.COPY_TICKS_ALL,
-                )
-                if ticks_recent is not None and len(ticks_recent) > 0:
-                    lt = ticks_recent[-1]
-                    try:
-                        # numpy structured array style
-                        tmsc = None
-                        try:
-                            tmsc = lt['time_msc']  # type: ignore[index]
-                        except Exception:
-                            tmsc = getattr(lt, 'time_msc', None)
-                        if tmsc:
-                            tick_time_utc = datetime.fromtimestamp(float(tmsc) / 1000.0, tz=UTC)
-                        else:
-                            ts_val = None
-                            try:
-                                ts_val = lt['time']  # type: ignore[index]
-                            except Exception:
-                                ts_val = getattr(lt, 'time', None)
-                            if ts_val is not None:
-                                tick_time_utc = datetime.fromtimestamp(float(ts_val), tz=UTC)
-                    except Exception:
-                        pass
-                    if tick_time_utc is not None:
-                        try:
-                            tick_age = max(0.0, (now_utc - tick_time_utc).total_seconds())
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-        if not has_recent_tick:
-            try:
-                recent = mt5.copy_ticks_range(
-                    sym,
-                    now_utc - timedelta(seconds=TICK_FRESHNESS_SEC),
-                    now_utc,
-                    mt5.COPY_TICKS_ALL,
-                )
-                has_recent_tick = bool(recent is not None and len(recent) > 0)
-            except Exception:
-                has_recent_tick = False
-
-        if bid is not None or ask is not None:
-            cache_ts = tick_time_utc
-            if cache_ts is None:
-                prev = _LAST_TICK_CACHE.get(sym)
-                cache_ts = prev[2] if prev else None
-            _LAST_TICK_CACHE[sym] = (bid, ask, cache_ts)
 
         d1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_D1, 20)
         h4 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H4, 4)
@@ -726,7 +633,7 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             'Bid': bid,
             'Ask': ask,
             'Spread%': spreadpct,
-            'Backfilled': 1 if used_backfill else 0,
+            'Backfilled': 0,
             'Strength 4H': ss_4h,
             'Strength 1D': ss_1d,
             'Strength 1W': ss_1w,
@@ -1008,24 +915,6 @@ def analyze(
         except Exception:
             backfilled_flag = 0
 
-        # Try MT5 tick backfill first if Bid/Ask missing at the latest snapshot
-        if bid is None or ask is None:
-            # Reference timestamp: prefer global latest (as_of_ts) if available
-            ref_ts = as_of_ts or last.ts
-            # Convert to UTC aware for MT5
-            if ref_ts.tzinfo is None:
-                ref_utc = ref_ts.replace(tzinfo=INPUT_TZ).astimezone(UTC)
-            else:
-                ref_utc = ref_ts.astimezone(UTC)
-            need_bid = bid is None
-            need_ask = ask is None
-            mt5_bid, mt5_ask = _mt5_backfill_bid_ask(sym, ref_utc, need_bid=need_bid, need_ask=need_ask)
-            if need_bid and mt5_bid is not None:
-                bid = mt5_bid
-            if need_ask and mt5_ask is not None:
-                ask = mt5_ask
-
-
         # Drop symbols without recent ticks (avoid closed markets)
         recent_tick_flag = last.g("Recent Tick")
         if recent_tick_flag is None or recent_tick_flag <= 0:
@@ -1064,7 +953,7 @@ def analyze(
         else:  # Sell
             price = bid
 
-        # If Bid/Ask are not available even after backfill, skip until live tick arrives
+        # If Bid/Ask are not available, skip until live tick arrives
         if price is None:
             bump("no_live_bid_ask")
             if debug:
@@ -1074,7 +963,7 @@ def analyze(
                     pass
             continue
 
-        # Spread and ATR(%) handling — prefer computing directly from Bid/Ask
+        # Spread calculation only when bid and ask is available
         spreadpct = None
         try:
             if bid is not None and ask is not None and bid > 0 and ask > 0 and ask > bid:
@@ -1082,8 +971,6 @@ def analyze(
                 spreadpct = ((ask - bid) / mid) * 100.0
         except Exception:
             spreadpct = None
-        if spreadpct is None:
-            spreadpct = spreadpct_row
         spr_class = spread_class(spreadpct)
         if spr_class == "Avoid":
             bump("spread_avoid")
@@ -1199,15 +1086,13 @@ def analyze(
                 if direction == "Buy":
                     if bid is not None:
                         distance = bid - sl
-                    elif price is not None:
-                        # Fallback to entry price (typically Ask); this is lenient but avoids None
-                        distance = price - sl
+                    else:
+                        continue
                 else:  # Sell
                     if ask is not None:
                         distance = sl - ask
-                    elif price is not None:
-                        # Fallback to entry price (typically Bid)
-                        distance = sl - price
+                    else:
+                        continue
                 # Enforce minimum distance threshold (10x spread) with tiny epsilon
                 if distance is None or (distance + eps) < (10 * spread_abs):
                     bump("sl_too_close_to_spread")
@@ -1287,7 +1172,7 @@ def analyze(
         )
 
     # Order by score then RRR
-    results.sort(key=lambda x: (-x["score"], -x["rrr"]))
+    results.sort(key=lambda x: (-float(x["score"]), -float(x["rrr"])), reverse=True)
     if debug:
         print("--- Diagnostics ---")
         print(f"Symbols evaluated: {len(series)}")

@@ -30,6 +30,7 @@ string m_ticks_data[];                             // Array to store tick data
 datetime m_last_send_time = 0;                     // Last send time
 int m_http_timeout = 5000;                         // HTTP timeout in milliseconds
 bool m_resume_enabled = true;                      // Runtime flag for resume functionality (can be modified)
+int m_next_tick_slot = 0;                          // Index of next free slot in tick buffer
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -42,6 +43,7 @@ int OnInit()
    {
       m_ticks_data[i] = "";
    }
+   m_next_tick_slot = 0;
 
    //--- Get all available symbols
    if(!GetAllSymbols())
@@ -431,26 +433,31 @@ string FormatTickAsJson(string symbol, const MqlTick &tick)
 //+------------------------------------------------------------------+
 void AddTickToArray(string tick_json)
 {
-   //--- Find first empty slot
    int size = ArraySize(m_ticks_data);
-   for(int i = 0; i < size; i++)
+   if(size <= 0)
+      return;
+
+   if(m_next_tick_slot >= size)
    {
-      if(m_ticks_data[i] == "")
+      SendTicksToClickHouse();
+
+      if(m_next_tick_slot >= size)
       {
-         m_ticks_data[i] = tick_json;
-
          if(InpDebugMode)
-            Print("Added tick to array at position ", i);
-
-         //--- If we've reached the batch size, send immediately
-         if(i == size - 1)
-         {
-            SendTicksToClickHouse();
-         }
-
+            Print("Tick buffer full; dropping tick.");
          return;
       }
    }
+
+   m_ticks_data[m_next_tick_slot] = tick_json;
+
+   if(InpDebugMode)
+      Print("Added tick to array at position ", m_next_tick_slot);
+
+   m_next_tick_slot++;
+
+   if(m_next_tick_slot >= size)
+      SendTicksToClickHouse();
 }
 
 //+------------------------------------------------------------------+
@@ -460,7 +467,7 @@ void SendTicksToClickHouse()
 {
    //--- Check if we have any ticks to send
    int size = ArraySize(m_ticks_data);
-   if(size <= 0 || m_ticks_data[0] == "")
+   if(size <= 0 || m_next_tick_slot == 0)
    {
       if(InpDebugMode)
          Print("No ticks to send.");
@@ -469,27 +476,14 @@ void SendTicksToClickHouse()
 
    //--- Prepare data for sending
    string data = "";
-   int count = 0;
+   int count = m_next_tick_slot;
 
-   for(int i = 0; i < size; i++)
+   for(int i = 0; i < m_next_tick_slot; i++)
    {
-      if(m_ticks_data[i] != "")
-      {
-         if(count > 0)
-            data += ",";
+      if(i > 0)
+         data += ",";
 
-         data += m_ticks_data[i];
-         count++;
-      }
-      else
-         break;
-   }
-
-   if(count <= 0)
-   {
-      if(InpDebugMode)
-         Print("No valid ticks to send.");
-      return;
+      data += m_ticks_data[i];
    }
 
    //--- Create HTTP request
@@ -518,6 +512,8 @@ void SendTicksToClickHouse()
       {
          m_ticks_data[i] = "";
       }
+
+      m_next_tick_slot = 0;
 
       //--- Update last send time
       m_last_send_time = TimeCurrent();
@@ -554,6 +550,8 @@ void SendTicksToClickHouse()
          {
             m_ticks_data[i] = "";
          }
+
+         m_next_tick_slot = 0;
       }
    }
 }

@@ -63,7 +63,9 @@ CREATE TABLE ticks (
     'XLMUSD' = 59,
     'XPTUSD' = 60,
     'XRPUSD' = 61,
-    'XTZUSD' = 62
+    'XTZUSD' = 62,
+    'LTCUSD' = 63,
+    'XPDUSD' = 64
   ) CODEC(LZ4),
   time   DateTime64(3)          CODEC(DoubleDelta, LZ4),
   bid    Float32                CODEC(Gorilla, ZSTD(3)),

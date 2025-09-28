@@ -29,7 +29,6 @@ CArrayString m_symbol_latest_times;                // Array to store latest tick
 string m_ticks_data[];                             // Array to store tick data
 datetime m_last_send_time = 0;                     // Last send time
 int m_http_timeout = 5000;                         // HTTP timeout in milliseconds
-bool m_symbols_subscribed = false;                 // Flag to check if symbols are subscribed
 bool m_resume_enabled = true;                      // Runtime flag for resume functionality (can be modified)
 
 //+------------------------------------------------------------------+
@@ -48,13 +47,6 @@ int OnInit()
    if(!GetAllSymbols())
    {
       Print("Failed to get symbols. EA will be terminated.");
-      return(INIT_FAILED);
-   }
-
-   //--- Subscribe to all symbols for tick data
-   if(!SubscribeToAllSymbols())
-   {
-      Print("Failed to subscribe to symbols. EA will be terminated.");
       return(INIT_FAILED);
    }
 
@@ -177,76 +169,6 @@ bool GetAllSymbols()
    }
 
    return true;
-}
-
-//+------------------------------------------------------------------+
-//| Subscribe to all symbols for tick data                           |
-//+------------------------------------------------------------------+
-bool SubscribeToAllSymbols()
-{
-   if(m_symbols_subscribed)
-      return true;
-
-   int total = m_symbols.Total();
-   int success_count = 0;
-
-   for(int i = 0; i < total; i++)
-   {
-      string symbol = m_symbols.At(i);
-      if(SymbolSelect(symbol, true))
-      {
-         success_count++;
-
-         if(InpDebugMode)
-            Print("Subscribed to symbol: ", symbol);
-      }
-      else
-      {
-         Print("Failed to subscribe to symbol: ", symbol);
-      }
-   }
-
-   if(success_count == total)
-   {
-      m_symbols_subscribed = true;
-      Print("Successfully subscribed to all ", total, " symbols.");
-      return true;
-   }
-   else
-   {
-      Print("Successfully subscribed to ", success_count, " out of ", total, " symbols.");
-      return success_count > 0; // Return true if at least one symbol was subscribed
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Unsubscribe from all symbols                                     |
-//+------------------------------------------------------------------+
-void UnsubscribeFromAllSymbols()
-{
-   if(!m_symbols_subscribed)
-      return;
-
-   int total = m_symbols.Total();
-
-   for(int i = 0; i < total; i++)
-   {
-      string symbol = m_symbols.At(i);
-      // Only unsubscribe if the symbol was explicitly subscribed by this EA
-      // Check if the symbol is currently selected in Market Watch before unsubscribing
-      if(SymbolInfoInteger(symbol, SYMBOL_VISIBLE) && SymbolSelect(symbol, false))
-      {
-         if(InpDebugMode)
-            Print("Unsubscribed from symbol: ", symbol);
-      }
-      else if(InpDebugMode)
-      {
-         Print("Symbol ", symbol, " was not subscribed or already removed from Market Watch.");
-      }
-   }
-
-   m_symbols_subscribed = false;
-   Print("Finished unsubscribing from symbols tracked by this EA.");
 }
 
 //+------------------------------------------------------------------+

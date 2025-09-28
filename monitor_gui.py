@@ -444,7 +444,7 @@ class App(tk.Tk):
 
         # Top: table container
         mid = ttk.Frame(splitter)
-        cols = ("symbol", "direction", "entry_utc3", "hit_time_utc3", "hit", "tp", "sl", "entry_price")
+        cols = ("symbol", "direction", "entry_utc3", "hit_time_utc3", "hit", "tp", "sl", "entry_price", "proximity_to_sl")
         self.db_tree = ttk.Treeview(mid, columns=cols, show='headings', height=12)
         self.db_tree.heading("symbol", text="Symbol")
         self.db_tree.heading("direction", text="Direction")
@@ -454,6 +454,7 @@ class App(tk.Tk):
         self.db_tree.heading("tp", text="TP")
         self.db_tree.heading("sl", text="SL")
         self.db_tree.heading("entry_price", text="Entry Price")
+        self.db_tree.heading("proximity_to_sl", text="Prox to SL")
         self.db_tree.column("symbol", width=120, anchor=tk.W)
         self.db_tree.column("direction", width=80, anchor=tk.W)
         self.db_tree.column("entry_utc3", width=180, anchor=tk.W)
@@ -462,6 +463,7 @@ class App(tk.Tk):
         self.db_tree.column("tp", width=100, anchor=tk.E)
         self.db_tree.column("sl", width=100, anchor=tk.E)
         self.db_tree.column("entry_price", width=120, anchor=tk.E)
+        self.db_tree.column("proximity_to_sl", width=100, anchor=tk.E)
 
         vs = ttk.Scrollbar(mid, orient=tk.VERTICAL, command=self.db_tree.yview)
         self.db_tree.configure(yscrollcommand=vs.set)
@@ -1483,7 +1485,7 @@ class App(tk.Tk):
         symbol_category = self.var_symbol_category.get()
         hit_status = self.var_hit_status.get()
 
-        rows_display: list[tuple[str, str, str, str, str, str, str, str]] = []
+        rows_display: list[tuple[str, str, str, str, str, str, str, str, str]] = []
         rows_meta: list[dict] = []
         error: str | None = None
         try:
@@ -1507,7 +1509,8 @@ class App(tk.Tk):
                         """
                         SELECT s.id, s.symbol, s.direction, s.inserted_at,
                                h.hit_time_utc3, h.hit_time, h.hit, h.hit_price,
-                               s.tp, s.sl, COALESCE(h.entry_price, s.price) AS entry_price
+                               s.tp, s.sl, COALESCE(h.entry_price, s.price) AS entry_price,
+                               s.proximity_to_sl
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
                         WHERE s.inserted_at >= ?
@@ -1520,7 +1523,7 @@ class App(tk.Tk):
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
-                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) = row
+                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl) = row
 
                         # Apply symbol category filter
                         if symbol_category != "All":
@@ -1543,7 +1546,7 @@ class App(tk.Tk):
                         filtered_rows.append(row)
 
                     # Process filtered rows
-                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) in filtered_rows:
+                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''
                         dir_s = str(direction) if direction is not None else ''
                         try:
@@ -1573,7 +1576,8 @@ class App(tk.Tk):
                         tp_s = fmt_price(tp)
                         sl_s = fmt_price(sl)
                         ep_s = fmt_price(entry_price)
-                        rows_display.append((sym_s, dir_s, ent_s, hit_s, hit_str, tp_s, sl_s, ep_s))
+                        prox_sl_s = fmt_price(proximity_to_sl)
+                        rows_display.append((sym_s, dir_s, ent_s, hit_s, hit_str, tp_s, sl_s, ep_s, prox_sl_s))
                         # Raw/meta for chart
                         rows_meta.append({
                             'iid': None,  # to fill on UI insert
@@ -1617,13 +1621,13 @@ class App(tk.Tk):
             self.db_status.config(text=f"Error: {error}")
         else:
             new_selected_iid = None
-            for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s) in enumerate(rows_display):
+            for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s) in enumerate(rows_display):
                 tags = ()
                 if hit == 'TP':
                     tags = ('tp',)
                 elif hit == 'SL':
                     tags = ('sl',)
-                iid = self.db_tree.insert('', tk.END, values=(sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s), tags=tags)
+                iid = self.db_tree.insert('', tk.END, values=(sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s), tags=tags)
                 if idx < len(rows_meta):
                     meta = rows_meta[idx]
                     meta['iid'] = iid

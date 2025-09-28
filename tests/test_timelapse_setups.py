@@ -183,9 +183,8 @@ class InsertResultsDbTests(unittest.TestCase):
 
 
 class SlDistanceFilterTests(unittest.TestCase):
-    @patch('timelapse_setups._get_tick_volume_last_5_bars', return_value=True)
-    def test_sell_uses_ask_for_sl_distance(self, mock_volume):
-        # Reproduce SA40-like case where using Bid would pass, but Ask should fail
+    def test_sell_uses_ask_for_sl_distance(self):
+        # Test case where SL is too close to spread (should be rejected)
         now = datetime.now(UTC)
         sym = 'TESTIDX'
         bid = 97239.9
@@ -214,11 +213,48 @@ class SlDistanceFilterTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, min_sl_pct=0.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
         # No results should be produced due to SL too close to spread
         self.assertEqual(results, [])
         self.assertIn('sl_too_close_to_spread', reasons)
         self.assertIn(sym, reasons['sl_too_close_to_spread'])
+
+    def test_invalid_bid_ask_rejection(self):
+        # Test case where bid/ask are invalid (should be rejected at SL distance check)
+        now = datetime.now(UTC)
+        sym = 'TESTIDX2'
+        bid = 1.1  # Valid bid to pass initial checks
+        ask = 1.0  # Invalid ask (ask <= bid)
+        # Set S1/R1 levels that would normally be valid for a sell setup
+        s1 = 0.9   # Lower support level
+        r1 = 1.2   # Higher resistance level
+
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('D1 Close'): 1.0,
+            tls.canonicalize_key('Strength 4H'): -0.1,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): bid,
+            tls.canonicalize_key('Ask'): ask,
+            tls.canonicalize_key('S1 Level M5'): s1,
+            tls.canonicalize_key('R1 Level M5'): r1,
+            tls.canonicalize_key('Strength 4H'): -0.6,
+            tls.canonicalize_key('Strength 1D'): -0.2,
+            tls.canonicalize_key('Strength 1W'): -0.1,  # ensure overall Sell (>=2 negatives)
+            tls.canonicalize_key('D1 Close'): 1.05,
+            tls.canonicalize_key('D1 High'): 1.15,
+            tls.canonicalize_key('D1 Low'): 0.95,
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        # No results should be produced due to invalid bid/ask (ask <= bid)
+        self.assertEqual(results, [])
+        self.assertIn('invalid_bid_ask_for_spread_calculation', reasons)
+        self.assertIn(sym, reasons['invalid_bid_ask_for_spread_calculation'])
 
 
 class VolumeFilterTests(unittest.TestCase):

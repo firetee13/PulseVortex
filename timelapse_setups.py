@@ -50,7 +50,7 @@ DEFAULT_SQLITE_PATH = str(default_db_path())
 import json
 import numpy as np  # required for ATR computations
 
-# Optional MT5 for tick backfill
+# Optional MT5
 mt5 = getattr(mt5_client, "mt5", None)  # type: ignore
 _MT5_IMPORTED = mt5_client.has_mt5()
 atexit.register(mt5_client.shutdown_mt5)
@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Analyze MT5 symbols for trade setups (MT5 is the only source)")
     p.add_argument("--symbols", default="", help="Comma-separated symbols (default: all visible in MarketWatch)")
     p.add_argument("--min-rrr", type=float, default=1.0, help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering")
-    # Optional guards (disabled by default). Primary fix is bid/ask backfill.
+    # Optional guards (disabled by default).
     p.add_argument("--min-prox-sl", type=float, default=0.0, help="Optional: require entry to be at least this fraction away from SL relative to SL/TP range")
     p.add_argument("--max-prox-sl", type=float, default=1.0, help="Optional: require entry to be at most this fraction away from SL relative to SL/TP range")
     p.add_argument("--top", type=int, default=None, help="Limit to top N setups (after filtering)")
@@ -781,17 +781,6 @@ def analyze(
             tick_time_str = str(last.row.get(canonicalize_key('Last Tick UTC'), '') or '')
         except Exception:
             tick_time_str = ''
-        backfilled_flag = 0
-        try:
-            val_bf = last.row.get(canonicalize_key('Backfilled'))
-            if isinstance(val_bf, str):
-                val_bf = val_bf.strip()
-                if val_bf.isdigit():
-                    backfilled_flag = int(val_bf)
-            elif isinstance(val_bf, (int, float)):
-                backfilled_flag = int(val_bf)
-        except Exception:
-            backfilled_flag = 0
 
         # Drop symbols without recent ticks (avoid closed markets)
         recent_tick_flag = last.g("Recent Tick")
@@ -935,40 +924,29 @@ def analyze(
         # that actually triggers the stop:
         #   - Buy: stop is hit on Bid -> use (bid - SL)
         #   - Sell: stop is hit on Ask -> use (SL - ask)
-        # If the preferred side is missing, fall back to entry `price` to avoid false negatives.
-        # Also support deriving absolute spread from `spreadpct` when bid/ask are missing.
         eps = 1e-12
         if sl is not None:
-            spread_abs: Optional[float] = None
-            # Prefer absolute spread from ask-bid when available
-            if bid is not None and ask is not None and ask > bid:
-                spread_abs = ask - bid
-            elif spreadpct is not None and price is not None:
-                try:
-                    # spreadpct is in percent units (e.g., 0.12 == 0.12%)
-                    spread_abs = (spreadpct / 100.0) * abs(price)
-                except Exception:
-                    spread_abs = None
-            # If we have a usable spread, evaluate distance
-            if spread_abs is not None and spread_abs > 0:
-                distance: Optional[float] = None
-                # Prefer distance measured from the correct side that triggers the stop
-                if direction == "Buy":
-                    if bid is not None:
-                        distance = bid - sl
-                    else:
-                        continue
-                else:  # Sell
-                    if ask is not None:
-                        distance = sl - ask
-                    else:
-                        continue
-                # Enforce minimum distance threshold (10x spread) with tiny epsilon
-                if distance is None or (distance + eps) < (10 * spread_abs):
-                    bump("sl_too_close_to_spread")
-                    if debug:
-                        print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
-                    continue
+            # Require both bid and ask to be available
+            if bid is None or ask is None or ask <= bid:
+                bump("invalid_bid_ask_for_spread_calculation")
+                if debug:
+                    print(f"[DEBUG] Invalid bid/ask for spread calculation: sym={sym}, bid={bid}, ask={ask}")
+                continue
+
+            spread_abs = ask - bid
+            # Calculate distance based on direction
+            distance: Optional[float] = None
+            if direction == "Buy":
+                distance = bid - sl
+            else:  # Sell
+                distance = sl - ask
+
+            # Enforce minimum distance threshold (10x spread) with tiny epsilon
+            if distance is None or (distance + eps) < (10 * spread_abs):
+                bump("sl_too_close_to_spread")
+                if debug:
+                    print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
+                continue
 
 
         # Composite score
@@ -1022,6 +1000,11 @@ def analyze(
         sl_out = _r(sl)
         tp_out = _r(tp)
 
+        # Ensure 'prox' is defined and added to results
+        # 'prox' is calculated within the Buy/Sell blocks above
+        # If for some reason it's not defined (e.g. an early continue before prox calculation), default to None
+        calculated_prox = locals().get('prox')
+
         results.append(
             {
                 "symbol": sym,
@@ -1033,11 +1016,11 @@ def analyze(
                 "score": score,
                 "explain": "; ".join(parts),
                 "as_of": as_of_value,
+                "proximity_to_sl": calculated_prox, # Add proximity to SL
                 # Meta for logging; not used for DB schema
                 "bid": bid,
                 "ask": ask,
                 "tick_utc": tick_time_str,
-                "source": ("backfill" if backfilled_flag else "normal"),
             }
         )
 
@@ -1086,11 +1069,20 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 explain TEXT,
                 as_of TEXT NOT NULL,
                 detected_at TEXT,
+                proximity_to_sl REAL,
                 inserted_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 UNIQUE(symbol, direction, as_of)
             )
             """
         )
+        # Add proximity_to_sl column if it doesn't exist
+        try:
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = {str(r[1]) for r in (cur.fetchall() or [])}
+            if 'proximity_to_sl' not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_to_sl REAL")
+        except Exception as e:
+            print(f"[DB] Warning: Could not add proximity_to_sl column: {e}")
         # Ensure hits table exists for open/settled gating
         try:
             cur.execute(
@@ -1137,8 +1129,8 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 ins = (
                     f"""
                     INSERT INTO {table}
-                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at, proximity_to_sl)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     WHERE NOT EXISTS (
                         SELECT 1 FROM {table} t2
                         LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
@@ -1152,8 +1144,8 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 ins = (
                     f"""
                     INSERT INTO {table}
-                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, proximity_to_sl)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     WHERE NOT EXISTS (
                         SELECT 1 FROM {table} t2
                         LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
@@ -1178,6 +1170,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     else:
                         detected_at_val = str(detected_at)
                 sym_val = r.get("symbol")
+                proximity_val = r.get("proximity_to_sl") # Get proximity value
                 if has_detected:
                     params.append(
                         (
@@ -1191,6 +1184,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                             r.get("explain"),
                             as_of_val,
                             detected_at_val,
+                            proximity_val, # Add proximity to params
                             sym_val,
                         )
                     )
@@ -1206,6 +1200,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                             r.get("score"),
                             r.get("explain"),
                             as_of_val,
+                            proximity_val, # Add proximity to params
                             sym_val,
                         )
                     )

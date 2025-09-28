@@ -430,11 +430,11 @@ class App(tk.Tk):
         # Add filter row
         row2 = ttk.Frame(top)
         row2.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
-        add_labeled(row2, "Category:", ttk.Combobox(row2, textvariable=self.var_symbol_category, 
-                                                  values=["All", "Forex", "Crypto", "Indices"], 
+        add_labeled(row2, "Category:", ttk.Combobox(row2, textvariable=self.var_symbol_category,
+                                                  values=["All", "Forex", "Crypto", "Indices"],
                                                   state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
-        add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status, 
-                                                 values=["All", "TP", "SL", "Running", "Hits"], 
+        add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status,
+                                                 values=["All", "TP", "SL", "Running", "Hits"],
                                                  state="readonly", width=10)).pack(side=tk.LEFT)
 
         # Tree (table)
@@ -503,8 +503,8 @@ class App(tk.Tk):
         bot.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 8))
         self.db_status = ttk.Label(bot, text="Ready.")
         self.db_status.pack(side=tk.LEFT)
-        # Delete button for selected row (only deletes rows with TP/SL hits)
-        ttk.Button(bot, text="Delete Selected (TP/SL)", command=self._db_delete_selected).pack(side=tk.RIGHT)
+        # Delete button for selected row (works for all entries)
+        ttk.Button(bot, text="Delete Selected", command=self._db_delete_selected).pack(side=tk.RIGHT)
 
         self._db_loading = False
         self._db_auto_job: str | None = None
@@ -1478,7 +1478,7 @@ class App(tk.Tk):
     def _db_fetch_thread(self) -> None:
         dbname = self.var_db_name.get().strip()
         hours = max(1, int(self.var_since_hours.get()))
-        
+
         # Get filter values
         symbol_category = self.var_symbol_category.get()
         hit_status = self.var_hit_status.get()
@@ -1516,18 +1516,18 @@ class App(tk.Tk):
                     )
                     cur.execute(sql, (thr,))
                     all_rows = cur.fetchall() or []
-                    
+
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
                         (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) = row
-                        
+
                         # Apply symbol category filter
                         if symbol_category != "All":
                             classified_category = self._classify_symbol(sym).title()
                             if classified_category != symbol_category:
                                 continue
-                        
+
                         # Apply hit status filter
                         if hit_status != "All":
                             if hit_status == "Running":
@@ -1539,9 +1539,9 @@ class App(tk.Tk):
                             else:  # TP or SL
                                 if hit != hit_status:
                                     continue
-                        
+
                         filtered_rows.append(row)
-                    
+
                     # Process filtered rows
                     for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''
@@ -1601,11 +1601,22 @@ class App(tk.Tk):
 
     def _db_update_ui(self, rows_display, rows_meta, error: str | None) -> None:
         self._db_loading = False
+
+        # Save current selection before clearing
+        current_selection = self.db_tree.selection()
+        selected_item_data = None
+        if current_selection:
+            selected_iid = current_selection[0]
+            if selected_iid in self._db_row_meta:
+                selected_item_data = self._db_row_meta[selected_iid]
+
         self.db_tree.delete(*self.db_tree.get_children())
         self._db_row_meta.clear()
+
         if error:
             self.db_status.config(text=f"Error: {error}")
         else:
+            new_selected_iid = None
             for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s) in enumerate(rows_display):
                 tags = ()
                 if hit == 'TP':
@@ -1617,7 +1628,23 @@ class App(tk.Tk):
                     meta = rows_meta[idx]
                     meta['iid'] = iid
                     self._db_row_meta[iid] = meta
+
+                    # Check if this item matches the previously selected item
+                    if selected_item_data and not new_selected_iid:
+                        if (meta.get('symbol') == selected_item_data.get('symbol') and
+                            meta.get('direction') == selected_item_data.get('direction') and
+                            meta.get('entry_utc_str') == selected_item_data.get('entry_utc_str')):
+                            new_selected_iid = iid
+
+            # Restore selection if we found a matching item
+            if new_selected_iid:
+                self.db_tree.selection_set(new_selected_iid)
+                self.db_tree.see(new_selected_iid)  # Ensure the item is visible
+                self.db_tree.focus_set()  # Set keyboard focus to the treeview
+                self.db_tree.focus(new_selected_iid)  # Set focus to the specific item
+
             self.db_status.config(text=f"Rows: {len(rows_display)} - Updated {datetime.now().strftime('%H:%M:%S')}")
+
         # Schedule next auto refresh if enabled
         self._db_schedule_next()
         # Also refresh PnL so changes are reflected immediately
@@ -1642,17 +1669,14 @@ class App(tk.Tk):
         if not setup_id:
             self.db_status.config(text="Missing setup id; cannot delete.")
             return
-        # Only allow deletion if there is a recorded TP/SL
-        if hit_kind not in ('TP', 'SL'):
-            self.db_status.config(text="Delete allowed only for rows with TP/SL.")
-            return
 
         # Confirm
         try:
             from tkinter import messagebox
             sym = meta.get('symbol') or ''
             direction = meta.get('direction') or ''
-            if not messagebox.askyesno("Confirm Delete", f"Delete setup {setup_id} ({sym} {direction}) and its hit? This cannot be undone."):
+            hit_info = f" and its {hit_kind} hit" if hit_kind in ('TP', 'SL') else ""
+            if not messagebox.askyesno("Confirm Delete", f"Delete setup {setup_id} ({sym} {direction}){hit_info}? This cannot be undone."):
                 return
         except Exception:
             pass
@@ -1669,7 +1693,8 @@ class App(tk.Tk):
                     with conn:
                         cur = conn.cursor()
                         # Delete hit first (if exists), then setup
-                        cur.execute("DELETE FROM timelapse_hits WHERE setup_id=?", (setup_id,))
+                        if hit_kind in ('TP', 'SL'):
+                            cur.execute("DELETE FROM timelapse_hits WHERE setup_id=?", (setup_id,))
                         cur.execute("DELETE FROM timelapse_setups WHERE id=?", (setup_id,))
                 finally:
                     try:

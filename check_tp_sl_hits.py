@@ -34,7 +34,7 @@ from typing import List, Optional, Tuple
 
 try:
     import sqlite3  # type: ignore
-except Exception:
+except ImportError:
     sqlite3 = None  # type: ignore
 
 from monitor.domain import Hit, TickFetchStats
@@ -154,7 +154,7 @@ def _parse_ids(ids_arg: Optional[str]) -> Optional[List[int]]:
         return None
     try:
         return [int(x.strip()) for x in ids_arg.split(",") if x.strip()]
-    except Exception:
+    except (ValueError, TypeError):
         print("Invalid --ids value. Use comma-separated integers.")
         sys.exit(2)
 
@@ -181,7 +181,7 @@ def scan_for_hit_with_chunks(
     """Fetch ticks in bounded chunks until a hit is found or the range is exhausted."""
     if start_utc >= end_utc:
         return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False), 0
-    chunk_span = 0 if chunk_minutes is None else max(0, int(chunk_minutes))
+    chunk_span = chunk_minutes if chunk_minutes is not None and chunk_minutes > 0 else None
     chunk_count = 0
     total_ticks = 0
     total_pages = 0
@@ -192,7 +192,7 @@ def scan_for_hit_with_chunks(
     t0 = perf_counter()
     while chunk_start < end_utc and hit is None:
         chunk_count += 1
-        if chunk_span <= 0:
+        if chunk_span is None:
             chunk_end = end_utc
         else:
             chunk_end = min(end_utc, chunk_start + timedelta(minutes=chunk_span))
@@ -407,7 +407,8 @@ def run_once(args: argparse.Namespace) -> None:
                                     f"at {hit.time_utc.isoformat()} (<= as_of)"
                                 )
                             hit = None
-                    except Exception:
+                    except (AttributeError, TypeError, OverflowError):
+                        # Handle potential issues with hit object attributes or datetime operations
                         pass
 
                 if hit is None:
@@ -444,7 +445,8 @@ def run_once(args: argparse.Namespace) -> None:
     finally:
         try:
             conn.close()
-        except Exception:
+        except (sqlite3.Error, AttributeError):
+            # Handle SQLite-specific errors or cases where conn is None/invalid
             pass
 
     if getattr(args, "verbose", False):

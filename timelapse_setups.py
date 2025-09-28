@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import atexit
 import argparse
+import math
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
+import types
 # DB backend: SQLite only
 try:
     import sqlite3  # type: ignore
@@ -46,7 +49,6 @@ from monitor.config import default_db_path
 from monitor import mt5_client
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SQLITE_PATH = str(default_db_path())
 import json
 import numpy as np  # required for ATR computations
 
@@ -69,7 +71,10 @@ def _infer_decimals_from_price(price: Optional[float]) -> int:
     try:
         if price is None:
             return 5
-        s = f"{float(price):.10f}".rstrip("0").rstrip(".")
+        value = float(price)
+        if not math.isfinite(value):
+            return 5
+        s = f"{value:.10f}".rstrip("0").rstrip(".")
         if "." in s:
             return max(0, min(10, len(s.split(".")[1])))
         return 0
@@ -135,27 +140,67 @@ _LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[dat
 
 # Cache MT5 rate data with lightweight TTLs per timeframe to reduce IPC churn
 _RATE_CACHE: Dict[Tuple[str, int, int], Tuple[float, Any]] = {}
+# Require entries to sit at least this far from SL unless caller overrides higher.
+MIN_PROX_BASE = 0.2
 # Reusable SQLite connection handle (populated lazily)
 _DB_CONN: Optional["sqlite3.Connection"] = None
+_DB_CONN_PATH: Optional[str] = None
+
+if sqlite3 is not None:
+    class _ManagedConnection(sqlite3.Connection):  # type: ignore[misc]
+        _closed: bool = False
+
+        def close(self) -> None:  # type: ignore[override]
+            if getattr(self, "_closed", False):
+                return
+            try:
+                super().close()
+            finally:
+                self._closed = True
+
+        def __del__(self) -> None:  # pragma: no cover - defensive close
+            try:
+                self.close()
+            except Exception:
+                pass
+
+
+def _connect_sqlite(db_path: str, *, timeout: float = 5.0) -> "sqlite3.Connection":
+    if sqlite3 is None:
+        raise RuntimeError("sqlite3 not available")
+    kwargs: Dict[str, Any] = {
+        "timeout": timeout,
+        "check_same_thread": False,
+    }
+    if "_ManagedConnection" in globals():
+        kwargs["factory"] = _ManagedConnection  # type: ignore[assignment]
+    return sqlite3.connect(db_path, **kwargs)
+
 
 def _get_db_connection() -> Optional["sqlite3.Connection"]:
-    global _DB_CONN
+    global _DB_CONN, _DB_CONN_PATH
     if sqlite3 is None:
         return None
+    db_path = str(default_db_path())
+    if _DB_CONN is not None and _DB_CONN_PATH and _DB_CONN_PATH != db_path:
+        _close_db_connection()
     if _DB_CONN is None:
-        db_path = DEFAULT_SQLITE_PATH
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        _DB_CONN = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
+        _DB_CONN = _connect_sqlite(db_path, timeout=5.0)
+        _DB_CONN_PATH = db_path
     return _DB_CONN
 
+
 def _close_db_connection() -> None:
-    global _DB_CONN
+    global _DB_CONN, _DB_CONN_PATH
     if _DB_CONN is not None:
         try:
             _DB_CONN.close()
         except Exception:
             pass
-        _DB_CONN = None
+    _DB_CONN = None
+    _DB_CONN_PATH = None
+
 
 if sqlite3 is not None:
     atexit.register(_close_db_connection)
@@ -218,8 +263,10 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     ttl = float(_RATE_TTL_SECONDS.get(timeframe, 5.0))
     now = time.time()
     cached = _RATE_CACHE.get(key)
-    if cached is not None and (now - cached[0]) <= ttl:
-        return cached[1]
+    if cached is not None:
+        age = now - cached[0]
+        if 0.0 <= age <= ttl:
+            return cached[1]
     try:
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
     except Exception:
@@ -317,12 +364,15 @@ def normalize_spread_pct(pct: Optional[float]) -> Optional[float]:
     if pct is None:
         return None
     try:
+        value = float(pct)
+        if not math.isfinite(value):
+            return None
         # If the value looks like a tiny fraction (< 0.01), treat it as fraction-of-price
         # and convert to percent units by multiplying by 100. Otherwise assume it's
         # already expressed in percent units.
-        if abs(pct) < 0.01:
-            return pct * 100.0
-        return pct
+        if abs(value) < 0.01:
+            return value * 100.0
+        return value
     except Exception:
         return None
 
@@ -385,12 +435,12 @@ def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]
 
 
 def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Optional[str], Optional[datetime]]:
-    if not _mt5_ensure_init():
-        print('[MT5] initialize() failed; cannot read symbols.')
-        return {}, None, None
-    series: Dict[str, List[Snapshot]] = {}
     now_utc = datetime.now(UTC)
     latest_ts = now_utc.astimezone(INPUT_TZ)
+    if not _mt5_ensure_init():
+        print('[MT5] initialize() failed; cannot read symbols.')
+        return {}, None, latest_ts
+    series: Dict[str, List[Snapshot]] = {}
     for sym in symbols:
         try:
             mt5.symbol_select(sym, True)
@@ -543,12 +593,10 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
     """
     if not results or sqlite3 is None:
         return results, set()
-    db_path = DEFAULT_SQLITE_PATH
+    db_path = str(default_db_path())
+    conn: Optional["sqlite3.Connection"] = None
     try:
-        conn = sqlite3.connect(db_path, timeout=3)
-    except Exception:
-        return results, set()
-    try:
+        conn = _connect_sqlite(db_path, timeout=3.0)
         cur = conn.cursor()
         # Ensure setups table exists
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
@@ -576,10 +624,11 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
     except Exception:
         return results, set()
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 
@@ -685,7 +734,6 @@ def watch_loop(
             print(f"[EXCLUDE] Will filter out symbols: {sorted(exclude_set)}")
     try:
         while True:
-            time.sleep(interval)
             detected_at = datetime.now(UTC)
             process_once(
                 symbols,
@@ -698,6 +746,7 @@ def watch_loop(
                 exclude_set=exclude_set,
                 detected_at=detected_at,
             )
+            time.sleep(max(0.0, interval))
     except KeyboardInterrupt:
         if debug:
             print("\nStopped watching.")
@@ -746,6 +795,7 @@ def analyze(
             continue
         snaps.sort(key=lambda s: s.ts)
         first, last = snaps[0], snaps[-1]
+        prox: Optional[float] = None
 
         # Filter out entries between 23:00 and 01:00 (UTC+3).
         # Intention: block 23:00–00:59 inclusive, allow from 01:00 onward.
@@ -798,11 +848,11 @@ def analyze(
         pos = sum(1 for v in (ss4, ss1d, ss1w) if v is not None and v > 0)
         neg = sum(1 for v in (ss4, ss1d, ss1w) if v is not None and v < 0)
         direction: Optional[str] = None
-        if pos >= 2 and (ss4 is None or ss4 > 0):
+        if pos >= 2 and neg == 0 and (ss4 is None or ss4 > 0):
             direction = "Buy"
-        if neg >= 2 and (ss4 is None or ss4 < 0) and direction is None:
+        elif neg >= 2 and pos == 0 and (ss4 is None or ss4 < 0):
             direction = "Sell"
-        if direction is None:
+        else:
             bump("no_direction_consensus")
             continue
 
@@ -845,6 +895,9 @@ def analyze(
         prox_flag = None
         prox_late = False
         if direction == "Buy":
+            if s1 is None and r1 is None:
+                bump("missing_sl_tp")
+                continue
             sl = s1 if s1 is not None else d1l
             tp = r1 if r1 is not None else d1h
             # Basic sanity for S/R orientation
@@ -854,16 +907,19 @@ def analyze(
             if not (sl <= price <= tp):
                 bump("price_outside_buy_sr")
                 continue
-            risk = price - sl
-            reward = tp - price
-            rrr = reward / risk if risk > 0 else None
+            risk = price - sl if price is not None and sl is not None else None
+            reward = (tp - sl) if (tp is not None and sl is not None) else None
+            rrr = None
+            if risk is not None and reward is not None and risk > 0 and reward > 0:
+                rrr = reward / risk
             if (tp is not None and sl is not None) and (tp - sl) != 0:
                 prox = (price - sl) / (tp - sl)
                 # Gate: require minimum distance from SL as fraction of range
                 try:
-                    min_thr = max(0.0, min(0.49, float(min_prox_sl)))
+                    user_min = float(min_prox_sl)
                 except Exception:
-                    min_thr = 0.0
+                    user_min = 0.0
+                min_thr = max(MIN_PROX_BASE, max(0.0, min(0.49, user_min)))
                 if prox < min_thr:
                     bump("too_close_to_sl_prox")
                     continue
@@ -883,6 +939,9 @@ def analyze(
                     prox_late = True
                     prox_note = "near R1 resistance (late)"
         else:  # Sell
+            if s1 is None and r1 is None:
+                bump("missing_sl_tp")
+                continue
             sl = r1 if r1 is not None else d1h
             tp = s1 if s1 is not None else d1l
             if sl is None or tp is None:
@@ -891,16 +950,19 @@ def analyze(
             if not (tp <= price <= sl):
                 bump("price_outside_sell_sr")
                 continue
-            risk = sl - price
-            reward = price - tp
-            rrr = reward / risk if risk > 0 else None
+            risk = (sl - price) if price is not None and sl is not None else None
+            reward = (sl - tp) if (sl is not None and tp is not None) else None
+            rrr = None
+            if risk is not None and reward is not None and risk > 0 and reward > 0:
+                rrr = reward / risk
             if (sl is not None and tp is not None) and (sl - tp) != 0:
                 prox = (sl - price) / (sl - tp)
                 # Gate: require minimum distance from SL as fraction of range
                 try:
-                    min_thr = max(0.0, min(0.49, float(min_prox_sl)))
+                    user_min = float(min_prox_sl)
                 except Exception:
-                    min_thr = 0.0
+                    user_min = 0.0
+                min_thr = max(MIN_PROX_BASE, max(0.0, min(0.49, user_min)))
                 if prox < min_thr:
                     bump("too_close_to_sl_prox")
                     continue
@@ -919,6 +981,10 @@ def analyze(
                     prox_flag = "near_support"
                     prox_late = True
                     prox_note = "near S1 support (late)"
+
+        if rrr is None or rrr <= 0:
+            bump("invalid_rrr")
+            continue
 
         # Spread-based SL distance filter: SL must be at least 10x spread away from the side
         # that actually triggers the stop:
@@ -990,6 +1056,11 @@ def analyze(
 
         # Round SL/TP to the same precision as price for this symbol
         digits = _symbol_digits(sym, price)
+        digits = max(
+            digits,
+            _infer_decimals_from_price(sl),
+            _infer_decimals_from_price(tp),
+        )
         def _r(v: Optional[float]) -> Optional[float]:
             try:
                 return None if v is None else round(float(v), int(digits))
@@ -999,11 +1070,6 @@ def analyze(
         price_out = _r(price)
         sl_out = _r(sl)
         tp_out = _r(tp)
-
-        # Ensure 'prox' is defined and added to results
-        # 'prox' is calculated within the Buy/Sell blocks above
-        # If for some reason it's not defined (e.g. an early continue before prox calculation), default to None
-        calculated_prox = locals().get('prox')
 
         results.append(
             {
@@ -1016,7 +1082,7 @@ def analyze(
                 "score": score,
                 "explain": "; ".join(parts),
                 "as_of": as_of_value,
-                "proximity_to_sl": calculated_prox, # Add proximity to SL
+                "proximity_to_sl": prox,
                 # Meta for logging; not used for DB schema
                 "bid": bid,
                 "ask": ask,
@@ -1329,3 +1395,20 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+class _TimelapseModule(types.ModuleType):
+    """Custom module wrapper to ensure global DB connection closes on reassignment."""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_DB_CONN":
+            old = getattr(self, "_DB_CONN", None)
+            if old is not None and old is not value:
+                try:
+                    old.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _TimelapseModule  # type: ignore[misc]

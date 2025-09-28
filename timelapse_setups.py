@@ -211,63 +211,6 @@ def _mt5_ensure_init() -> bool:
 
 
 
-def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask: bool, max_lookback_sec: int = 180) -> Tuple[Optional[float], Optional[float]]:
-    """Fetch nearest prior Bid/Ask from MT5 tick history up to max_lookback_sec.
-
-    Searches backwards from `as_of` (interpreted as UTC) within a sliding window
-    for the last tick that updated the needed side(s). Returns (bid, ask) for
-    the sides requested; non-requested sides are returned as None.
-    """
-    if not _mt5_ensure_init():
-        return (None, None)
-    try:
-        # Convert as_of to UTC aware
-        if as_of.tzinfo is None:
-            end_utc = as_of.replace(tzinfo=UTC)
-        else:
-            end_utc = as_of.astimezone(UTC)
-
-        window = 7  # seconds per fetch window
-        looked = 0
-        out_bid: Optional[float] = None
-        out_ask: Optional[float] = None
-        while looked < max_lookback_sec and ((need_bid and out_bid is None) or (need_ask and out_ask is None)):
-            start_utc = end_utc - timedelta(seconds=min(window, max_lookback_sec - looked))
-            ticks = mt5.copy_ticks_range(symbol, start_utc, end_utc, mt5.COPY_TICKS_ALL)
-            if ticks is not None and len(ticks) > 0:
-                # Scan backwards for last updates
-                for t in reversed(ticks):
-                    # mt5 returns numpy structured array; handle by attribute names if present
-                    try:
-                        flags = int(t['flags'])
-                        bid_v = float(t['bid'])
-                        ask_v = float(t['ask'])
-                    except Exception:
-                        try:
-                            # Fallback for tuple-like
-                            flags = int(t[6]) if len(t) > 6 else 0
-                            bid_v = float(t[1])
-                            ask_v = float(t[2])
-                        except Exception:
-                            continue
-                    if need_bid and out_bid is None:
-                        has = (flags & getattr(mt5, 'TICK_FLAG_BID', 0)) != 0
-                        if has or bid_v != 0.0:
-                            out_bid = bid_v
-                    if need_ask and out_ask is None:
-                        has = (flags & getattr(mt5, 'TICK_FLAG_ASK', 0)) != 0
-                        if has or ask_v != 0.0:
-                            out_ask = ask_v
-                    if ((not need_bid) or out_bid is not None) and ((not need_ask) or out_ask is not None):
-                        break
-            # expand window backwards
-            end_utc = start_utc
-            looked += window
-        return (out_bid if need_bid else None, out_ask if need_ask else None)
-    except Exception:
-        return (None, None)
-
-
 
 def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     """Fetch MT5 rates with a short TTL-based cache to limit IPC overhead."""

@@ -287,71 +287,6 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
         _RATE_CACHE.pop(key, None)
     return rates
 
-def _get_tick_volume_last_2_bars(symbol: str) -> Optional[bool]:
-    """Check tick volume for each of the last 2 completed minutes (M1 bars).
-
-    For each minute in the last 2 minutes (excluding the current open minute),
-    ensures the M1 bar exists and has tick_volume >= 10. Missing bars are treated
-    as zero volume and fail the check.
-
-    Returns:
-        True  -> all 2 completed minutes have tick_volume >= 10
-        False -> any minute missing or tick_volume < 10
-        None  -> MT5 not available/initialized
-    """
-    if not _mt5_ensure_init():
-        return None
-    try:
-        now_ts = int(time.time())
-        this_minute_start = (now_ts // 60) * 60
-        # Minutes to check: t-60, t-120
-        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
-
-        # Fetch bars covering exactly that window
-        dt_from = datetime.fromtimestamp(target_opens[-1], tz=UTC)
-        dt_to = datetime.fromtimestamp(this_minute_start, tz=UTC)
-        try:
-            rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1, dt_from, dt_to)
-        except Exception:
-            rates = None
-
-        if rates is None or len(rates) == 0:
-            return False
-
-        # Map open time -> tick_volume using numpy for speed
-        try:
-            times = rates['time'].astype(int)
-            vols = rates['tick_volume'].astype(int)
-            vol_by_time = dict(zip(times, vols))
-        except Exception:
-            # Fallback to loop
-            vol_by_time: Dict[int, int] = {}
-            for r in rates:
-                try:
-                    t_open = int(r['time'])
-                except Exception:
-                    try:
-                        t_open = int(r[0])
-                    except Exception:
-                        continue
-                try:
-                    vol = int(r['tick_volume'])
-                except Exception:
-                    try:
-                        vol = int(r[5])
-                    except Exception:
-                        continue
-                vol_by_time[t_open] = vol
-
-        # Verify each minute
-        for t_open in target_opens:
-            vol = vol_by_time.get(t_open)
-            if vol is None or vol < 10:
-                return False
-        return True
-    except Exception:
-        return None
-
 def canonicalize_key(s: Optional[str]) -> str:
     """Canonicalize CSV header / lookup keys for case-insensitive, punctuation-robust matching.
 
@@ -921,14 +856,6 @@ def analyze(
             bump("no_recent_ticks")
             if debug:
                 print(f"[DEBUG] no_recent_ticks for {sym}")
-            continue
-
-        # Filter out symbols with low tick volume in the last 2 M1 bars
-        volume_check_passed = _get_tick_volume_last_2_bars(sym)
-        if volume_check_passed is not None and not volume_check_passed:
-            bump("low_tick_volume_last_2_bars")
-            if debug:
-                print(f"[DEBUG] low_tick_volume_last_2_bars for {sym}: insufficient tick volume detected in the last 2 bars")
             continue
 
         # Timelapse deltas (context)

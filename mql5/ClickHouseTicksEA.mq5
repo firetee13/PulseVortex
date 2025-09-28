@@ -16,8 +16,8 @@ input int    InpClickHousePort = 80;               // ClickHouse Port
 input string InpClickHouseUser = "default";        // ClickHouse Username
 input string InpClickHousePassword = "changeme1";  // ClickHouse Password
 input string InpClickHouseDatabase = "default";    // ClickHouse Database
-input int    InpSendIntervalSeconds = 2;          // Send Interval (seconds)
-input int    InpMaxTicksPerBatch = 10000;            // Max Ticks Per Batch
+input int    InpSendIntervalSeconds = 1;          // Send Interval (seconds)
+input int    InpMaxTicksPerBatch = 40000;            // Max Ticks Per Batch
 input bool   InpDebugMode = false;                 // Debug Mode
 input int    InpHistoricalTicksDays = 0;           // Historical Ticks Days (0 = no historical data)
 input bool   InpResumeFromLastTick = true;         // Resume from Last Tick in Database
@@ -158,7 +158,7 @@ bool GetAllSymbols()
    m_symbols.Clear();
 
    //--- Get total symbols in market watch
-   int total = SymbolsTotal(true);
+   int total = SymbolsTotal(false);
 
    if(total <= 0)
    {

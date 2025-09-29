@@ -701,8 +701,6 @@ def run_once(args: argparse.Namespace) -> None:
             if hit_symbols:
                 symbols_str = " ".join(sorted(set(hit_symbols)))
                 print(f"Checked {checked} setup(s); hits recorded: {hits}. {symbols_str}")
-            else:
-                print(f"Checked {checked} setup(s); hits recorded: {hits}.")
         finally:
             shutdown_mt5()
     finally:

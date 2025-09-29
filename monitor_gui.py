@@ -34,7 +34,14 @@ import tempfile
 import shutil
 from typing import List, Sequence
 from monitor.config import db_path_str, default_db_path
-from monitor.mt5_client import resolve_symbol as _RESOLVE, get_server_offset_hours as _GET_OFFS, to_server_naive as _TO_SERVER
+from monitor.mt5_client import (
+    resolve_symbol as _RESOLVE,
+    get_server_offset_hours as _GET_OFFS,
+    to_server_naive as _TO_SERVER,
+    rates_range_utc as _RATES_RANGE,
+    timeframe_m1 as _TIMEFRAME_M1,
+    timeframe_seconds as _TIMEFRAME_SECONDS,
+)
 from monitor.quiet_hours import (
     iter_active_utc_ranges,
     iter_quiet_utc_ranges,
@@ -1856,6 +1863,172 @@ class App(tk.Tk):
         # Fallback: naive from timestamp shifted by offset hours
         return datetime.fromtimestamp(dt_utc.timestamp() + offset_h * 3600.0)
 
+    def _rate_field(self, rate: object, name: str) -> float | None:
+        try:
+            value = getattr(rate, name)
+        except AttributeError:
+            try:
+                value = rate[name]  # type: ignore[index]
+            except Exception:
+                if isinstance(rate, dict):
+                    value = rate.get(name)
+                else:
+                    value = None
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _rate_time(self, rate: object, offset_hours: int) -> datetime | None:
+        ts = self._rate_field(rate, "time")
+        if ts is None:
+            return None
+        try:
+            dt_server = datetime.fromtimestamp(float(ts), tz=UTC)
+        except Exception:
+            return None
+        return dt_server - timedelta(hours=offset_hours)
+
+    def _rates_to_ohlc_lists(
+        self,
+        rates: Sequence[object] | None,
+        offset_hours: int,
+        timeframe_seconds: int,
+    ) -> tuple[list[datetime], list[float], list[float], list[float], list[float]]:
+        times: list[datetime] = []
+        opens: list[float] = []
+        highs: list[float] = []
+        lows: list[float] = []
+        closes: list[float] = []
+        if not rates:
+            return times, opens, highs, lows, closes
+        span = timedelta(seconds=max(1, timeframe_seconds))
+        for rate in rates:
+            start = self._rate_time(rate, offset_hours)
+            if start is None:
+                continue
+            open_px = self._rate_field(rate, "open")
+            high_px = self._rate_field(rate, "high")
+            low_px = self._rate_field(rate, "low")
+            close_px = self._rate_field(rate, "close")
+            if None in (open_px, high_px, low_px, close_px):
+                continue
+            times.append(start)
+            opens.append(open_px)  # type: ignore[arg-type]
+            highs.append(high_px)  # type: ignore[arg-type]
+            lows.append(low_px)  # type: ignore[arg-type]
+            closes.append(close_px)  # type: ignore[arg-type]
+        if not times:
+            return times, opens, highs, lows, closes
+        # Ensure chronological order and clip duplicate entries to the bar span
+        packed = sorted(zip(times, opens, highs, lows, closes), key=lambda x: x[0])
+        times = []
+        opens = []
+        highs = []
+        lows = []
+        closes = []
+        last_start: datetime | None = None
+        for start, op, hi, lo, cl in packed:
+            if last_start is not None and start < last_start:
+                continue
+            times.append(start)
+            opens.append(op)
+            highs.append(hi)
+            lows.append(lo)
+            closes.append(cl)
+            last_start = start
+        # Ensure each time represents the start of the interval; extend with span if needed downstream
+        return times, opens, highs, lows, closes
+
+    def _ticks_to_ohlc_lists(
+        self,
+        sym_name: str,
+        offset_hours: int,
+        active_ranges: Sequence[tuple[datetime, datetime]],
+        direction: str,
+    ) -> tuple[list[datetime], list[float], list[float], list[float], list[float]]:
+        ticks_aggregate: list[object] = []
+        for window_start, window_end in active_ranges:
+            start_srv = self._to_server_naive(window_start, offset_hours)
+            end_srv = self._to_server_naive(window_end, offset_hours)
+            part = mt5.copy_ticks_range(sym_name, start_srv, end_srv, mt5.COPY_TICKS_ALL)
+            if part is None or len(part) == 0:
+                start_naive = window_start.replace(tzinfo=None)
+                end_naive = window_end.replace(tzinfo=None)
+                part = mt5.copy_ticks_range(sym_name, start_naive, end_naive, mt5.COPY_TICKS_ALL)
+            if part is None or len(part) == 0:
+                continue
+            try:
+                for row in part:
+                    ticks_aggregate.append(row)
+            except Exception:
+                ticks_aggregate.extend(list(part))
+        if not ticks_aggregate:
+            return [], [], [], [], []
+
+        minute_data: dict[datetime, list[float]] = defaultdict(list)
+        for tk in ticks_aggregate:
+            try:
+                bid = float(getattr(tk, 'bid'))
+            except Exception:
+                try:
+                    bid = float(tk['bid'])
+                except Exception:
+                    bid = None
+            try:
+                ask = float(getattr(tk, 'ask'))
+            except Exception:
+                try:
+                    ask = float(tk['ask'])
+                except Exception:
+                    ask = None
+            if bid is None and ask is None:
+                continue
+            price = bid if (direction or '').lower() == 'buy' else ask if ask is not None else bid
+            if price is None:
+                continue
+            try:
+                tms = getattr(tk, 'time_msc')
+            except Exception:
+                try:
+                    tms = tk['time_msc']
+                except Exception:
+                    tms = None
+            if tms:
+                dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
+            else:
+                try:
+                    tse = getattr(tk, 'time')
+                except Exception:
+                    try:
+                        tse = tk['time']
+                    except Exception:
+                        continue
+                dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
+            dt_utc = dt_raw - timedelta(hours=offset_hours)
+            minute = dt_utc.replace(second=0, microsecond=0)
+            minute_data.setdefault(minute, []).append(price)
+
+        if not minute_data:
+            return [], [], [], [], []
+        times = []
+        opens = []
+        highs = []
+        lows = []
+        closes = []
+        for minute in sorted(minute_data):
+            prices = minute_data[minute]
+            if not prices:
+                continue
+            times.append(minute)
+            opens.append(prices[0])
+            highs.append(max(prices))
+            lows.append(min(prices))
+            closes.append(prices[-1])
+        return times, opens, highs, lows, closes
+
     def _fetch_and_render_chart_thread(self, rid: int, symbol: str, direction: str, start_utc: datetime, end_utc: datetime,
                                         entry_utc: datetime, entry_price, sl, tp,
                                         hit_kind, hit_time_utc_str, hit_price) -> None:
@@ -1889,7 +2062,7 @@ class App(tk.Tk):
                 offset_h = 0
                 start_server = start_utc.replace(tzinfo=None)
                 end_server = end_utc.replace(tzinfo=None)
-            # Step 4: Fetch ticks, skipping quiet windows entirely
+            # Step 4: Fetch M1 bars first; fall back to ticks only if necessary
             quiet_segments = list(iter_quiet_utc_ranges(start_utc, fetch_end_utc))
             active_ranges = list(iter_active_utc_ranges(start_utc, fetch_end_utc))
             if not active_ranges:
@@ -1900,90 +2073,18 @@ class App(tk.Tk):
                 )
                 return
 
-            self.after(0, self._set_chart_message, f"Fetching ticks for {sym_name}…")
-            ticks_aggregate: List[object] = []
-            for window_start, window_end in active_ranges:
-                start_srv = self._to_server_naive(window_start, offset_h)
-                end_srv = self._to_server_naive(window_end, offset_h)
-                part = mt5.copy_ticks_range(sym_name, start_srv, end_srv, mt5.COPY_TICKS_ALL)
-                if part is None or len(part) == 0:
-                    start_naive = window_start.replace(tzinfo=None)
-                    end_naive = window_end.replace(tzinfo=None)
-                    part = mt5.copy_ticks_range(sym_name, start_naive, end_naive, mt5.COPY_TICKS_ALL)
-                if part is None or len(part) == 0:
-                    continue
-                try:
-                    for row in part:
-                        ticks_aggregate.append(row)
-                except Exception:
-                    ticks_aggregate.extend(list(part))
-            if not ticks_aggregate:
-                self.after(
-                    0,
-                    self._chart_render_error,
-                    "No ticks found outside quiet trading hours for requested range.",
-                )
-                return
-            ticks = ticks_aggregate
-            # Aggregate ticks into 1m OHLC
-            minute_data = defaultdict(list)
-            for tk in ticks:
-                try:
-                    bid = float(getattr(tk, 'bid'))
-                except Exception:
-                    try:
-                        bid = float(tk['bid'])
-                    except Exception:
-                        continue
-                try:
-                    ask = float(getattr(tk, 'ask'))
-                except Exception:
-                    try:
-                        ask = float(tk['ask'])
-                    except Exception:
-                        continue
-                price = bid if direction.lower() == 'buy' else ask
-                # Time
-                try:
-                    tms = getattr(tk, 'time_msc')
-                except Exception:
-                    try:
-                        tms = tk['time_msc']
-                    except Exception:
-                        tms = None
-                if tms:
-                    dt_raw = datetime.fromtimestamp(float(tms)/1000.0, tz=UTC)
-                else:
-                    try:
-                        tse = getattr(tk, 'time')
-                    except Exception:
-                        try:
-                            tse = tk['time']
-                        except Exception:
-                            continue
-                    dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
-                dt_utc = dt_raw - timedelta(hours=offset_h)
-                # Floor to minute
-                minute = dt_utc.replace(second=0, microsecond=0)
-                minute_data[minute].append(price)
-            # Prepare OHLC data
-            times = []
-            opens = []
-            highs = []
-            lows = []
-            closes = []
-            for minute in sorted(minute_data):
-                prices = minute_data[minute]
-                if not prices:
-                    continue
-                times.append(minute)
-                opens.append(prices[0])
-                highs.append(max(prices))
-                lows.append(min(prices))
-                closes.append(prices[-1])
+            timeframe = _TIMEFRAME_M1()
+            timeframe_secs = _TIMEFRAME_SECONDS(timeframe)
+            self.after(0, self._set_chart_message, f"Fetching M1 bars for {sym_name}…")
+            rates = _RATES_RANGE(sym_name, timeframe, start_utc, fetch_end_utc, offset_h, trace=False)
+            times, opens, highs, lows, closes = self._rates_to_ohlc_lists(rates, offset_h, timeframe_secs)
+
             if not times:
-                self.after(0, self._chart_render_error, "No data after processing ticks.")
-                return
+                self.after(0, self._set_chart_message, f"No bars returned; falling back to raw ticks for {sym_name}…")
+                times, opens, highs, lows, closes = self._ticks_to_ohlc_lists(sym_name, offset_h, active_ranges, direction)
+                if not times:
+                    self.after(0, self._chart_render_error, "No price data available for requested range.")
+                    return
 
             # Hard-trim arrays to include at most 20 minutes AFTER the hit time
             try:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from .domain import Hit, Setup
 
@@ -67,7 +67,92 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
                 )
                 WHERE entry_price IS NULL
                 """
+        )
+
+
+def ensure_tp_sl_setup_state_sqlite(conn) -> None:
+    """Ensure the checkpoint table used by TP/SL checks exists."""
+
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tp_sl_setup_state (
+                setup_id INTEGER PRIMARY KEY,
+                last_checked_utc TEXT NOT NULL
             )
+            """
+        )
+
+
+def load_tp_sl_setup_state_sqlite(conn, setup_ids: Iterable[int]) -> Dict[int, datetime]:
+    """Return the last processed UTC timestamp for each setup id."""
+
+    ids = list(dict.fromkeys(int(sid) for sid in setup_ids))
+    if not ids:
+        return {}
+    placeholder = ",".join(["?"] * len(ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT setup_id, last_checked_utc FROM tp_sl_setup_state WHERE setup_id IN ({placeholder})",
+        ids,
+    )
+    rows = cur.fetchall() or []
+    out: Dict[int, datetime] = {}
+    for sid, when in rows:
+        if when is None:
+            continue
+        dt = _parse_utc_datetime(when)
+        if dt is None:
+            continue
+        out[int(sid)] = dt
+    return out
+
+
+def persist_tp_sl_setup_state_sqlite(conn, entries: Dict[int, datetime]) -> None:
+    """Insert or update checkpoints for the supplied setup ids."""
+
+    if not entries:
+        return
+    records = []
+    for sid, dt in entries.items():
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt_utc = dt.replace(tzinfo=UTC)
+        else:
+            dt_utc = dt.astimezone(UTC)
+        dt_str = dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+        records.append((int(sid), dt_str))
+    if not records:
+        return
+    with conn:
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO tp_sl_setup_state (setup_id, last_checked_utc)
+            VALUES (?, ?)
+            ON CONFLICT(setup_id) DO UPDATE SET last_checked_utc = excluded.last_checked_utc
+            """,
+            records,
+        )
+
+
+def _parse_utc_datetime(value: object) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    try:
+        text = str(value)
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def load_setups_sqlite(

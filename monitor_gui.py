@@ -92,6 +92,7 @@ except Exception:
 
 UTC = timezone.utc
 DISPLAY_TZ = timezone(timedelta(hours=3))  # UTC+3 for chart display
+QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45–00:59 UTC+3).'
 
 
 class ProcController:
@@ -483,6 +484,12 @@ class App(tk.Tk):
         chart_wrap = ttk.Frame(splitter)
         self.chart_status = ttk.Label(chart_wrap, text="Select a row to render 1m chart (Inserted±) with SL/TP.")
         self.chart_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
+        try:
+            self.chart_spinner = ttk.Progressbar(chart_wrap, mode='indeterminate')
+        except Exception:
+            self.chart_spinner = None
+        self._chart_spinner_visible = False
+        self._chart_spinner_req_id: int | None = None
         self.chart_frame = ttk.Frame(chart_wrap)
         self.chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         splitter.add(chart_wrap, weight=2)
@@ -521,6 +528,7 @@ class App(tk.Tk):
         self._chart_req_id = 0
         self._chart_active_req_id: int | None = None
         self._mt5_inited = False
+        self._chart_quiet_paused = False
         # PnL chart state
         self._pnl_fig = None
         self._pnl_ax = None
@@ -557,6 +565,12 @@ class App(tk.Tk):
         self.pnl_indices_chart_frame = None
         # Filter refresh job
         self._filter_refresh_job = None
+
+        # Guard to blank charts during quiet hours even without new selections
+        try:
+            self.after(30000, self._chart_quiet_guard)
+        except Exception:
+            pass
 
         # PnL helper methods moved to class level (avoids nested defs in __init__)
 
@@ -1438,9 +1452,23 @@ class App(tk.Tk):
             pass
         self.after(50, self._drain_log)
 
+    LOG_MAX_LINES = 4000  # cap per-text widget lines to avoid unbounded memory growth
+
     def _append_text(self, widget: tk.Text, s: str) -> None:
         widget.configure(state=tk.NORMAL)
         widget.insert(tk.END, s)
+        try:
+            end_index = widget.index('end-1c')
+            line_count = int(end_index.split('.')[0]) if end_index else 0
+        except Exception:
+            line_count = 0
+        if line_count > self.LOG_MAX_LINES:
+            try:
+                # Trim oldest lines while keeping at most LOG_MAX_LINES in the widget
+                trim_line = line_count - self.LOG_MAX_LINES
+                widget.delete('1.0', f'{trim_line + 1}.0')
+            except Exception:
+                pass
         widget.see(tk.END)
         widget.configure(state=tk.DISABLED)
 
@@ -1762,6 +1790,71 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def _chart_spinner_start(self, rid: int) -> None:
+        spinner = getattr(self, 'chart_spinner', None)
+        if spinner is None:
+            return
+        self._chart_spinner_req_id = rid
+        if not self._chart_spinner_visible:
+            try:
+                spinner.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 4))
+                self._chart_spinner_visible = True
+            except Exception:
+                return
+        try:
+            spinner.start(12)
+        except Exception:
+            pass
+
+    def _chart_spinner_stop(self, rid: int | None = None) -> None:
+        spinner = getattr(self, 'chart_spinner', None)
+        if spinner is None:
+            return
+        if rid is not None and self._chart_spinner_req_id != rid:
+            return
+        try:
+            spinner.stop()
+        except Exception:
+            pass
+        if self._chart_spinner_visible:
+            try:
+                spinner.pack_forget()
+            except Exception:
+                pass
+            self._chart_spinner_visible = False
+        if rid is None or self._chart_spinner_req_id == rid:
+            self._chart_spinner_req_id = None
+
+    def _chart_clear(self) -> None:
+        if self._chart_ax is None or self._chart_canvas is None:
+            return
+        try:
+            self._chart_ax.clear()
+            self._chart_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _chart_pause_for_quiet(self) -> None:
+        self._chart_quiet_paused = True
+        self._chart_active_req_id = None
+        self._ohlc_loading = False
+        self._chart_spinner_stop()
+        self._chart_clear()
+        self._set_chart_message(QUIET_CHART_MESSAGE)
+
+    def _chart_quiet_guard(self) -> None:
+        try:
+            if is_quiet_time(datetime.now(UTC)):
+                if not self._chart_quiet_paused:
+                    self._chart_pause_for_quiet()
+            else:
+                self._chart_quiet_paused = False
+        finally:
+            try:
+                self.after(30000, self._chart_quiet_guard)
+            except Exception:
+                pass
+
     def _on_db_row_selected(self, event=None) -> None:
         # Debounce if already loading
         if self._ohlc_loading:
@@ -1791,12 +1884,18 @@ class App(tk.Tk):
         except Exception:
             self._set_chart_message('Invalid entry time format.')
             return
+        now_utc = datetime.now(UTC)
+        if is_quiet_time(now_utc):
+            self._chart_pause_for_quiet()
+            return
+        self._chart_quiet_paused = False
         start_utc = entry_utc - timedelta(minutes=20)
         end_utc = datetime.now(UTC)
         self._chart_req_id += 1
         rid = self._chart_req_id
         self._chart_active_req_id = rid
         self._set_chart_message(f"Loading 1m chart for {symbol} from {start_utc.strftime('%H:%M')} UTC (inserted time)…")
+        self._chart_spinner_start(rid)
         self._ohlc_loading = True
         # Watchdog to avoid indefinite waiting if MT5 blocks
         self.after(8000, self._chart_watchdog, rid, symbol)
@@ -1822,6 +1921,7 @@ class App(tk.Tk):
         # If the same request is still running, release lock and inform user
         if self._chart_active_req_id == rid and self._ohlc_loading:
             self._ohlc_loading = False
+            self._chart_spinner_stop(rid)
             self._set_chart_message(f"Still loading {symbol}… MT5 may be busy. Try again or check terminal.")
 
     def _resolve_symbol(self, base: str) -> tuple[str | None, str | None]:
@@ -2036,13 +2136,14 @@ class App(tk.Tk):
             # Step 1: MT5 init
             ok, err = self._ensure_mt5()
             if not ok:
-                self.after(0, self._chart_render_error, err)
+                msg = err or 'MT5 initialize failed.'
+                self.after(0, self._chart_render_error, rid, msg)
                 return
             self.after(0, self._set_chart_message, f"MT5 ready. Resolving symbol {symbol}…")
             # Step 2: Resolve symbol
             sym_name, err2 = self._resolve_symbol(symbol)
             if sym_name is None:
-                self.after(0, self._chart_render_error, err2 or f"Symbol '{symbol}' not found.")
+                self.after(0, self._chart_render_error, rid, err2 or f"Symbol '{symbol}' not found.")
                 return
             # Step 3: Compute server window
             try:
@@ -2069,6 +2170,7 @@ class App(tk.Tk):
                 self.after(
                     0,
                     self._chart_render_error,
+                    rid,
                     "Requested window falls entirely inside quiet trading hours (23:30–01:00 UTC+3).",
                 )
                 return
@@ -2083,7 +2185,7 @@ class App(tk.Tk):
                 self.after(0, self._set_chart_message, f"No bars returned; falling back to raw ticks for {sym_name}…")
                 times, opens, highs, lows, closes = self._ticks_to_ohlc_lists(sym_name, offset_h, active_ranges, direction)
                 if not times:
-                    self.after(0, self._chart_render_error, "No price data available for requested range.")
+                    self.after(0, self._chart_render_error, rid, "No price data available for requested range.")
                     return
 
             # Hard-trim arrays to include at most 20 minutes AFTER the hit time
@@ -2115,19 +2217,31 @@ class App(tk.Tk):
             def _finish():
                 if self._chart_active_req_id != rid:
                     return
-                self._chart_render_draw(symbol, times, opens, highs, lows, closes,
+                if is_quiet_time(datetime.now(UTC)):
+                    self._chart_render_quiet(rid)
+                    return
+                self._chart_render_draw(rid, symbol, times, opens, highs, lows, closes,
                                         entry_utc, entry_price, sl, tp, hit_kind, hit_dt, hit_price,
                                         start_utc, end_utc, quiet_segments)
             self.after(0, _finish)
         except Exception as e:
-            self.after(0, self._chart_render_error, f"Chart thread error: {e}")
+            self.after(0, self._chart_render_error, rid, f"Chart thread error: {e}")
 
-    def _chart_render_error(self, msg: str) -> None:
+    def _chart_render_error(self, rid: int, msg: str) -> None:
+        if self._chart_active_req_id != rid:
+            return
         self._ohlc_loading = False
+        self._chart_spinner_stop(rid)
         self._set_chart_message(f"Chart error: {msg}")
+
+    def _chart_render_quiet(self, rid: int) -> None:
+        if self._chart_active_req_id != rid:
+            return
+        self._chart_pause_for_quiet()
 
     def _chart_render_draw(
         self,
+        rid: int,
         symbol: str,
         times,
         opens,
@@ -2145,7 +2259,10 @@ class App(tk.Tk):
         end_utc: datetime,
         quiet_segments: Sequence[tuple[datetime, datetime]] | None,
     ) -> None:
+        if self._chart_active_req_id != rid:
+            return
         self._ohlc_loading = False
+        self._chart_spinner_stop(rid)
         if self._chart_ax is None or self._chart_canvas is None:
             self._init_chart_widgets()
         if self._chart_ax is None:
@@ -2156,6 +2273,20 @@ class App(tk.Tk):
         ax.grid(True, which='both', linestyle='--', alpha=0.3)
         if quiet_segments is None:
             quiet_segments = []
+        if quiet_segments:
+            keep_idx: list[int] = []
+            for i, t in enumerate(times):
+                in_quiet = any(qs <= t < qe for qs, qe in quiet_segments)
+                if not in_quiet:
+                    keep_idx.append(i)
+            if not keep_idx:
+                self._chart_render_quiet(rid)
+                return
+            times = [times[i] for i in keep_idx]
+            opens = [opens[i] for i in keep_idx]
+            highs = [highs[i] for i in keep_idx]
+            lows = [lows[i] for i in keep_idx]
+            closes = [closes[i] for i in keep_idx]
         # Convert all times to display timezone (UTC+3)
         try:
             times_disp = [t.astimezone(DISPLAY_TZ) for t in times]

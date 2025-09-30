@@ -65,6 +65,7 @@ from monitor.mt5_client import (
     timeframe_seconds,
     to_server_naive,
 )
+from monitor.quiet_hours import iter_active_utc_ranges, is_quiet_time
 
 UTC = timezone.utc
 
@@ -297,13 +298,17 @@ def _bar_crosses_price(bar: RateBar, setup, spread_guard: float) -> bool:
     if direction == "sell":
         upper = bar.high + spread_guard
         lower = bar.low - spread_guard
+        if lower <= sl <= upper or bar.low >= sl:
+            return True
+        if lower <= tp <= upper or bar.high <= tp:
+            return True
     else:
         upper = bar.high
         lower = bar.low
-    if lower <= sl <= upper:
-        return True
-    if lower <= tp <= upper:
-        return True
+        if lower <= sl <= upper or bar.high <= sl:
+            return True
+        if lower <= tp <= upper or bar.low >= tp:
+            return True
     return False
 
 
@@ -400,7 +405,6 @@ def _evaluate_setup(
     for window in merged_windows:
         if hit is not None:
             break
-        windows_checked += 1
         window_start = max(window.start_utc - tick_padding, setup.as_of_utc)
         window_end = min(window.end_utc + tick_padding, now_utc)
         if window_end <= window_start:
@@ -408,29 +412,48 @@ def _evaluate_setup(
             window_end = min(window.end_utc, now_utc)
         if window_end <= window_start:
             continue
-        candidate_hit, stats, _ = scan_for_hit_with_chunks(
-            symbol=resolved_symbol,
-            direction=setup.direction,
-            sl=setup.sl,
-            tp=setup.tp,
-            offset_hours=offset_hours,
-            start_utc=window_start,
-            end_utc=window_end,
-            chunk_minutes=chunk_minutes,
-            trace=trace_ticks,
-        )
-        total_ticks += stats.total_ticks
-        total_pages += stats.pages
-        total_fetch += stats.fetch_s
-        total_elapsed += stats.elapsed_s
-        if candidate_hit is not None:
-            if candidate_hit.time_utc <= setup.as_of_utc + timedelta(milliseconds=1):
-                ignored_hit = True
-            else:
-                hit = candidate_hit
-                new_cursor = min(candidate_hit.time_utc, now_utc)
+
+        active_ranges = list(iter_active_utc_ranges(window_start, window_end))
+        if not active_ranges:
+            new_cursor = max(new_cursor, min(window_end, now_utc))
+            continue
+
+        for active_start, active_end in active_ranges:
+            if hit is not None:
                 break
-        new_cursor = max(new_cursor, min(window_end, now_utc))
+            if active_end <= active_start:
+                continue
+            windows_checked += 1
+            candidate_hit, stats, _ = scan_for_hit_with_chunks(
+                symbol=resolved_symbol,
+                direction=setup.direction,
+                sl=setup.sl,
+                tp=setup.tp,
+                offset_hours=offset_hours,
+                start_utc=active_start,
+                end_utc=active_end,
+                chunk_minutes=chunk_minutes,
+                trace=trace_ticks,
+            )
+            total_ticks += stats.total_ticks
+            total_pages += stats.pages
+            total_fetch += stats.fetch_s
+            total_elapsed += stats.elapsed_s
+
+            if candidate_hit is not None:
+                if candidate_hit.time_utc <= setup.as_of_utc + timedelta(milliseconds=1):
+                    ignored_hit = True
+                elif is_quiet_time(candidate_hit.time_utc):
+                    ignored_hit = True
+                else:
+                    hit = candidate_hit
+                    new_cursor = min(candidate_hit.time_utc, now_utc)
+                    break
+
+            new_cursor = max(new_cursor, min(active_end, now_utc))
+
+        if hit is None:
+            new_cursor = max(new_cursor, min(window_end, now_utc))
 
     new_cursor = min(new_cursor, now_utc)
     return SetupResult(

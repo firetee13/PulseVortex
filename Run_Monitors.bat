@@ -2,8 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
-REM Activate virtual environment
-call .venv\Scripts\activate.bat
+REM Activate conda environment
+call "C:\Users\Ivan\miniconda3\Scripts\activate.bat" monitor_env
 
 set SCRIPT=run_monitor_gui.pyw
 

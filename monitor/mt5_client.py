@@ -16,6 +16,18 @@ except Exception:  # pragma: no cover
 
 UTC = timezone.utc
 
+def _coerce_price(value: object) -> Optional[float]:
+    """Best-effort float conversion that ignores missing values."""
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if out != out or out in (float('inf'), float('-inf')):
+        return None
+    return out
+
 
 _TIMEFRAME_SECOND_MAP: Dict[int, int] = {}
 
@@ -464,7 +476,13 @@ def earliest_hit_from_ticks(
             except Exception:
                 if isinstance(tk, dict):
                     ask = tk.get('ask')
-        if bid is None and ask is None:
+        bid_val = _coerce_price(bid)
+        ask_val = _coerce_price(ask)
+        if bid_val is None and ask_val is not None:
+            bid_val = ask_val
+        if ask_val is None and bid_val is not None:
+            ask_val = bid_val
+        if bid_val is None and ask_val is None:
             continue
         tms = getattr(tk, 'time_msc', None)
         if tms is None:
@@ -491,13 +509,13 @@ def earliest_hit_from_ticks(
             continue
         dt_utc = dt_raw - timedelta(hours=server_offset_hours)
         if direction.lower() == 'buy':
-            if bid is not None and bid <= sl:
-                return Hit(kind='SL', time_utc=dt_utc, price=bid)
-            if bid is not None and bid >= tp:
-                return Hit(kind='TP', time_utc=dt_utc, price=bid)
+            if bid_val is not None and bid_val <= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=bid_val)
+            if bid_val is not None and bid_val >= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=bid_val)
         else:
-            if ask is not None and ask >= sl:
-                return Hit(kind='SL', time_utc=dt_utc, price=ask)
-            if ask is not None and ask <= tp:
-                return Hit(kind='TP', time_utc=dt_utc, price=ask)
+            if ask_val is not None and ask_val >= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=ask_val)
+            if ask_val is not None and ask_val <= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=ask_val)
     return None

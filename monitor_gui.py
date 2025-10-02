@@ -231,6 +231,7 @@ class App(tk.Tk):
         self.var_since_hours = tk.IntVar(value=168)
         self.var_auto = tk.BooleanVar(value=True)
         self.var_interval = tk.IntVar(value=60)
+        self.var_symbol_filter = tk.StringVar(value="")
         # Load persisted settings (if any) before building controls
         try:
             self._load_settings()
@@ -241,6 +242,7 @@ class App(tk.Tk):
             self.var_exclude_symbols.trace_add("write", self._on_exclude_changed)
             self.var_min_prox_sl.trace_add("write", self._on_min_prox_changed)
             self.var_max_prox_sl.trace_add("write", self._on_max_prox_changed)
+            self.var_symbol_filter.trace_add("write", self._on_filter_changed)
         except Exception:
             pass
 
@@ -443,7 +445,8 @@ class App(tk.Tk):
                                                   state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
         add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status,
                                                  values=["All", "TP", "SL", "Running", "Hits"],
-                                                 state="readonly", width=10)).pack(side=tk.LEFT)
+                                                 state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
+        add_labeled(row2, "Symbol:", ttk.Entry(row2, textvariable=self.var_symbol_filter, width=12)).pack(side=tk.LEFT)
 
         # Tree (table)
         # Splitter: top table, bottom chart
@@ -1519,6 +1522,7 @@ class App(tk.Tk):
         # Get filter values
         symbol_category = self.var_symbol_category.get()
         hit_status = self.var_hit_status.get()
+        symbol_filter = self.var_symbol_filter.get().strip()
 
         rows_display: list[tuple[str, str, str, str, str, str, str, str, str]] = []
         rows_meta: list[dict] = []
@@ -1577,6 +1581,11 @@ class App(tk.Tk):
                             else:  # TP or SL
                                 if hit != hit_status:
                                     continue
+
+                        # Apply symbol filter
+                        if symbol_filter:
+                            if symbol_filter.upper() not in sym.upper():
+                                continue
 
                         filtered_rows.append(row)
 
@@ -2731,6 +2740,12 @@ class App(tk.Tk):
                 self.var_hit_status.set(hit_status)
             except Exception:
                 pass
+        symbol_filter = data.get("symbol_filter")
+        if isinstance(symbol_filter, str):
+            try:
+                self.var_symbol_filter.set(symbol_filter)
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         data = {
@@ -2741,6 +2756,7 @@ class App(tk.Tk):
             "interval": self.var_interval.get() if self.var_interval is not None else 60,
             "symbol_category": self.var_symbol_category.get() if self.var_symbol_category is not None else "All",
             "hit_status": self.var_hit_status.get() if self.var_hit_status is not None else "All",
+            "symbol_filter": self.var_symbol_filter.get() if self.var_symbol_filter is not None else "",
         }
         try:
             with open(self._settings_path(), "w", encoding="utf-8") as f:

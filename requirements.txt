@@ -1,11 +1,8 @@
 # Core runtime dependencies for the timelapse tools
-# - timelapse_setups.py: uses watchdog for real-time file watching (optional but recommended)
+# - timelapse_setups.py: polls MT5 for data updates
 # - check_tp_sl_hits.py: uses MetaTrader5 to fetch ticks/bars
 # - monitor_gui.py: uses matplotlib for chart rendering in Tkinter
 
 MetaTrader5
 matplotlib
 numpy
-watchdog
-pika
-clickhouse-connect

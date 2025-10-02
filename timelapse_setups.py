@@ -36,14 +36,6 @@ try:
 except Exception:
     sqlite3 = None  # type: ignore
 
-# Optional filesystem event support (watchdog)
-HAS_WATCHDOG = False
-try:
-    from watchdog.observers import Observer  # type: ignore
-    from watchdog.events import PatternMatchingEventHandler  # type: ignore
-    HAS_WATCHDOG = True
-except Exception:
-    HAS_WATCHDOG = False
 
 from monitor.config import default_db_path
 from monitor import mt5_client
@@ -752,30 +744,6 @@ def watch_loop(
             print("\nStopped watching.")
 
 
-def _watch_loop_events(
-    symbols: List[str],
-    min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
-    top: Optional[int],
-    brief: bool,
-    debug: bool = False,
-    exclude_set: Optional[Set[str]] = None,
-    settle_delay: float = 0.2,
-) -> None:
-    """Poll MT5 periodically (watchdog not used)."""
-    watch_loop(
-        symbols=symbols,
-        interval=1.0,
-        min_rrr=min_rrr,
-        min_prox_sl=min_prox_sl,
-        max_prox_sl=max_prox_sl,
-        top=top,
-        brief=brief,
-        debug=debug,
-        exclude_set=exclude_set,
-    )
-    return
 
 
 def analyze(
@@ -1355,30 +1323,17 @@ def main() -> None:
     if exclude_set:
         syms = [s for s in syms if s.upper() not in exclude_set]
     if args.watch:
-        if HAS_WATCHDOG:
-            _watch_loop_events(
-                symbols=syms,
-                min_rrr=args.min_rrr,
-                min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-                max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-                top=args.top,
-                brief=args.brief,
-                debug=args.debug,
-                exclude_set=exclude_set,
-            )
-        else:
-            print("[watch] watchdog not installed; falling back to polling. Run 'pip install watchdog' for real-time events.")
-            watch_loop(
-                symbols=syms,
-                interval=max(0.5, args.interval),
-                min_rrr=args.min_rrr,
-                min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-                max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-                top=args.top,
-                brief=args.brief,
-                debug=args.debug,
-                exclude_set=exclude_set,
-            )
+        watch_loop(
+            symbols=syms,
+            interval=max(0.5, args.interval),
+            min_rrr=args.min_rrr,
+            min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
+            max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
+            top=args.top,
+            brief=args.brief,
+            debug=args.debug,
+            exclude_set=exclude_set,
+        )
         return
     # Single-run mode
     process_once(

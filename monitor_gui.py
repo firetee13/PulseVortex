@@ -32,6 +32,7 @@ import json
 import argparse
 import tempfile
 import shutil
+import math
 from typing import List, Sequence
 from monitor.config import db_path_str, default_db_path
 from monitor.mt5_client import (
@@ -214,6 +215,9 @@ class App(tk.Tk):
         self.tab_db = ttk.Frame(self.nb)
         self.nb.add(self.tab_db, text="DB Results")
 
+        self.tab_prox = ttk.Frame(self.nb)
+        self.nb.add(self.tab_prox, text="SL Proximity")
+
         self.tab_pnl = ttk.Frame(self.nb)
         self.nb.add(self.tab_pnl, text="PnL")
 
@@ -232,6 +236,13 @@ class App(tk.Tk):
         self.var_auto = tk.BooleanVar(value=True)
         self.var_interval = tk.IntVar(value=60)
         self.var_symbol_filter = tk.StringVar(value="")
+        # Proximity stats tab variables
+        self.var_prox_since_hours = tk.IntVar(value=336)
+        self.var_prox_min_trades = tk.IntVar(value=5)
+        self.var_prox_symbol_filter = tk.StringVar(value="")
+        self.var_prox_category = tk.StringVar(value="All")
+        self.var_prox_auto = tk.BooleanVar(value=False)
+        self.var_prox_interval = tk.IntVar(value=300)
         # Load persisted settings (if any) before building controls
         try:
             self._load_settings()
@@ -243,6 +254,11 @@ class App(tk.Tk):
             self.var_min_prox_sl.trace_add("write", self._on_min_prox_changed)
             self.var_max_prox_sl.trace_add("write", self._on_max_prox_changed)
             self.var_symbol_filter.trace_add("write", self._on_filter_changed)
+            self.var_prox_symbol_filter.trace_add("write", self._on_prox_setting_changed)
+            self.var_prox_category.trace_add("write", self._on_prox_setting_changed)
+            self.var_prox_min_trades.trace_add("write", self._on_prox_setting_changed)
+            self.var_prox_since_hours.trace_add("write", self._on_prox_setting_changed)
+            self.var_prox_interval.trace_add("write", self._on_prox_setting_changed)
         except Exception:
             pass
 
@@ -255,6 +271,8 @@ class App(tk.Tk):
 
         # UI elements in DB tab
         self._make_db_tab(self.tab_db)
+        # UI elements in SL proximity tab
+        self._make_prox_tab(self.tab_prox)
         # UI elements in PnL tab
         self._make_pnl_tab(self.tab_pnl)
         # Ensure DB results refresh once at startup and auto-refresh is active
@@ -266,6 +284,11 @@ class App(tk.Tk):
         # Also refresh PnL once at startup
         try:
             self._pnl_refresh()
+        except Exception:
+            pass
+        # Prime proximity stats view
+        try:
+            self._prox_refresh()
         except Exception:
             pass
 
@@ -532,6 +555,18 @@ class App(tk.Tk):
         self._chart_active_req_id: int | None = None
         self._mt5_inited = False
         self._chart_quiet_paused = False
+        # Proximity chart state
+        self._prox_fig = None
+        self._prox_ax_bins = None
+        self._prox_ax_symbols = None
+        self._prox_canvas = None
+        self._prox_toolbar = None
+        self.prox_status = None
+        self.prox_table = None
+        self.prox_chart_frame = None
+        self._prox_loading = False
+        self._prox_auto_job: str | None = None
+        self._prox_refresh_job: str | None = None
         # PnL chart state
         self._pnl_fig = None
         self._pnl_ax = None
@@ -641,6 +676,833 @@ class App(tk.Tk):
                     self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
             except Exception:
                 pass
+
+    def _make_prox_tab(self, parent) -> None:
+        top = ttk.Frame(parent)
+        top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        row1 = ttk.Frame(top)
+        row1.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=1, to=24 * 365, textvariable=self.var_prox_since_hours,
+                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(row1, text="Min trades:").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=1, to=500, textvariable=self.var_prox_min_trades,
+                    width=4).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Button(row1, text="Refresh", command=self._prox_refresh).pack(side=tk.LEFT)
+        ttk.Checkbutton(row1, text="Auto", variable=self.var_prox_auto,
+                        command=self._prox_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Label(row1, text="Every(s):").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=15, to=3600, textvariable=self.var_prox_interval,
+                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+
+        row2 = ttk.Frame(top)
+        row2.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
+        ttk.Label(row2, text="Category:").pack(side=tk.LEFT)
+        ttk.Combobox(row2, textvariable=self.var_prox_category,
+                     values=["All", "Forex", "Crypto", "Indices"],
+                     state="readonly", width=10).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(row2, text="Symbol:").pack(side=tk.LEFT)
+        ttk.Entry(row2, textvariable=self.var_prox_symbol_filter, width=14).pack(side=tk.LEFT, padx=(4, 10))
+
+        chart_wrap = ttk.Frame(parent)
+        chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.prox_status = ttk.Label(chart_wrap, text="Proximity stats pending refresh…")
+        self.prox_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 4))
+
+        table_frame = ttk.Frame(chart_wrap)
+        table_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 6))
+        cols = ("category", "bin", "completed", "total", "pending", "tp_pct", "avg_rrr", "expectancy")
+        self.prox_table = ttk.Treeview(table_frame, columns=cols, show='headings', height=5)
+        headings = {
+            "category": "Type",
+            "bin": "Sweet Spot Bin",
+            "completed": "Done",
+            "total": "Total",
+            "pending": "Pending",
+            "tp_pct": "TP%",
+            "avg_rrr": "Avg RRR",
+            "expectancy": "Edge (R)",
+        }
+        for col in cols:
+            self.prox_table.heading(col, text=headings[col])
+        self.prox_table.column("category", width=90, anchor=tk.W)
+        self.prox_table.column("bin", width=120, anchor=tk.W)
+        self.prox_table.column("completed", width=80, anchor=tk.E)
+        self.prox_table.column("total", width=70, anchor=tk.E)
+        self.prox_table.column("pending", width=70, anchor=tk.E)
+        self.prox_table.column("tp_pct", width=70, anchor=tk.E)
+        self.prox_table.column("avg_rrr", width=80, anchor=tk.E)
+        self.prox_table.column("expectancy", width=90, anchor=tk.E)
+        vs_table = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.prox_table.yview)
+        self.prox_table.configure(yscrollcommand=vs_table.set)
+        self.prox_table.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vs_table.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.prox_chart_frame = ttk.Frame(chart_wrap)
+        self.prox_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                self.prox_status.config(text="Matplotlib not available; charts disabled.")
+            except Exception:
+                pass
+
+    def _init_prox_chart_widgets(self) -> None:
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self.prox_chart_frame is None:
+            return
+        for w in self.prox_chart_frame.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 4), dpi=100)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1.2], hspace=0.32)
+        ax_bins = fig.add_subplot(gs[0])
+        ax_symbols = fig.add_subplot(gs[1])
+        ax_bins.set_ylabel('TP hit rate (%)')
+        ax_bins.set_ylim(0, 100)
+        ax_bins.grid(True, axis='y', linestyle='--', alpha=0.3)
+        ax_symbols.set_xlabel('Average proximity to SL at entry')
+        ax_symbols.set_ylabel('TP hit rate (%)')
+        ax_symbols.set_ylim(0, 100)
+        ax_symbols.grid(True, linestyle='--', alpha=0.3)
+        canvas = FigureCanvasTkAgg(fig, master=self.prox_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.prox_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        except Exception:
+            toolbar = None
+        self._prox_fig = fig
+        self._prox_ax_bins = ax_bins
+        self._prox_ax_symbols = ax_symbols
+        self._prox_canvas = canvas
+        self._prox_toolbar = toolbar
+
+    def _prox_auto_toggle(self) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        if self.var_prox_auto.get():
+            self._prox_schedule_next(soon=True)
+        else:
+            if self._prox_auto_job is not None:
+                try:
+                    self.after_cancel(self._prox_auto_job)
+                except Exception:
+                    pass
+                self._prox_auto_job = None
+
+    def _prox_schedule_next(self, soon: bool = False) -> None:
+        if not self.var_prox_auto.get():
+            return
+        delay = 1000 if soon else max(5, int(self.var_prox_interval.get())) * 1000
+        if self._prox_auto_job is not None:
+            try:
+                self.after_cancel(self._prox_auto_job)
+            except Exception:
+                pass
+            self._prox_auto_job = None
+        self._prox_auto_job = self.after(delay, self._prox_refresh)
+
+    def _schedule_prox_refresh(self, delay_ms: int = 350) -> None:
+        if self._prox_refresh_job is not None:
+            try:
+                self.after_cancel(self._prox_refresh_job)
+            except Exception:
+                pass
+            self._prox_refresh_job = None
+        self._prox_refresh_job = self.after(delay_ms, self._prox_refresh)
+
+    def _prox_refresh(self) -> None:
+        if self._prox_loading:
+            return
+        if self._prox_refresh_job is not None:
+            try:
+                self.after_cancel(self._prox_refresh_job)
+            except Exception:
+                pass
+            self._prox_refresh_job = None
+        if self.prox_status is not None:
+            try:
+                self.prox_status.config(text="Loading proximity stats…")
+            except Exception:
+                pass
+        self._prox_loading = True
+        threading.Thread(target=self._prox_fetch_thread, daemon=True).start()
+
+    def _prox_fetch_thread(self) -> None:
+        dbname = self.var_db_name.get().strip()
+        hours = max(1, int(self.var_prox_since_hours.get()))
+        min_trades = max(1, int(self.var_prox_min_trades.get()))
+        symbol_filter = self.var_prox_symbol_filter.get().strip()
+        category_filter = self.var_prox_category.get()
+
+        payload: dict[str, object] = {
+            'error': None,
+            'since_hours': hours,
+            'min_trades': min_trades,
+        }
+        try:
+            try:
+                import sqlite3  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"sqlite3 not available: {exc}")
+            db_path = db_path_str(dbname)
+            conn = sqlite3.connect(db_path, timeout=3)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
+                if cur.fetchone() is None:
+                    payload['rows'] = []
+                else:
+                    thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+                    sql = (
+                        """
+                        SELECT s.symbol, s.proximity_to_sl, s.rrr, h.hit, h.hit_time
+                        FROM timelapse_setups s
+                        LEFT JOIN timelapse_hits h ON h.setup_id = s.id
+                        WHERE s.inserted_at >= ?
+                        ORDER BY s.inserted_at DESC
+                        """
+                    )
+                    cur.execute(sql, (thr,))
+                    raw_rows = cur.fetchall() or []
+                    rows: list[dict[str, object]] = []
+                    max_prox = 0.0
+                    for sym, prox_raw, rrr_raw, hit, hit_time in raw_rows:
+                        sym_s = str(sym) if sym is not None else ''
+                        if symbol_filter and symbol_filter.upper() not in sym_s.upper():
+                            continue
+                        category = self._classify_symbol(sym_s).title()
+                        if category_filter != "All" and category != category_filter:
+                            continue
+                        if prox_raw is None:
+                            continue
+                        try:
+                            prox_val = float(prox_raw)
+                        except Exception:
+                            continue
+                        rrr_val = None
+                        if rrr_raw is not None:
+                            try:
+                                rrr_val = float(rrr_raw)
+                            except Exception:
+                                rrr_val = None
+                        max_prox = max(max_prox, prox_val)
+                        hit_str = (hit or '')
+                        outcome = None
+                        if isinstance(hit_str, str):
+                            u = hit_str.upper()
+                            if u == 'TP':
+                                outcome = 'win'
+                            elif u == 'SL':
+                                outcome = 'loss'
+                        rows.append({
+                            'symbol': sym_s,
+                            'category': category,
+                            'proximity': prox_val,
+                            'rrr': rrr_val,
+                            'outcome': outcome,
+                        })
+                    payload['rows'] = rows
+                    payload['max_prox'] = max_prox
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            payload['error'] = str(exc)
+
+        self.after(0, lambda: self._prox_apply_result(payload))
+
+    def _prox_apply_result(self, payload: dict[str, object]) -> None:
+        self._prox_loading = False
+        error = payload.get('error')
+        if error:
+            if self.prox_status is not None:
+                try:
+                    self.prox_status.config(text=f"Error: {error}")
+                except Exception:
+                    pass
+            self._prox_schedule_next()
+            return
+        rows = payload.get('rows')
+        if not isinstance(rows, list):
+            rows = []
+        processed = self._prox_compute_stats(rows, payload)
+        self._prox_render(processed)
+        self._prox_schedule_next()
+
+    def _prox_compute_stats(self, rows: list[dict[str, object]], payload: dict[str, object]) -> dict[str, object]:
+        hours = payload.get('since_hours', 0)
+        min_trades = payload.get('min_trades', 1)
+        try:
+            min_trades_int = max(1, int(min_trades))
+        except Exception:
+            min_trades_int = 1
+
+        proximities = [float(r['proximity']) for r in rows if isinstance(r.get('proximity'), (int, float))]
+        max_prox = float(payload.get('max_prox') or (max(proximities) if proximities else 0.0))
+        bucket = 0.1
+        if max_prox <= 0:
+            upper = bucket
+        else:
+            upper = max(bucket, math.ceil(max_prox / bucket) * bucket)
+        bins: list[dict[str, object]] = []
+        edge_steps = int(round(upper / bucket + 1e-9))
+        edges = [round(i * bucket, 4) for i in range(edge_steps + 1)]
+        if not edges or edges[-1] < upper - 1e-6:
+            edges.append(round(upper, 4))
+        for idx in range(len(edges) - 1):
+            start = edges[idx]
+            end = edges[idx + 1]
+            label = f"{start:.1f}-{end:.1f}"
+            bins.append({
+                'start': start,
+                'end': end,
+                'label': label,
+                'midpoint': (start + end) / 2.0,
+                'count': 0,
+                'wins': 0,
+                'losses': 0,
+                'sum_rrr_completed': 0.0,
+            })
+        if not bins:
+            bins.append({
+                'start': 0.0,
+                'end': bucket,
+                'label': f"0.0-{bucket:.1f}",
+                'midpoint': bucket / 2.0,
+                'count': 0,
+                'wins': 0,
+                'losses': 0,
+                'sum_rrr_completed': 0.0,
+            })
+
+        def pick_bin(value: float) -> dict[str, object]:
+            for i, b in enumerate(bins):
+                if value < b['end'] or i == len(bins) - 1:
+                    return b
+            return bins[-1]
+
+        symbol_stats: dict[str, dict[str, object]] = {}
+        category_bins: dict[str, dict[str, dict[str, object]]] = {}
+        wins_total = 0
+        losses_total = 0
+        global_rrr_sum = 0.0
+
+        for row in rows:
+            prox = row.get('proximity')
+            if not isinstance(prox, (int, float)):
+                continue
+            outcome = row.get('outcome')
+            symbol = str(row.get('symbol') or '')
+            category = str(row.get('category') or 'Forex')
+            rrr_val = row.get('rrr')
+            rrr_float: float | None
+            if isinstance(rrr_val, (int, float)):
+                rrr_float = float(rrr_val)
+            else:
+                rrr_float = None
+            bin_item = pick_bin(float(prox))
+            bin_item['count'] = int(bin_item.get('count', 0)) + 1
+            if outcome == 'win':
+                bin_item['wins'] = int(bin_item.get('wins', 0)) + 1
+                wins_total += 1
+            elif outcome == 'loss':
+                bin_item['losses'] = int(bin_item.get('losses', 0)) + 1
+                losses_total += 1
+
+            stat = symbol_stats.setdefault(symbol, {
+                'symbol': symbol,
+                'category': category,
+                'trades': 0,
+                'completed': 0,
+                'wins': 0,
+                'losses': 0,
+                'sum_prox': 0.0,
+                'sum_prox_completed': 0.0,
+                'sum_rrr_completed': 0.0,
+            })
+            stat['trades'] = int(stat['trades']) + 1
+            stat['sum_prox'] = float(stat['sum_prox']) + float(prox)
+            if outcome == 'win':
+                stat['completed'] = int(stat['completed']) + 1
+                stat['wins'] = int(stat['wins']) + 1
+                stat['sum_prox_completed'] = float(stat['sum_prox_completed']) + float(prox)
+            elif outcome == 'loss':
+                stat['completed'] = int(stat['completed']) + 1
+                stat['losses'] = int(stat['losses']) + 1
+                stat['sum_prox_completed'] = float(stat['sum_prox_completed']) + float(prox)
+            if outcome in ('win', 'loss') and rrr_float is not None:
+                bin_item['sum_rrr_completed'] = float(bin_item.get('sum_rrr_completed', 0.0)) + rrr_float
+                stat['sum_rrr_completed'] = float(stat.get('sum_rrr_completed', 0.0)) + rrr_float
+                global_rrr_sum += rrr_float
+
+            cat_bins = category_bins.setdefault(category, {})
+            bin_label = bin_item.get('label')
+            cat_entry = cat_bins.setdefault(bin_label, {
+                'label': bin_label,
+                'midpoint': bin_item.get('midpoint'),
+                'count': 0,
+                'wins': 0,
+                'losses': 0,
+                'sum_rrr_completed': 0.0,
+            })
+            cat_entry['count'] = int(cat_entry.get('count', 0)) + 1
+            if outcome == 'win':
+                cat_entry['wins'] = int(cat_entry.get('wins', 0)) + 1
+                if rrr_float is not None:
+                    cat_entry['sum_rrr_completed'] = float(cat_entry.get('sum_rrr_completed', 0.0)) + rrr_float
+            elif outcome == 'loss':
+                cat_entry['losses'] = int(cat_entry.get('losses', 0)) + 1
+                if rrr_float is not None:
+                    cat_entry['sum_rrr_completed'] = float(cat_entry.get('sum_rrr_completed', 0.0)) + rrr_float
+
+        for b in bins:
+            wins_b = int(b.get('wins', 0))
+            losses_b = int(b.get('losses', 0))
+            completed_b = wins_b + losses_b
+            b['completed'] = completed_b
+            total_b = int(b.get('count', 0))
+            b['pending'] = max(0, total_b - completed_b)
+            if completed_b:
+                b['success_rate'] = wins_b / completed_b
+                sum_rrr_completed = float(b.get('sum_rrr_completed', 0.0))
+                avg_rrr = (sum_rrr_completed / completed_b) if sum_rrr_completed > 0 else None
+                b['avg_rrr'] = avg_rrr
+                if avg_rrr is not None:
+                    success = b['success_rate']
+                    b['expectancy'] = success * avg_rrr - (1 - success)
+                else:
+                    b['expectancy'] = None
+            else:
+                b['success_rate'] = None
+                b['avg_rrr'] = None
+                b['expectancy'] = None
+
+        symbol_entries: list[dict[str, object]] = []
+        category_summary: dict[str, dict[str, float]] = {}
+        for stat in symbol_stats.values():
+            trades = int(stat['trades'])
+            completed = int(stat['completed'])
+            wins_s = int(stat['wins'])
+            losses_s = int(stat['losses'])
+            avg_all = float(stat['sum_prox']) / trades if trades else 0.0
+            avg_completed = (float(stat['sum_prox_completed']) / completed) if completed else avg_all
+            success = (wins_s / completed) if completed else None
+            sum_rrr_completed = float(stat.get('sum_rrr_completed', 0.0)) if completed else 0.0
+            avg_rrr_completed = (sum_rrr_completed / completed) if (completed and sum_rrr_completed > 0) else None
+            expectancy = None
+            if success is not None and avg_rrr_completed is not None:
+                expectancy = success * avg_rrr_completed - (1 - success)
+            entry = {
+                'symbol': stat['symbol'],
+                'category': stat['category'],
+                'trades': trades,
+                'completed': completed,
+                'wins': wins_s,
+                'losses': losses_s,
+                'avg_prox': avg_all,
+                'avg_prox_completed': avg_completed,
+                'success_rate': success,
+                'avg_rrr': avg_rrr_completed,
+                'expectancy': expectancy,
+            }
+            symbol_entries.append(entry)
+            if completed:
+                cat_data = category_summary.setdefault(stat['category'], {'wins': 0, 'completed': 0, 'sum_rrr_completed': 0.0})
+                cat_data['wins'] += wins_s
+                cat_data['completed'] += completed
+                cat_data['sum_rrr_completed'] += sum_rrr_completed
+
+        eligible_symbols = [
+            s for s in symbol_entries
+            if s.get('success_rate') is not None and s.get('expectancy') is not None and int(s.get('completed', 0)) >= min_trades_int
+        ]
+        eligible_symbols.sort(key=lambda s: (s.get('expectancy') or 0.0, s.get('success_rate') or 0.0, s.get('completed') or 0), reverse=True)
+        best_symbols = eligible_symbols[:3]
+
+        global_completed = wins_total + losses_total
+        global_rate = (wins_total / global_completed) if global_completed else None
+        global_avg_rrr = (global_rrr_sum / global_completed) if global_completed and global_rrr_sum > 0 else None
+        global_expectancy = None
+        if global_rate is not None and global_avg_rrr is not None:
+            global_expectancy = global_rate * global_avg_rrr - (1 - global_rate)
+
+        sweet_bin = None
+        for b in bins:
+            completed_b = b.get('completed', 0)
+            expectancy = b.get('expectancy')
+            if not completed_b or completed_b < max(3, min_trades_int):
+                continue
+            if sweet_bin is None or (expectancy is not None and expectancy > sweet_bin['expectancy']):
+                sweet_bin = {
+                    'label': b['label'],
+                    'success_rate': b.get('success_rate'),
+                    'completed': completed_b,
+                    'avg_rrr': b.get('avg_rrr'),
+                    'expectancy': expectancy,
+                    'midpoint': b['midpoint'],
+                }
+
+        category_sweet_spots: list[dict[str, object]] = []
+        cat_summary_fmt = []
+        for cat, data in category_summary.items():
+            completed_cat = data.get('completed', 0)
+            if completed_cat:
+                rate_cat = data.get('wins', 0) / completed_cat
+                sum_rrr_cat = data.get('sum_rrr_completed', 0.0)
+                avg_rrr_cat = (sum_rrr_cat / completed_cat) if sum_rrr_cat > 0 else None
+                expectancy_cat = None
+                if avg_rrr_cat is not None:
+                    expectancy_cat = rate_cat * avg_rrr_cat - (1 - rate_cat)
+                cat_summary_fmt.append({'category': cat, 'success_rate': rate_cat, 'expectancy': expectancy_cat})
+
+            bins_map = category_bins.get(cat, {})
+            best_bin = None
+            for bin_label, bin_stats in bins_map.items():
+                wins_cat = int(bin_stats.get('wins', 0))
+                losses_cat = int(bin_stats.get('losses', 0))
+                total_cat = int(bin_stats.get('count', 0))
+                completed_cat_bin = wins_cat + losses_cat
+                pending_cat = max(0, total_cat - completed_cat_bin)
+                success_cat = (wins_cat / completed_cat_bin) if completed_cat_bin else None
+                avg_rrr_cat_bin = None
+                if completed_cat_bin:
+                    sum_rrr_cat_bin = float(bin_stats.get('sum_rrr_completed', 0.0))
+                    if sum_rrr_cat_bin > 0:
+                        avg_rrr_cat_bin = sum_rrr_cat_bin / completed_cat_bin
+                expectancy_cat_bin = None
+                if success_cat is not None and avg_rrr_cat_bin is not None:
+                    expectancy_cat_bin = success_cat * avg_rrr_cat_bin - (1 - success_cat)
+                bin_stats['success_rate'] = success_cat
+                bin_stats['avg_rrr'] = avg_rrr_cat_bin
+                bin_stats['expectancy'] = expectancy_cat_bin
+                bin_stats['completed'] = completed_cat_bin
+                bin_stats['pending'] = pending_cat
+                if (completed_cat_bin >= max(3, min_trades_int)) and expectancy_cat_bin is not None:
+                    if best_bin is None or expectancy_cat_bin > best_bin['expectancy']:
+                        best_bin = {
+                            'category': cat,
+                            'label': bin_label,
+                            'completed': completed_cat_bin,
+                            'total': total_cat,
+                            'pending': pending_cat,
+                            'success_rate': success_cat,
+                            'avg_rrr': avg_rrr_cat_bin,
+                            'expectancy': expectancy_cat_bin,
+                        }
+            if best_bin is not None:
+                category_sweet_spots.append(best_bin)
+
+        result = {
+            'since_hours': hours,
+            'min_trades': min_trades_int,
+            'bin_stats': bins,
+            'symbol_stats': eligible_symbols,
+            'best_symbols': best_symbols,
+            'global_success_rate': global_rate,
+            'global_avg_rrr': global_avg_rrr,
+            'global_expectancy': global_expectancy,
+            'completed_trades': global_completed,
+            'pending_trades': max(0, len(rows) - global_completed),
+            'symbols_seen': len(symbol_stats),
+            'sweet_bin': sweet_bin,
+            'category_summary': cat_summary_fmt,
+            'category_sweet_spots': category_sweet_spots,
+        }
+        return result
+
+    def _prox_render(self, data: dict[str, object]) -> None:
+        if self.prox_status is None:
+            return
+
+        status_parts: list[str] = []
+        completed = data.get('completed_trades') or 0
+        pending = data.get('pending_trades') or 0
+        symbols_seen = data.get('symbols_seen') or 0
+        since_hours = data.get('since_hours') or 0
+        status_parts.append(f"{completed} completed / {pending} open across {symbols_seen} symbols (last {since_hours}h)")
+
+        sweet = data.get('sweet_bin') or None
+        if sweet and isinstance(sweet, dict) and sweet.get('expectancy') is not None:
+            pieces = []
+            try:
+                sr = sweet.get('success_rate')
+                if sr is not None:
+                    pieces.append(f"{float(sr) * 100:.1f}% TP")
+            except Exception:
+                pass
+            try:
+                avg_rrr = sweet.get('avg_rrr')
+                if avg_rrr is not None:
+                    pieces.append(f"avg RRR {float(avg_rrr):.2f}")
+            except Exception:
+                pass
+            pieces.append(f"edge {float(sweet['expectancy']):+.2f}R")
+            status_parts.append(
+                f"Sweet spot {sweet.get('label')} → " + ", ".join(pieces) + f" on {int(sweet['completed'])} trades")
+
+        best_symbols = data.get('best_symbols') or []
+        if isinstance(best_symbols, list) and best_symbols:
+            best_bits = []
+            for entry in best_symbols:
+                try:
+                    sym = entry.get('symbol')
+                    rate = entry.get('success_rate')
+                    expectancy = entry.get('expectancy')
+                    avg_rrr = entry.get('avg_rrr')
+                    cnt = int(entry.get('completed') or 0)
+                    bit = f"{sym}"
+                    if expectancy is not None:
+                        bit += f" {float(expectancy):+.2f}R"
+                    if rate is not None:
+                        bit += f" ({float(rate) * 100:.0f}%"
+                        if avg_rrr is not None:
+                            bit += f" @ {float(avg_rrr):.2f}R"
+                        bit += f", {cnt})"
+                    else:
+                        bit += f" ({cnt})"
+                    best_bits.append(bit)
+                except Exception:
+                    continue
+            if best_bits:
+                status_parts.append("Leaders: " + ", ".join(best_bits))
+
+        cat_summary = data.get('category_summary') or []
+        if isinstance(cat_summary, list) and cat_summary:
+            cat_bits = []
+            for entry in cat_summary:
+                try:
+                    cat = entry.get('category')
+                    rate = entry.get('success_rate')
+                    expectancy = entry.get('expectancy')
+                    snippet = f"{cat}"
+                    if expectancy is not None:
+                        snippet += f" {float(expectancy):+.2f}R"
+                    if rate is not None:
+                        snippet += f" ({float(rate) * 100:.0f}% TP)"
+                    cat_bits.append(snippet)
+                except Exception:
+                    continue
+            if cat_bits:
+                status_parts.append("By category: " + ", ".join(cat_bits))
+
+        global_expectancy = data.get('global_expectancy')
+        global_avg_rrr = data.get('global_avg_rrr')
+        if isinstance(global_expectancy, (int, float)):
+            extra = f"Global edge {float(global_expectancy):+.2f}R"
+            if isinstance(global_avg_rrr, (int, float)):
+                extra += f" @ avg RRR {float(global_avg_rrr):.2f}"
+            status_parts.append(extra)
+
+        try:
+            self.prox_status.config(text=" | ".join(status_parts))
+        except Exception:
+            pass
+
+        prox_table = getattr(self, 'prox_table', None)
+        if prox_table is not None:
+            try:
+                prox_table.delete(*prox_table.get_children())
+            except Exception:
+                pass
+            table_rows: list[tuple[str, str, int, int, int, str, str, str]] = []
+            sweet = data.get('sweet_bin')
+            if isinstance(sweet, dict) and sweet.get('expectancy') is not None:
+                completed_global = int(data.get('completed_trades') or 0)
+                pending_global = int(data.get('pending_trades') or 0)
+                total_global = completed_global + pending_global
+                sr = sweet.get('success_rate')
+                avg_rrr = sweet.get('avg_rrr')
+                expectancy = sweet.get('expectancy')
+                table_rows.append((
+                    'All',
+                    str(sweet.get('label') or ''),
+                    completed_global,
+                    total_global,
+                    pending_global,
+                    f"{float(sr) * 100:.1f}%" if isinstance(sr, (int, float)) else '–',
+                    f"{float(avg_rrr):.2f}" if isinstance(avg_rrr, (int, float)) else '–',
+                    f"{float(expectancy):+.2f}" if isinstance(expectancy, (int, float)) else '–',
+                ))
+
+            cat_spots = data.get('category_sweet_spots') or []
+            if isinstance(cat_spots, list):
+                try:
+                    cat_spots = sorted(
+                        (spot for spot in cat_spots if isinstance(spot, dict)),
+                        key=lambda s: float(s.get('expectancy') or 0.0),
+                        reverse=True,
+                    )
+                except Exception:
+                    pass
+                for spot in cat_spots:
+                    try:
+                        category = spot.get('category', '')
+                        label = spot.get('label', '')
+                        completed = int(spot.get('completed') or 0)
+                        total = int(spot.get('total') or completed)
+                        pending = int(spot.get('pending') or max(0, total - completed))
+                        sr = spot.get('success_rate')
+                        avg_rrr = spot.get('avg_rrr')
+                        expectancy = spot.get('expectancy')
+                        table_rows.append((
+                            str(category or ''),
+                            str(label or ''),
+                            completed,
+                            total,
+                            pending,
+                            f"{float(sr) * 100:.1f}%" if isinstance(sr, (int, float)) else '–',
+                            f"{float(avg_rrr):.2f}" if isinstance(avg_rrr, (int, float)) else '–',
+                            f"{float(expectancy):+.2f}" if isinstance(expectancy, (int, float)) else '–',
+                        ))
+                    except Exception:
+                        continue
+            if not table_rows:
+                table_rows.append(('–', 'Not enough trades yet', 0, 0, 0, '–', '–', '–'))
+            for row in table_rows:
+                try:
+                    prox_table.insert('', tk.END, values=row)
+                except Exception:
+                    continue
+
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self._prox_ax_bins is None or self._prox_ax_symbols is None:
+            self._init_prox_chart_widgets()
+        ax_bins = self._prox_ax_bins
+        ax_symbols = self._prox_ax_symbols
+        if ax_bins is None or ax_symbols is None:
+            return
+
+        ax_bins.clear()
+        ax_symbols.clear()
+        ax_bins.set_ylabel('TP hit rate (%)')
+        ax_bins.set_ylim(0, 100)
+        ax_bins.grid(True, axis='y', linestyle='--', alpha=0.3)
+        ax_symbols.set_xlabel('Average proximity to SL at entry')
+        ax_symbols.set_ylabel('Expectancy (R multiples)')
+        ax_symbols.set_ylim(-1.5, 2.5)
+        ax_symbols.grid(True, linestyle='--', alpha=0.3)
+
+        bin_stats = [b for b in (data.get('bin_stats') or []) if isinstance(b, dict)]
+        plot_bins = [b for b in bin_stats if (b.get('completed') or 0) > 0]
+        sweet_label = None
+        sweet = data.get('sweet_bin')
+        if isinstance(sweet, dict):
+            sweet_label = sweet.get('label')
+
+        if plot_bins:
+            x_vals = list(range(len(plot_bins)))
+            labels = [str(b.get('label')) for b in plot_bins]
+            rates = [float(b.get('success_rate') or 0.0) * 100 for b in plot_bins]
+            counts = [int(b.get('completed') or 0) for b in plot_bins]
+            expectancies = [b.get('expectancy') for b in plot_bins]
+            avg_rrrs = [b.get('avg_rrr') for b in plot_bins]
+            colors = ['#2ca02c' if b.get('label') == sweet_label else '#4c72b0' for b in plot_bins]
+            bars = ax_bins.bar(x_vals, rates, color=colors, alpha=0.85)
+            for xi, bar, rate, count, exp_val, avg_rrr in zip(x_vals, bars, rates, counts, expectancies, avg_rrrs):
+                ax_bins.text(bar.get_x() + bar.get_width() / 2, rate + 1.5,
+                             f"{rate:.0f}%\n({count})", ha='center', va='bottom', fontsize=8)
+                if exp_val is not None:
+                    text = f"{float(exp_val):+.2f}R"
+                    if avg_rrr is not None:
+                        text += f"\nRRR {float(avg_rrr):.2f}"
+                    ax_bins.text(bar.get_x() + bar.get_width() / 2, rate + 10,
+                                 text, ha='center', va='bottom', fontsize=8, color='#2f4b7c')
+            ax_bins.set_xticks(x_vals)
+            ax_bins.set_xticklabels(labels, rotation=45, ha='right')
+        else:
+            ax_bins.text(0.5, 0.5, 'No completed hits in range yet.', ha='center', va='center',
+                         transform=ax_bins.transAxes, fontsize=10)
+
+        global_rate = data.get('global_success_rate')
+        if isinstance(global_rate, (int, float)):
+            ax_bins.axhline(float(global_rate) * 100, color='#dd8452', linestyle='--', linewidth=1,
+                            label='Overall hit rate')
+            ax_bins.legend(loc='lower right')
+
+        global_expectancy = data.get('global_expectancy')
+        if isinstance(global_expectancy, (int, float)):
+            ax_symbols.axhline(float(global_expectancy), color='#dd8452', linestyle='--', linewidth=1,
+                               label='Overall expectancy')
+
+        symbol_stats = [s for s in (data.get('symbol_stats') or []) if isinstance(s, dict)]
+        if symbol_stats:
+            cat_colors = {
+                'Forex': '#1f77b4',
+                'Crypto': '#ff7f0e',
+                'Indices': '#2ca02c',
+            }
+            used_labels: set[str] = set()
+            max_avg = 0.0
+            min_exp = None
+            max_exp = None
+            for entry in symbol_stats:
+                avg = float(entry.get('avg_prox_completed') or entry.get('avg_prox') or 0.0)
+                expectancy = entry.get('expectancy')
+                if expectancy is None:
+                    continue
+                success = entry.get('success_rate')
+                completed = int(entry.get('completed') or 0)
+                cat = str(entry.get('category') or 'Forex')
+                color = cat_colors.get(cat, '#7f7f7f')
+                label = cat if cat not in used_labels else None
+                used_labels.add(cat)
+                size = max(50, min(260, 50 + completed * 18))
+                edge_color = '#2ca02c' if expectancy > 0 else '#d62728'
+                ax_symbols.scatter(avg, expectancy, s=size, color=color, alpha=0.78,
+                                   edgecolors=edge_color, linewidths=1.0, label=label)
+                if entry in (data.get('best_symbols') or []):
+                    label_text = entry.get('symbol')
+                    if success is not None:
+                        label_text += f" {float(success) * 100:.0f}%"
+                    ax_symbols.annotate(label_text, xy=(avg, expectancy), xytext=(0, 6),
+                                        textcoords='offset points', ha='center', fontsize=9)
+                max_avg = max(max_avg, avg)
+                if min_exp is None or expectancy < min_exp:
+                    min_exp = expectancy
+                if max_exp is None or expectancy > max_exp:
+                    max_exp = expectancy
+            if used_labels:
+                ax_symbols.legend(loc='lower right', title='Category')
+            ax_symbols.set_xlim(0, max(1.05, max_avg * 1.15))
+            if min_exp is not None and max_exp is not None:
+                span = max_exp - min_exp
+                pad = max(0.2, span * 0.15)
+                ax_symbols.set_ylim(min_exp - pad, max_exp + pad)
+        else:
+            ax_symbols.text(0.5, 0.5, f"Need ≥ {data.get('min_trades', 1)} completed trades per symbol",
+                            ha='center', va='center', transform=ax_symbols.transAxes, fontsize=10)
+            ax_symbols.set_xlim(0, 1.0)
+            ax_symbols.set_ylim(-1.0, 1.0)
+            if isinstance(global_expectancy, (int, float)):
+                ax_symbols.legend(loc='lower right')
+
+        sweet = data.get('sweet_bin')
+        if isinstance(sweet, dict) and sweet.get('midpoint') is not None:
+            try:
+                ax_symbols.axvline(float(sweet['midpoint']), color='#2ca02c', linestyle=':', linewidth=1)
+            except Exception:
+                pass
+
+        try:
+            if self._prox_fig is not None:
+                self._prox_fig.tight_layout()
+            if self._prox_canvas is not None:
+                self._prox_canvas.draw_idle()
+        except Exception:
+            pass
 
     def _make_pnl_tab(self, parent) -> None:
         """Create the PnL tab UI: simple controls + Matplotlib chart."""
@@ -2746,6 +3608,42 @@ class App(tk.Tk):
                 self.var_symbol_filter.set(symbol_filter)
             except Exception:
                 pass
+        prox_since = data.get("prox_since_hours")
+        if isinstance(prox_since, int):
+            try:
+                self.var_prox_since_hours.set(prox_since)
+            except Exception:
+                pass
+        prox_min = data.get("prox_min_trades")
+        if isinstance(prox_min, int):
+            try:
+                self.var_prox_min_trades.set(prox_min)
+            except Exception:
+                pass
+        prox_symbol_filter = data.get("prox_symbol_filter")
+        if isinstance(prox_symbol_filter, str):
+            try:
+                self.var_prox_symbol_filter.set(prox_symbol_filter)
+            except Exception:
+                pass
+        prox_category = data.get("prox_category")
+        if isinstance(prox_category, str):
+            try:
+                self.var_prox_category.set(prox_category)
+            except Exception:
+                pass
+        prox_auto = data.get("prox_auto")
+        if isinstance(prox_auto, bool):
+            try:
+                self.var_prox_auto.set(prox_auto)
+            except Exception:
+                pass
+        prox_interval = data.get("prox_interval")
+        if isinstance(prox_interval, int):
+            try:
+                self.var_prox_interval.set(prox_interval)
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         data = {
@@ -2757,6 +3655,12 @@ class App(tk.Tk):
             "symbol_category": self.var_symbol_category.get() if self.var_symbol_category is not None else "All",
             "hit_status": self.var_hit_status.get() if self.var_hit_status is not None else "All",
             "symbol_filter": self.var_symbol_filter.get() if self.var_symbol_filter is not None else "",
+            "prox_since_hours": self.var_prox_since_hours.get() if self.var_prox_since_hours is not None else 336,
+            "prox_min_trades": self.var_prox_min_trades.get() if self.var_prox_min_trades is not None else 5,
+            "prox_symbol_filter": self.var_prox_symbol_filter.get() if self.var_prox_symbol_filter is not None else "",
+            "prox_category": self.var_prox_category.get() if self.var_prox_category is not None else "All",
+            "prox_auto": bool(self.var_prox_auto.get()) if self.var_prox_auto is not None else False,
+            "prox_interval": self.var_prox_interval.get() if self.var_prox_interval is not None else 300,
         }
         try:
             with open(self._settings_path(), "w", encoding="utf-8") as f:
@@ -2781,6 +3685,13 @@ class App(tk.Tk):
             self._save_settings()
         except Exception:
             pass
+
+    def _on_prox_setting_changed(self, *args) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        self._schedule_prox_refresh()
 
 
     def _on_filter_changed(self, *args) -> None:

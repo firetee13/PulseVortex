@@ -5,5 +5,12 @@
   "since_hours": 268,
   "interval": 120,
   "symbol_category": "All",
-  "hit_status": "All"
+  "hit_status": "All",
+  "symbol_filter": "",
+  "prox_since_hours": 336,
+  "prox_min_trades": 5,
+  "prox_symbol_filter": "",
+  "prox_category": "Forex",
+  "prox_auto": false,
+  "prox_interval": 300
 }

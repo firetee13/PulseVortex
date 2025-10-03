@@ -1026,7 +1026,7 @@ def analyze(
                 distance = sl - ask
 
             # Enforce minimum distance threshold (10x spread) with tiny epsilon
-            if distance is None or (distance + eps) < (10 * spread_abs):
+            if distance is None or (distance + eps) < (20 * spread_abs):
                 bump("sl_too_close_to_spread")
                 if debug:
                     print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
@@ -1046,7 +1046,7 @@ def analyze(
             else:
                 tp_distance = ask - tp
 
-            if tp_distance is None or (tp_distance + eps) < (10 * spread_abs):
+            if tp_distance is None or (tp_distance + eps) < (20 * spread_abs):
                 bump("too_far_from_tp_prox")
                 if debug:
                     print(f"[DEBUG] TP too close to spread: sym={sym}, dir={direction}, price={price}, tp={tp}, spread_abs={spread_abs}, distance={tp_distance}")

@@ -11,6 +11,7 @@ Notes:
   - Spread filter: Only spreads <0.3% accepted, others filtered out.
   - SL/TP logic: Buy -> SL=S1 or D1 Low, TP=R1 or D1 High; Sell -> SL=R1 or D1 High, TP=S1 or D1 Low. Price must lie between SL and TP.
   - SL distance filter: Stop loss must be at least 10x the current spread away from entry price (Buy: bid-SL >= 10x spread, Sell: SL-ask >= 10x spread).
+  - TP distance filter: Take profit must also be at least 10x the current spread away from entry (Buy: TP-bid >= 10x spread, Sell: ask-TP >= 10x spread).
   - Current price and RRR use Bid/Ask at signal timestamp (Buy: Ask, Sell: Bid).
   - ATR(%) effect: adds +0.5 score bonus when within [60, 150] (for informational purposes).
   - Timelapse: simulated from previous values in MT5 data for momentum context.
@@ -107,9 +108,6 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Analyze MT5 symbols for trade setups (MT5 is the only source)")
     p.add_argument("--symbols", default="", help="Comma-separated symbols (default: all visible in MarketWatch)")
     p.add_argument("--min-rrr", type=float, default=1.0, help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering")
-    # Optional guards (disabled by default).
-    p.add_argument("--min-prox-sl", type=float, default=0.0, help="Optional: require entry to be at least this fraction away from SL relative to SL/TP range")
-    p.add_argument("--max-prox-sl", type=float, default=1.0, help="Optional: require entry to be at most this fraction away from SL relative to SL/TP range")
     p.add_argument("--top", type=int, default=None, help="Limit to top N setups (after filtering)")
     p.add_argument("--brief", action="store_true", help="Brief output without detailed explanation")
     p.add_argument("--watch", action="store_true", help="Run continuously and poll MT5 for updates")
@@ -117,6 +115,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--debug", action="store_true", help="Print filtering diagnostics and counts")
     p.add_argument("--exclude", default="", help="Comma-separated symbols to exclude (e.g., GLMUSD,BCHUSD)")
     return p.parse_args()
+
+
+PROXIMITY_BIN_BUCKET = 0.1
+
+
+def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET) -> Optional[str]:
+    """Return the proximity bucket label (e.g., '0.4-0.5') used for gating/stats."""
+    try:
+        if proximity is None:
+            return None
+        value = float(proximity)
+        if not math.isfinite(value):
+            return None
+        if value < 0:
+            value = 0.0
+        start = math.floor(value / bucket) * bucket
+        end = start + bucket
+        return f"{start:.1f}-{end:.1f}"
+    except Exception:
+        return None
 
 
 # Fixed offset timezone for input interpretation (Europe/Berlin UTC+2)
@@ -132,8 +150,6 @@ _LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[dat
 
 # Cache MT5 rate data with lightweight TTLs per timeframe to reduce IPC churn
 _RATE_CACHE: Dict[Tuple[str, int, int], Tuple[float, Any]] = {}
-# Require entries to sit at least this far from SL unless caller overrides higher.
-MIN_PROX_BASE = 0.2
 # Reusable SQLite connection handle (populated lazily)
 _DB_CONN: Optional["sqlite3.Connection"] = None
 _DB_CONN_PATH: Optional[str] = None
@@ -574,6 +590,55 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
     return series, None, latest_ts
 
 
+def _ensure_proximity_bin_schema(cur: "sqlite3.Cursor", table: str) -> bool:
+    """Ensure the proximity_bin column exists on the setups table."""
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = {str(r[1]) for r in (cur.fetchall() or [])}
+        if "proximity_bin" in cols:
+            return True
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_bin TEXT")
+        return True
+    except Exception:
+        return False
+
+
+def _backfill_missing_proximity_bins(cur: "sqlite3.Cursor", table: str) -> int:
+    """Populate proximity_bin for rows that already have proximity_to_sl recorded."""
+    try:
+        cur.execute(
+            f"""
+            SELECT id, proximity_to_sl
+            FROM {table}
+            WHERE (proximity_bin IS NULL OR proximity_bin = '')
+              AND proximity_to_sl IS NOT NULL
+            """
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        return 0
+    updates: List[Tuple[str, int]] = []
+    for row in rows:
+        try:
+            rec_id = int(row[0])
+        except Exception:
+            continue
+        prox = row[1]
+        bin_label = _proximity_bin_label(prox)
+        if bin_label:
+            updates.append((bin_label, rec_id))
+    if not updates:
+        return 0
+    try:
+        cur.executemany(
+            f"UPDATE {table} SET proximity_bin = ? WHERE id = ?",
+            updates,
+        )
+        return len(updates)
+    except Exception:
+        return 0
+
+
 def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "timelapse_setups") -> Tuple[List[Dict[str, object]], Set[str]]:
     """Filter out results for symbols that already have an unsettled (open) setup.
 
@@ -598,20 +663,50 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ("timelapse_hits",))
         if cur.fetchone() is None:
             return results, set()
-        # Compute symbols that currently have at least one open setup
+        schema_ready = _ensure_proximity_bin_schema(cur, table)
+        backfilled = 0
+        if schema_ready:
+            backfilled = _backfill_missing_proximity_bins(cur, table)
+        if backfilled > 0:
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        # Compute open setups grouped by symbol, direction, and proximity bin
         cur.execute(
             f"""
-            SELECT DISTINCT t.symbol
+            SELECT t.symbol, t.direction, COALESCE(t.proximity_bin, '')
             FROM {table} t
             LEFT JOIN timelapse_hits h ON h.setup_id = t.id
             WHERE h.setup_id IS NULL
             """
         )
-        open_symbols = {str(r[0]) for r in (cur.fetchall() or []) if r and r[0] is not None}
-        if not open_symbols:
+        open_groups = set()
+        for rec in cur.fetchall() or []:
+            if not rec:
+                continue
+            sym = str(rec[0] or "")
+            direction = str(rec[1] or "")
+            bin_label = str(rec[2] or "")
+            if sym:
+                open_groups.add((sym.upper(), direction.upper(), bin_label))
+        if not open_groups:
             return results, set()
-        filtered = [r for r in results if str(r.get("symbol")) not in open_symbols]
-        excluded = {str(r.get("symbol")) for r in results if str(r.get("symbol")) in open_symbols}
+
+        filtered: List[Dict[str, object]] = []
+        excluded: Set[str] = set()
+        for row in results:
+            sym = str(row.get("symbol") or "")
+            direction = str(row.get("direction") or "")
+            prox = row.get("proximity_to_sl")
+            bin_label = _proximity_bin_label(prox) or ""
+            key = (sym.upper(), direction.upper(), bin_label)
+            if key in open_groups:
+                excluded.add(sym)
+                continue
+            filtered.append(row)
+            if sym:
+                open_groups.add(key)
         return filtered, excluded
     except Exception:
         return results, set()
@@ -628,8 +723,6 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
 def process_once(
     symbols: List[str],
     min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -656,8 +749,6 @@ def process_once(
     results, reasons = analyze(
         series,
         min_rrr=min_rrr,
-        min_prox_sl=min_prox_sl,
-        max_prox_sl=max_prox_sl,
         as_of_ts=as_of_ts,
         debug=debug,
     )
@@ -668,8 +759,8 @@ def process_once(
     # Suppress symbols that have an open (unsettled) setup in the DB already
     filtered, db_excluded = _filter_recent_duplicates(results, table="timelapse_setups")
     # Track DB exclusions in rejection reasons
-    if db_excluded: # Only add if there are excluded symbols
-        reasons.setdefault("already_in_db", []).extend(list(db_excluded)) # Extend with the list of excluded symbols
+    if db_excluded:  # Only add if there are excluded symbols
+        reasons.setdefault("one_trade_per_bin", []).extend(list(db_excluded))
 
     # Apply top limit after filtering
     top_results = filtered[: top] if top else filtered
@@ -712,8 +803,6 @@ def watch_loop(
     symbols: List[str],
     interval: float,
     min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -730,8 +819,6 @@ def watch_loop(
             process_once(
                 symbols,
                 min_rrr=min_rrr,
-                min_prox_sl=min_prox_sl,
-                max_prox_sl=max_prox_sl,
                 top=top,
                 brief=brief,
                 debug=debug,
@@ -749,8 +836,6 @@ def watch_loop(
 def analyze(
     series: Dict[str, List[Snapshot]],
     min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
     as_of_ts: Optional[datetime],
     debug: bool = False,
 ) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
@@ -882,23 +967,6 @@ def analyze(
                 rrr = reward / risk
             if (tp is not None and sl is not None) and (tp - sl) != 0:
                 prox = (price - sl) / (tp - sl)
-                # Gate: require minimum distance from SL as fraction of range
-                try:
-                    user_min = float(min_prox_sl)
-                except Exception:
-                    user_min = 0.0
-                min_thr = max(MIN_PROX_BASE, max(0.0, min(0.49, user_min)))
-                if prox < min_thr:
-                    bump("too_close_to_sl_prox")
-                    continue
-                # Gate: require maximum distance from SL as fraction of range
-                try:
-                    max_thr = max(0.0, min(1.0, float(max_prox_sl)))
-                except Exception:
-                    max_thr = 1.0
-                if prox > max_thr:
-                    bump("too_far_from_sl_prox")
-                    continue
                 if prox <= 0.35:
                     prox_flag = "near_support"
                     prox_note = "near S1 support"
@@ -925,23 +993,6 @@ def analyze(
                 rrr = reward / risk
             if (sl is not None and tp is not None) and (sl - tp) != 0:
                 prox = (sl - price) / (sl - tp)
-                # Gate: require minimum distance from SL as fraction of range
-                try:
-                    user_min = float(min_prox_sl)
-                except Exception:
-                    user_min = 0.0
-                min_thr = max(MIN_PROX_BASE, max(0.0, min(0.49, user_min)))
-                if prox < min_thr:
-                    bump("too_close_to_sl_prox")
-                    continue
-                # Gate: require maximum distance from SL as fraction of range
-                try:
-                    max_thr = max(0.0, min(1.0, float(max_prox_sl)))
-                except Exception:
-                    max_thr = 1.0
-                if prox > max_thr:
-                    bump("too_far_from_sl_prox")
-                    continue
                 if prox <= 0.35:
                     prox_flag = "near_resistance"
                     prox_note = "near R1 resistance"
@@ -949,7 +1000,6 @@ def analyze(
                     prox_flag = "near_support"
                     prox_late = True
                     prox_note = "near S1 support (late)"
-
         if rrr is None or rrr <= 0:
             bump("invalid_rrr")
             continue
@@ -980,6 +1030,26 @@ def analyze(
                 bump("sl_too_close_to_spread")
                 if debug:
                     print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
+                continue
+
+        if tp is not None:
+            if bid is None or ask is None or ask <= bid:
+                bump("invalid_bid_ask_for_spread_calculation")
+                if debug:
+                    print(f"[DEBUG] Invalid bid/ask for TP spread calculation: sym={sym}, bid={bid}, ask={ask}")
+                continue
+
+            spread_abs = ask - bid
+            tp_distance: Optional[float] = None
+            if direction == "Buy":
+                tp_distance = tp - bid
+            else:
+                tp_distance = ask - tp
+
+            if tp_distance is None or (tp_distance + eps) < (10 * spread_abs):
+                bump("too_far_from_tp_prox")
+                if debug:
+                    print(f"[DEBUG] TP too close to spread: sym={sym}, dir={direction}, price={price}, tp={tp}, spread_abs={spread_abs}, distance={tp_distance}")
                 continue
 
 
@@ -1151,6 +1221,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
             cur.execute(f"PRAGMA table_info({table})")
             cols = {str(r[1]) for r in (cur.fetchall() or [])}
             has_detected = 'detected_at' in cols
+            has_prox_bin = 'proximity_bin' in cols
             # Try to migrate by adding detected_at if missing
             if not has_detected:
                 try:
@@ -1158,37 +1229,46 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     has_detected = True
                 except Exception:
                     has_detected = False
+            if not has_prox_bin:
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_bin TEXT")
+                    has_prox_bin = True
+                except Exception:
+                    has_prox_bin = False
 
+            column_list = [
+                "symbol", "direction", "price", "sl", "tp", "rrr", "score", "explain", "as_of"
+            ]
             if has_detected:
-                ins = (
-                    f"""
-                    INSERT INTO {table}
-                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at, proximity_to_sl)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM {table} t2
-                        LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
-                        WHERE t2.symbol = ?
-                          AND h.setup_id IS NULL
-                    )
-                    ON CONFLICT(symbol, direction, as_of) DO NOTHING
-                    """
+                column_list.append("detected_at")
+            column_list.append("proximity_to_sl")
+            if has_prox_bin:
+                column_list.append("proximity_bin")
+
+            select_placeholders = ["?" for _ in column_list]
+
+            gating_conditions = [
+                "COALESCE(t2.symbol, '') = COALESCE(?, '')",
+                "COALESCE(t2.direction, '') = COALESCE(?, '')",
+                "h.setup_id IS NULL",
+            ]
+            gating_has_bin = has_prox_bin
+            if gating_has_bin:
+                gating_conditions.insert(2, "COALESCE(t2.proximity_bin, '') = COALESCE(?, '')")
+
+            ins = (
+                f"""
+                INSERT INTO {table}
+                    ({', '.join(column_list)})
+                SELECT {', '.join(select_placeholders)}
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {table} t2
+                    LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
+                    WHERE {' AND '.join(gating_conditions)}
                 )
-            else:
-                ins = (
-                    f"""
-                    INSERT INTO {table}
-                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, proximity_to_sl)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM {table} t2
-                        LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
-                        WHERE t2.symbol = ?
-                          AND h.setup_id IS NULL
-                    )
-                    ON CONFLICT(symbol, direction, as_of) DO NOTHING
-                    """
-                )
+                ON CONFLICT(symbol, direction, as_of) DO NOTHING
+                """
+            )
 
             params: List[Tuple[object, ...]] = []
             for r in results:
@@ -1204,40 +1284,35 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     else:
                         detected_at_val = str(detected_at)
                 sym_val = r.get("symbol")
-                proximity_val = r.get("proximity_to_sl") # Get proximity value
+                direction_val = r.get("direction")
+                proximity_val = r.get("proximity_to_sl")
+                bin_val = _proximity_bin_label(proximity_val)
+
+                row_values: List[object] = [
+                    sym_val,
+                    direction_val,
+                    r.get("price"),
+                    r.get("sl"),
+                    r.get("tp"),
+                    r.get("rrr"),
+                    r.get("score"),
+                    r.get("explain"),
+                    as_of_val,
+                ]
                 if has_detected:
-                    params.append(
-                        (
-                            sym_val,
-                            r.get("direction"),
-                            r.get("price"),
-                            r.get("sl"),
-                            r.get("tp"),
-                            r.get("rrr"),
-                            r.get("score"),
-                            r.get("explain"),
-                            as_of_val,
-                            detected_at_val,
-                            proximity_val, # Add proximity to params
-                            sym_val,
-                        )
-                    )
-                else:
-                    params.append(
-                        (
-                            sym_val,
-                            r.get("direction"),
-                            r.get("price"),
-                            r.get("sl"),
-                            r.get("tp"),
-                            r.get("rrr"),
-                            r.get("score"),
-                            r.get("explain"),
-                            as_of_val,
-                            proximity_val, # Add proximity to params
-                            sym_val,
-                        )
-                    )
+                    row_values.append(detected_at_val)
+                row_values.append(proximity_val)
+                if has_prox_bin:
+                    row_values.append(bin_val)
+
+                gating_params_row: List[object] = [
+                    sym_val or "",
+                    direction_val or "",
+                ]
+                if gating_has_bin:
+                    gating_params_row.append(bin_val or "")
+
+                params.append(tuple(row_values + gating_params_row))
 
             if params:
                 before = conn.total_changes
@@ -1327,8 +1402,6 @@ def main() -> None:
             symbols=syms,
             interval=max(0.5, args.interval),
             min_rrr=args.min_rrr,
-            min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-            max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
             top=args.top,
             brief=args.brief,
             debug=args.debug,
@@ -1339,14 +1412,11 @@ def main() -> None:
     process_once(
         symbols=syms,
         min_rrr=args.min_rrr,
-        min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-        max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
         top=args.top,
         brief=args.brief,
         debug=args.debug,
         exclude_set=exclude_set,
     )
-
 
 if __name__ == "__main__":
     main()

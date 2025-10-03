@@ -227,9 +227,7 @@ class App(tk.Tk):
         # User-configurable exclude list for timelapse setups (comma-separated symbols)
         self.var_exclude_symbols = tk.StringVar(value="")
         # Min prox SL for timelapse setups
-        self.var_min_prox_sl = tk.StringVar(value="0.25")
         # Max prox SL for timelapse setups
-        self.var_max_prox_sl = tk.StringVar(value="0.5")
         # DB tab variables
         self.var_db_name = tk.StringVar(value=str(default_db_path()))
         self.var_since_hours = tk.IntVar(value=168)
@@ -251,8 +249,6 @@ class App(tk.Tk):
         # Persist on any change
         try:
             self.var_exclude_symbols.trace_add("write", self._on_exclude_changed)
-            self.var_min_prox_sl.trace_add("write", self._on_min_prox_changed)
-            self.var_max_prox_sl.trace_add("write", self._on_max_prox_changed)
             self.var_symbol_filter.trace_add("write", self._on_filter_changed)
             self.var_prox_symbol_filter.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_category.trace_add("write", self._on_prox_setting_changed)
@@ -335,19 +331,6 @@ class App(tk.Tk):
         ttk.Label(ex_frame, text="Exclude (comma):").pack(side=tk.LEFT)
         ent_ex = ttk.Entry(ex_frame, textvariable=self.var_exclude_symbols)
         ent_ex.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
-        # Min Prox SL input
-        mps_frame = ttk.Frame(tl)
-        mps_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
-        ttk.Label(mps_frame, text="Min Prox SL:").pack(side=tk.LEFT)
-        ent_mps = ttk.Entry(mps_frame, textvariable=self.var_min_prox_sl)
-        ent_mps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
-        # Max Prox SL input
-        mxps_frame = ttk.Frame(tl)
-        mxps_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
-        ttk.Label(mxps_frame, text="Max Prox SL:").pack(side=tk.LEFT)
-        ent_mxps = ttk.Entry(mxps_frame, textvariable=self.var_max_prox_sl)
-        ent_mxps.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
-
         # TP/SL Hits controls
         ht = ttk.LabelFrame(frm, text="TP/SL Hits --watch")
         ht.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.X, expand=True)
@@ -478,7 +461,7 @@ class App(tk.Tk):
 
         # Top: table container
         mid = ttk.Frame(splitter)
-        cols = ("symbol", "direction", "entry_utc3", "hit_time_utc3", "hit", "tp", "sl", "entry_price", "proximity_to_sl")
+        cols = ("symbol", "direction", "entry_utc3", "hit_time_utc3", "hit", "tp", "sl", "entry_price", "proximity_to_sl", "proximity_bin")
         self.db_tree = ttk.Treeview(mid, columns=cols, show='headings', height=12)
         self.db_tree.heading("symbol", text="Symbol")
         self.db_tree.heading("direction", text="Direction")
@@ -489,6 +472,7 @@ class App(tk.Tk):
         self.db_tree.heading("sl", text="SL")
         self.db_tree.heading("entry_price", text="Entry Price")
         self.db_tree.heading("proximity_to_sl", text="Prox to SL")
+        self.db_tree.heading("proximity_bin", text="Prox Bin")
         self.db_tree.column("symbol", width=120, anchor=tk.W)
         self.db_tree.column("direction", width=80, anchor=tk.W)
         self.db_tree.column("entry_utc3", width=180, anchor=tk.W)
@@ -498,6 +482,7 @@ class App(tk.Tk):
         self.db_tree.column("sl", width=100, anchor=tk.E)
         self.db_tree.column("entry_price", width=120, anchor=tk.E)
         self.db_tree.column("proximity_to_sl", width=100, anchor=tk.E)
+        self.db_tree.column("proximity_bin", width=90, anchor=tk.W)
 
         vs = ttk.Scrollbar(mid, orient=tk.VERTICAL, command=self.db_tree.yview)
         self.db_tree.configure(yscrollcommand=vs.set)
@@ -2386,7 +2371,7 @@ class App(tk.Tk):
         hit_status = self.var_hit_status.get()
         symbol_filter = self.var_symbol_filter.get().strip()
 
-        rows_display: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+        rows_display: list[tuple[str, str, str, str, str, str, str, str, str, str]] = []
         rows_meta: list[dict] = []
         error: str | None = None
         try:
@@ -2404,6 +2389,19 @@ class App(tk.Tk):
                 if cur.fetchone() is None:
                     rows_display = []
                 else:
+                    # Ensure proximity_bin column exists for display
+                    try:
+                        cur.execute("PRAGMA table_info(timelapse_setups)")
+                        cols = {str(r[1]) for r in (cur.fetchall() or [])}
+                        if 'proximity_bin' not in cols:
+                            try:
+                                cur.execute("ALTER TABLE timelapse_setups ADD COLUMN proximity_bin TEXT")
+                                conn.commit()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
                     from datetime import timezone as _tz
                     thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
                     sql = (
@@ -2411,7 +2409,7 @@ class App(tk.Tk):
                         SELECT s.id, s.symbol, s.direction, s.inserted_at,
                                h.hit_time_utc3, h.hit_time, h.hit, h.hit_price,
                                s.tp, s.sl, COALESCE(h.entry_price, s.price) AS entry_price,
-                               s.proximity_to_sl
+                               s.proximity_to_sl, s.proximity_bin
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
                         WHERE s.inserted_at >= ?
@@ -2421,10 +2419,11 @@ class App(tk.Tk):
                     cur.execute(sql, (thr,))
                     all_rows = cur.fetchall() or []
 
+
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
-                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl) = row
+                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin) = row
 
                         # Apply symbol category filter
                         if symbol_category != "All":
@@ -2452,7 +2451,7 @@ class App(tk.Tk):
                         filtered_rows.append(row)
 
                     # Process filtered rows
-                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl) in filtered_rows:
+                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''
                         dir_s = str(direction) if direction is not None else ''
                         try:
@@ -2483,7 +2482,8 @@ class App(tk.Tk):
                         sl_s = fmt_price(sl)
                         ep_s = fmt_price(entry_price)
                         prox_sl_s = fmt_price(proximity_to_sl)
-                        rows_display.append((sym_s, dir_s, ent_s, hit_s, hit_str, tp_s, sl_s, ep_s, prox_sl_s))
+                        prox_bin_s = str(proximity_bin) if proximity_bin not in (None, "") else ""
+                        rows_display.append((sym_s, dir_s, ent_s, hit_s, hit_str, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s))
                         # Raw/meta for chart
                         rows_meta.append({
                             'iid': None,  # to fill on UI insert
@@ -2496,6 +2496,7 @@ class App(tk.Tk):
                             'sl': float(sl) if sl is not None else None,
                             'hit_kind': hit_str if hit_str else None,
                             'hit_time_utc_str': (str(hit_time) if hit_time is not None else None),
+                            'proximity_bin': prox_bin_s,
                             'hit_price': (float(hit_price) if hit_price is not None else None),
                         })
             finally:
@@ -2527,13 +2528,13 @@ class App(tk.Tk):
             self.db_status.config(text=f"Error: {error}")
         else:
             new_selected_iid = None
-            for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s) in enumerate(rows_display):
+            for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s) in enumerate(rows_display):
                 tags = ()
                 if hit == 'TP':
                     tags = ('tp',)
                 elif hit == 'SL':
                     tags = ('sl',)
-                iid = self.db_tree.insert('', tk.END, values=(sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s), tags=tags)
+                iid = self.db_tree.insert('', tk.END, values=(sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s), tags=tags)
                 if idx < len(rows_meta):
                     meta = rows_meta[idx]
                     meta['iid'] = iid
@@ -3404,18 +3405,6 @@ class App(tk.Tk):
             ex = ""
         if ex:
             cmd += ["--exclude", ex]
-        try:
-            mps = (self.var_min_prox_sl.get() or "").strip()
-        except Exception:
-            mps = ""
-        if mps:
-            cmd += ["--min-prox-sl", mps]
-        try:
-            mxps = (self.var_max_prox_sl.get() or "").strip()
-        except Exception:
-            mxps = ""
-        if mxps:
-            cmd += ["--max-prox-sl", mxps]
         self.timelapse.cmd = cmd
         self.timelapse.start()
 
@@ -3565,18 +3554,6 @@ class App(tk.Tk):
                 self.var_exclude_symbols.set(ex)
             except Exception:
                 pass
-        mps = data.get("min_prox_sl")
-        if isinstance(mps, str):
-            try:
-                self.var_min_prox_sl.set(mps)
-            except Exception:
-                pass
-        mxps = data.get("max_prox_sl")
-        if isinstance(mxps, str):
-            try:
-                self.var_max_prox_sl.set(mxps)
-            except Exception:
-                pass
         since = data.get("since_hours")
         if isinstance(since, int):
             try:
@@ -3648,8 +3625,6 @@ class App(tk.Tk):
     def _save_settings(self) -> None:
         data = {
             "exclude_symbols": self.var_exclude_symbols.get() if self.var_exclude_symbols is not None else "",
-            "min_prox_sl": self.var_min_prox_sl.get() if self.var_min_prox_sl is not None else "0.25",
-            "max_prox_sl": self.var_max_prox_sl.get() if self.var_max_prox_sl is not None else "0.5",
             "since_hours": self.var_since_hours.get() if self.var_since_hours is not None else 168,
             "interval": self.var_interval.get() if self.var_interval is not None else 60,
             "symbol_category": self.var_symbol_category.get() if self.var_symbol_category is not None else "All",
@@ -3669,18 +3644,6 @@ class App(tk.Tk):
             pass
 
     def _on_exclude_changed(self, *args) -> None:
-        try:
-            self._save_settings()
-        except Exception:
-            pass
-
-    def _on_min_prox_changed(self, *args) -> None:
-        try:
-            self._save_settings()
-        except Exception:
-            pass
-
-    def _on_max_prox_changed(self, *args) -> None:
         try:
             self._save_settings()
         except Exception:

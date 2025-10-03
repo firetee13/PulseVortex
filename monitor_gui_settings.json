@@ -1,7 +1,5 @@
 {
   "exclude_symbols": "",
-  "min_prox_sl": "0.5",
-  "max_prox_sl": "0.8",
   "since_hours": 268,
   "interval": 120,
   "symbol_category": "All",
@@ -10,7 +8,7 @@
   "prox_since_hours": 336,
   "prox_min_trades": 5,
   "prox_symbol_filter": "",
-  "prox_category": "Forex",
+  "prox_category": "All",
   "prox_auto": false,
   "prox_interval": 300
 }

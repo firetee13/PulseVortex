@@ -568,7 +568,7 @@ class SlDistanceFilterTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         # No results should be produced due to SL too close to spread
         self.assertEqual(results, [])
         self.assertIn('sl_too_close_to_spread', reasons)
@@ -609,7 +609,7 @@ class SlDistanceFilterTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         # No results should be produced due to invalid bid/ask (ask <= bid)
         self.assertEqual(results, [])
         self.assertIn('invalid_bid_ask_for_spread_calculation', reasons)
@@ -658,7 +658,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): blocked_time.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=blocked_time, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=blocked_time, debug=False)
         self.assertEqual(results, [])
         self.assertIn('low_vol_time_window', reasons)
         self.assertIn(sym, reasons['low_vol_time_window'])
@@ -687,7 +687,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('no_recent_ticks', reasons)
         self.assertIn(sym, reasons['no_recent_ticks'])
@@ -716,7 +716,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('no_direction_consensus', reasons)
         self.assertIn(sym, reasons['no_direction_consensus'])
@@ -745,7 +745,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('no_live_bid_ask', reasons)
         self.assertIn(sym, reasons['no_live_bid_ask'])
@@ -774,7 +774,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('spread_avoid', reasons)
         self.assertIn(sym, reasons['spread_avoid'])
@@ -805,7 +805,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('missing_sl_tp', reasons)
         self.assertIn(sym, reasons['missing_sl_tp'])
@@ -836,7 +836,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('price_outside_buy_sr', reasons)
         self.assertIn(sym, reasons['price_outside_buy_sr'])
@@ -867,13 +867,13 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
         self.assertIn('price_outside_sell_sr', reasons)
         self.assertIn(sym, reasons['price_outside_sell_sr'])
 
-    def test_analyze_too_close_to_sl_prox(self):
-        # Test filtering when entry is too close to SL
+    def test_analyze_retains_setups_close_to_sl(self):
+        # When price sits near the stop, the setup should still be returned.
         now = datetime.now(UTC)
         sym = 'TESTIDX'
 
@@ -888,23 +888,25 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Ask'): 1.1001,
             tls.canonicalize_key('Strength 4H'): 0.6,
             tls.canonicalize_key('Strength 1D'): 0.2,
-            tls.canonicalize_key('Strength 1W'): 0.1,  # ensure overall Buy (>=2 positives)
+            tls.canonicalize_key('Strength 1W'): 0.1,
             tls.canonicalize_key('D1 Close'): 1.05,
             tls.canonicalize_key('D1 High'): 1.15,
             tls.canonicalize_key('D1 Low'): 0.95,
-            tls.canonicalize_key('S1 Level M5'): 1.09,  # SL (very close to entry)
-            tls.canonicalize_key('R1 Level M5'): 1.15,  # TP
+            tls.canonicalize_key('S1 Level M5'): 1.09,
+            tls.canonicalize_key('R1 Level M5'): 1.15,
             tls.canonicalize_key('Recent Tick'): 1,
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.1, max_prox_sl=1.0, as_of_ts=now, debug=False)
-        self.assertEqual(results, [])
-        self.assertIn('too_close_to_sl_prox', reasons)
-        self.assertIn(sym, reasons['too_close_to_sl_prox'])
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
+        self.assertEqual(len(results), 1)
+        self.assertNotIn('too_close_to_sl_prox', reasons)
+        prox = results[0].get('proximity_to_sl')
+        self.assertIsNotNone(prox)
+        self.assertLess(prox, 0.25)
 
-    def test_analyze_too_far_from_sl_prox(self):
-        # Test filtering when entry is too far from SL
+    def test_analyze_retains_setups_far_from_sl(self):
+        # When price hugs the target end of the range, the setup should still be returned.
         now = datetime.now(UTC)
         sym = 'TESTIDX'
 
@@ -919,20 +921,52 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Ask'): 1.1001,
             tls.canonicalize_key('Strength 4H'): 0.6,
             tls.canonicalize_key('Strength 1D'): 0.2,
-            tls.canonicalize_key('Strength 1W'): 0.1,  # ensure overall Buy (>=2 positives)
+            tls.canonicalize_key('Strength 1W'): 0.1,
             tls.canonicalize_key('D1 Close'): 1.05,
             tls.canonicalize_key('D1 High'): 1.15,
             tls.canonicalize_key('D1 Low'): 0.95,
-            tls.canonicalize_key('S1 Level M5'): 0.95,  # SL (far from entry)
-            tls.canonicalize_key('R1 Level M5'): 1.15,  # TP
+            tls.canonicalize_key('S1 Level M5'): 0.95,
+            tls.canonicalize_key('R1 Level M5'): 1.15,
             tls.canonicalize_key('Recent Tick'): 1,
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=0.1, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
+        self.assertEqual(len(results), 1)
+        self.assertNotIn('too_far_from_sl_prox', reasons)
+        prox = results[0].get('proximity_to_sl')
+        self.assertIsNotNone(prox)
+        self.assertGreater(prox, 0.6)
+
+    def test_analyze_tp_too_close_to_spread_buy(self):
+        now = datetime.now(UTC)
+        sym = 'TESTIDX'
+
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('D1 Close'): 1.0,
+            tls.canonicalize_key('Strength 4H'): 0.1,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): 1.1000,
+            tls.canonicalize_key('Ask'): 1.1001,
+            tls.canonicalize_key('Strength 4H'): 0.6,
+            tls.canonicalize_key('Strength 1D'): 0.2,
+            tls.canonicalize_key('Strength 1W'): 0.1,
+            tls.canonicalize_key('D1 Close'): 1.05,
+            tls.canonicalize_key('D1 High'): 1.1008,
+            tls.canonicalize_key('D1 Low'): 1.08,
+            tls.canonicalize_key('S1 Level M5'): 1.09,
+            tls.canonicalize_key('R1 Level M5'): 1.1008,
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
         self.assertEqual(results, [])
-        self.assertIn('too_far_from_sl_prox', reasons)
-        self.assertIn(sym, reasons['too_far_from_sl_prox'])
+        self.assertIn('too_far_from_tp_prox', reasons)
+        self.assertIn(sym, reasons['too_far_from_tp_prox'])
 
     def test_analyze_valid_buy_setup(self):
         # Test a valid buy setup
@@ -960,7 +994,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
 
         # Should have one result
         self.assertEqual(len(results), 1)
@@ -1002,7 +1036,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
         series = {sym: [first, last]}
-        results, reasons = tls.analyze(series, min_rrr=1.0, min_prox_sl=0.0, max_prox_sl=1.0, as_of_ts=now, debug=False)
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
 
         # Should have one result
         self.assertEqual(len(results), 1)
@@ -1121,8 +1155,6 @@ class ProcessOnceTests(unittest.TestCase):
                 tls.process_once(
                     symbols=symbols,
                     min_rrr=1.0,
-                    min_prox_sl=0.0,
-                    max_prox_sl=1.0,
                     top=None,
                     brief=True,
                     debug=False
@@ -1140,8 +1172,6 @@ class ProcessOnceTests(unittest.TestCase):
                 tls.process_once(
                     symbols=symbols,
                     min_rrr=1.0,
-                    min_prox_sl=0.0,
-                    max_prox_sl=1.0,
                     top=None,
                     brief=True,
                     debug=False,
@@ -1174,8 +1204,6 @@ class ProcessOnceTests(unittest.TestCase):
                     tls.process_once(
                         symbols=symbols,
                         min_rrr=1.0,
-                        min_prox_sl=0.0,
-                        max_prox_sl=1.0,
                         top=None,
                         brief=True,
                         debug=False
@@ -1208,8 +1236,6 @@ class ProcessOnceTests(unittest.TestCase):
                         tls.process_once(
                             symbols=symbols,
                             min_rrr=1.0,
-                            min_prox_sl=0.0,
-                            max_prox_sl=1.0,
                             top=None,
                             brief=True,
                             debug=True
@@ -1255,8 +1281,6 @@ class ProcessOnceTests(unittest.TestCase):
                     tls.process_once(
                         symbols=symbols,
                         min_rrr=1.0,
-                        min_prox_sl=0.0,
-                        max_prox_sl=1.0,
                         top=1,  # Only top 1
                         brief=True,
                         debug=False
@@ -1296,8 +1320,6 @@ class WatchLoopTests(unittest.TestCase):
                         symbols=symbols,
                         interval=1.0,
                         min_rrr=1.0,
-                        min_prox_sl=0.0,
-                        max_prox_sl=1.0,
                         top=None,
                         brief=True,
                         debug=True
@@ -1319,8 +1341,6 @@ class WatchLoopTests(unittest.TestCase):
                         symbols=symbols,
                         interval=1.0,
                         min_rrr=1.0,
-                        min_prox_sl=0.0,
-                        max_prox_sl=1.0,
                         top=None,
                         brief=True,
                         debug=True,
@@ -1340,8 +1360,6 @@ class WatchLoopTests(unittest.TestCase):
             tls._watch_loop_events(
                 symbols=symbols,
                 min_rrr=1.0,
-                min_prox_sl=0.0,
-                max_prox_sl=1.0,
                 top=None,
                 brief=True,
                 debug=True

@@ -1,9 +1,9 @@
 {
   "exclude_symbols": "",
   "since_hours": 268,
-  "interval": 120,
-  "symbol_category": "All",
-  "hit_status": "All",
+  "interval": 5,
+  "symbol_category": "Indices",
+  "hit_status": "Hits",
   "symbol_filter": "",
   "prox_since_hours": 336,
   "prox_min_trades": 5,

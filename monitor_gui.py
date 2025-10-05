@@ -93,7 +93,7 @@ except Exception:
 
 UTC = timezone.utc
 DISPLAY_TZ = timezone(timedelta(hours=3))  # UTC+3 for chart display
-QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45–00:59 UTC+3).'
+QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45-00:59 UTC+3 and weekends).'
 
 
 class ProcController:
@@ -3043,7 +3043,7 @@ class App(tk.Tk):
                     0,
                     self._chart_render_error,
                     rid,
-                    "Requested window falls entirely inside quiet trading hours (23:30–01:00 UTC+3).",
+                    "Requested window falls entirely inside quiet trading hours (23:45-00:59 UTC+3 or weekends).",
                 )
                 return
 
@@ -3376,7 +3376,7 @@ class App(tk.Tk):
             if self._hits_should_run and not self._hits_quiet_paused:
                 self._enqueue_log(
                     "hits",
-                    "Quiet trading window active (23:30–01:00 UTC+3); hits monitor paused.\n",
+                    "Quiet trading window active (23:45-00:59 UTC+3 or weekends); hits monitor paused.\n",
                 )
             self._hits_quiet_paused = True
         else:
@@ -3418,7 +3418,7 @@ class App(tk.Tk):
             if not self._hits_quiet_paused:
                 self._enqueue_log(
                     "hits",
-                    "Quiet trading window active (23:30–01:00 UTC+3); deferring hits monitor start.\n",
+                    "Quiet trading window active (23:45-00:59 UTC+3 or weekends); deferring hits monitor start.\n",
                 )
             self._hits_quiet_paused = True
             try:

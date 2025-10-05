@@ -415,6 +415,7 @@ class FilterFunctionsTests(unittest.TestCase):
                 score REAL,
                 explain TEXT,
                 as_of TEXT NOT NULL,
+                proximity_to_sl REAL,
                 UNIQUE(symbol, direction, as_of)
             )
         """)
@@ -437,20 +438,23 @@ class FilterFunctionsTests(unittest.TestCase):
             )
         """)
 
-        # Insert an open setup (no hit record)
+        # Insert an open setup (no hit record) with proximity_to_sl to test bin filtering
         cur.execute("""
-            INSERT INTO timelapse_setups (symbol, direction, price, sl, tp, rrr, score, explain, as_of)
-            VALUES ('EURUSD', 'Buy', 1.1, 1.0, 1.2, 2.0, 1.5, 'test', '2023-01-01 00:00:00')
+            INSERT INTO timelapse_setups (symbol, direction, price, sl, tp, rrr, score, explain, as_of, proximity_to_sl)
+            VALUES ('EURUSD', 'Buy', 1.1, 1.0, 1.2, 2.0, 1.5, 'test', '2023-01-01 00:00:00', 0.3)
         """)
 
         conn.commit()
         conn.close()
 
-        # Test filtering
-        results = [{"symbol": "EURUSD"}, {"symbol": "GBPUSD"}]
+        # Test filtering with results that have proximity_to_sl
+        results = [
+            {"symbol": "EURUSD", "direction": "Buy", "proximity_to_sl": 0.3},
+            {"symbol": "GBPUSD", "direction": "Buy", "proximity_to_sl": 0.5}
+        ]
         filtered, excluded = tls._filter_recent_duplicates(results)  # type: ignore
 
-        # EURUSD should be filtered out
+        # EURUSD should be filtered out because it has same symbol, direction, and proximity bin
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["symbol"], "GBPUSD")
         self.assertEqual(excluded, {"EURUSD"})
@@ -1353,21 +1357,21 @@ class WatchLoopTests(unittest.TestCase):
                     self.assertTrue(any('Will filter out symbols' in call[0][0] for call in mock_print.call_args_list))
 
     def test_watch_loop_events(self):
-        # Test _watch_loop_events function
+        # Test watch_loop function directly since _watch_loop_events was removed
         symbols = ['EURUSD', 'GBPUSD']
 
-        with patch.object(tls, 'watch_loop') as mock_watch:
-            tls._watch_loop_events(
-                symbols=symbols,
-                min_rrr=1.0,
-                top=None,
-                brief=True,
-                debug=True
-            )
-            # Check that watch_loop was called with interval=1.0
-            mock_watch.assert_called_once()
-            args, kwargs = mock_watch.call_args
-            self.assertEqual(kwargs['interval'], 1.0)
+        with patch('time.sleep', side_effect=KeyboardInterrupt()):
+            with patch.object(tls, 'process_once') as mock_process:
+                tls.watch_loop(
+                    symbols=symbols,
+                    interval=1.0,
+                    min_rrr=1.0,
+                    top=None,
+                    brief=True,
+                    debug=True
+                )
+                # Check that process_once was called
+                mock_process.assert_called()
 
 
 if __name__ == '__main__':

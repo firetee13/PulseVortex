@@ -66,6 +66,35 @@ class QuietHoursTests(unittest.TestCase):
             datetime(2024, 5, 1, 21, 59, tzinfo=UTC),
         )
 
+    def test_weekend_is_quiet(self) -> None:
+        saturday_midday = datetime(2024, 5, 4, 9, 0, tzinfo=UTC)
+        sunday_evening = datetime(2024, 5, 5, 20, 0, tzinfo=UTC)
+        monday_boundary = datetime(2024, 5, 5, 21, 58, tzinfo=UTC)
+
+        self.assertTrue(is_quiet_time(saturday_midday))
+        self.assertTrue(is_quiet_time(sunday_evening))
+        self.assertTrue(is_quiet_time(monday_boundary))
+
+        monday_active = datetime(2024, 5, 5, 22, 0, tzinfo=UTC)
+        self.assertFalse(is_quiet_time(monday_active))
+
+    def test_quiet_ranges_include_weekend_block(self) -> None:
+        start = datetime(2024, 5, 3, 18, 0, tzinfo=UTC)
+        end = datetime(2024, 5, 6, 0, 0, tzinfo=UTC)
+        ranges = list(iter_quiet_utc_ranges(start, end))
+
+        expected = [
+            (datetime(2024, 5, 3, 20, 45, tzinfo=UTC), datetime(2024, 5, 5, 21, 59, tzinfo=UTC)),
+        ]
+        self.assertEqual(ranges, expected)
+
+    def test_next_transition_during_weekend(self) -> None:
+        sunday_noon = datetime(2024, 5, 5, 12, 0, tzinfo=UTC)
+        self.assertEqual(
+            next_quiet_transition(sunday_noon),
+            datetime(2024, 5, 5, 21, 59, tzinfo=UTC),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

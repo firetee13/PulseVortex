@@ -27,6 +27,9 @@ QUIET_WINDOWS_UTC3: Tuple[QuietWindow, ...] = (
 )
 
 
+WEEKEND_START_WEEKDAY = 5  # Saturday in Python's weekday()
+
+
 def _as_utc(dt: datetime) -> datetime:
     """Return ``dt`` as a timezone-aware UTC datetime."""
 
@@ -46,6 +49,14 @@ def _daily_quiet_intervals(day_local: date) -> List[Tuple[datetime, datetime]]:
         else:
             end_local = datetime.combine(day_local, window.end, tzinfo=UTC_PLUS_3)
         intervals.append((start_local.astimezone(UTC), end_local.astimezone(UTC)))
+
+    if day_local.weekday() == WEEKEND_START_WEEKDAY:
+        weekend_start_local = datetime.combine(day_local, time.min, tzinfo=UTC_PLUS_3)
+        weekend_end_local = datetime.combine(
+            day_local + timedelta(days=2), time(hour=0, minute=59), tzinfo=UTC_PLUS_3
+        )
+        intervals.append((weekend_start_local.astimezone(UTC), weekend_end_local.astimezone(UTC)))
+
     return intervals
 
 
@@ -72,9 +83,21 @@ def iter_quiet_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[date
         day += timedelta(days=1)
     intervals.sort(key=lambda rng: rng[0])
 
+    merged: List[Tuple[datetime, datetime]] = []
     for qs, qe in intervals:
-        if qs < qe:
-            yield qs, qe
+        if qs >= qe:
+            continue
+        if not merged:
+            merged.append((qs, qe))
+            continue
+        last_start, last_end = merged[-1]
+        if qs <= last_end:
+            merged[-1] = (last_start, max(last_end, qe))
+        else:
+            merged.append((qs, qe))
+
+    for qs, qe in merged:
+        yield qs, qe
 
 
 def iter_active_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[datetime, datetime]]:
@@ -100,13 +123,12 @@ def is_quiet_time(dt: datetime) -> bool:
 
     dt_utc = _as_utc(dt)
     dt_local = dt_utc.astimezone(UTC_PLUS_3)
-    local_time = dt_local.timetz().replace(tzinfo=None)
-    for window in QUIET_WINDOWS_UTC3:
-        if not window.spans_midnight():
-            if window.start <= local_time < window.end:
-                return True
-        else:
-            if local_time >= window.start or local_time < window.end:
+    day = dt_local.date()
+
+    for delta_days in (-1, 0, 1):
+        curr_day = day + timedelta(days=delta_days)
+        for start_utc, end_utc in _daily_quiet_intervals(curr_day):
+            if start_utc <= dt_utc < end_utc:
                 return True
     return False
 
@@ -115,20 +137,19 @@ def next_quiet_transition(dt: datetime) -> datetime:
     """Return the next UTC instant where quiet/active state toggles."""
 
     dt_utc = _as_utc(dt)
-    dt_local = dt_utc.astimezone(UTC_PLUS_3)
-    day = dt_local.date()
-    candidates: List[datetime] = []
-    for delta_days in (-1, 0, 1, 2):
-        curr_day = day + timedelta(days=delta_days)
-        for interval in _daily_quiet_intervals(curr_day):
-            start_utc, end_utc = interval
-            if start_utc > dt_utc:
-                candidates.append(start_utc)
-            if end_utc > dt_utc:
-                candidates.append(end_utc)
-    if not candidates:
-        return dt_utc
-    return min(candidates)
+    inside_quiet = is_quiet_time(dt_utc)
+
+    search_start = dt_utc - timedelta(days=2)
+    search_end = dt_utc + timedelta(days=7)
+    intervals = list(iter_quiet_utc_ranges(search_start, search_end))
+
+    for start_utc, end_utc in intervals:
+        if start_utc <= dt_utc < end_utc:
+            return end_utc
+        if dt_utc < start_utc and not inside_quiet:
+            return start_utc
+
+    return dt_utc
 
 
 __all__ = [

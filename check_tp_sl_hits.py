@@ -66,6 +66,7 @@ from monitor.mt5_client import (
     to_server_naive,
 )
 from monitor.quiet_hours import iter_active_utc_ranges, is_quiet_time
+from monitor.symbols import classify_symbol
 
 UTC = timezone.utc
 
@@ -402,6 +403,8 @@ def _evaluate_setup(
     windows_checked = 0
     new_cursor = max(progress, cursor)
 
+    asset_kind = classify_symbol(resolved_symbol)
+
     for window in merged_windows:
         if hit is not None:
             break
@@ -413,7 +416,14 @@ def _evaluate_setup(
         if window_end <= window_start:
             continue
 
-        active_ranges = list(iter_active_utc_ranges(window_start, window_end))
+        active_ranges = list(
+            iter_active_utc_ranges(
+                window_start,
+                window_end,
+                asset_kind=asset_kind,
+                symbol=resolved_symbol,
+            )
+        )
         if not active_ranges:
             new_cursor = max(new_cursor, min(window_end, now_utc))
             continue
@@ -443,7 +453,11 @@ def _evaluate_setup(
             if candidate_hit is not None:
                 if candidate_hit.time_utc <= setup.as_of_utc + timedelta(milliseconds=1):
                     ignored_hit = True
-                elif is_quiet_time(candidate_hit.time_utc):
+                elif is_quiet_time(
+                    candidate_hit.time_utc,
+                    asset_kind=asset_kind,
+                    symbol=resolved_symbol,
+                ):
                     ignored_hit = True
                 else:
                     hit = candidate_hit

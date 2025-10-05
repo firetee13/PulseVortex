@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterator, List, Tuple
 
+from monitor.symbols import classify_symbol
+
 UTC = timezone.utc
 UTC_PLUS_3 = timezone(timedelta(hours=3))
 
@@ -38,7 +40,7 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.astimezone(UTC)
 
 
-def _daily_quiet_intervals(day_local: date) -> List[Tuple[datetime, datetime]]:
+def _daily_quiet_intervals(day_local: date, weekend_quiet: bool) -> List[Tuple[datetime, datetime]]:
     """Compute quiet intervals for a given local day as UTC datetimes."""
 
     intervals: List[Tuple[datetime, datetime]] = []
@@ -50,7 +52,7 @@ def _daily_quiet_intervals(day_local: date) -> List[Tuple[datetime, datetime]]:
             end_local = datetime.combine(day_local, window.end, tzinfo=UTC_PLUS_3)
         intervals.append((start_local.astimezone(UTC), end_local.astimezone(UTC)))
 
-    if day_local.weekday() == WEEKEND_START_WEEKDAY:
+    if weekend_quiet and day_local.weekday() == WEEKEND_START_WEEKDAY:
         weekend_start_local = datetime.combine(day_local, time.min, tzinfo=UTC_PLUS_3)
         weekend_end_local = datetime.combine(
             day_local + timedelta(days=2), time(hour=0, minute=59), tzinfo=UTC_PLUS_3
@@ -60,7 +62,21 @@ def _daily_quiet_intervals(day_local: date) -> List[Tuple[datetime, datetime]]:
     return intervals
 
 
-def iter_quiet_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[datetime, datetime]]:
+def _resolve_asset_kind(asset_kind: str | None, symbol: str | None) -> str | None:
+    if asset_kind:
+        return asset_kind.lower()
+    if symbol:
+        return classify_symbol(symbol)
+    return None
+
+
+def iter_quiet_utc_ranges(
+    start: datetime,
+    end: datetime,
+    *,
+    asset_kind: str | None = None,
+    symbol: str | None = None,
+) -> Iterator[Tuple[datetime, datetime]]:
     """Yield quiet intervals in UTC overlapping the [start, end) window."""
 
     start_utc = _as_utc(start)
@@ -73,9 +89,12 @@ def iter_quiet_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[date
     day = start_local.date() - timedelta(days=1)
     last_day = end_local.date() + timedelta(days=1)
 
+    resolved_kind = _resolve_asset_kind(asset_kind, symbol)
+    weekend_quiet = resolved_kind != "crypto"
+
     intervals: List[Tuple[datetime, datetime]] = []
     while day <= last_day:
-        for interval in _daily_quiet_intervals(day):
+        for interval in _daily_quiet_intervals(day, weekend_quiet):
             qs, qe = interval
             if qe <= start_utc or qs >= end_utc:
                 continue
@@ -100,7 +119,13 @@ def iter_quiet_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[date
         yield qs, qe
 
 
-def iter_active_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[datetime, datetime]]:
+def iter_active_utc_ranges(
+    start: datetime,
+    end: datetime,
+    *,
+    asset_kind: str | None = None,
+    symbol: str | None = None,
+) -> Iterator[Tuple[datetime, datetime]]:
     """Yield UTC sub-ranges that exclude quiet windows within [start, end)."""
 
     start_utc = _as_utc(start)
@@ -108,7 +133,7 @@ def iter_active_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[dat
     if start_utc >= end_utc:
         return
 
-    quiet = list(iter_quiet_utc_ranges(start_utc, end_utc))
+    quiet = list(iter_quiet_utc_ranges(start_utc, end_utc, asset_kind=asset_kind, symbol=symbol))
     cursor = start_utc
     for qs, qe in quiet:
         if cursor < qs:
@@ -118,30 +143,48 @@ def iter_active_utc_ranges(start: datetime, end: datetime) -> Iterator[Tuple[dat
         yield cursor, end_utc
 
 
-def is_quiet_time(dt: datetime) -> bool:
-    """Return True when ``dt`` (interpreted as UTC if naive) is inside a quiet window."""
+def is_quiet_time(
+    dt: datetime,
+    *,
+    asset_kind: str | None = None,
+    symbol: str | None = None,
+) -> bool:
+    """Return True when ``dt`` is inside a quiet window for the given asset kind."""
 
     dt_utc = _as_utc(dt)
     dt_local = dt_utc.astimezone(UTC_PLUS_3)
     day = dt_local.date()
-
+    resolved_kind = _resolve_asset_kind(asset_kind, symbol)
+    weekend_quiet = resolved_kind != "crypto"
     for delta_days in (-1, 0, 1):
         curr_day = day + timedelta(days=delta_days)
-        for start_utc, end_utc in _daily_quiet_intervals(curr_day):
+        for start_utc, end_utc in _daily_quiet_intervals(curr_day, weekend_quiet):
             if start_utc <= dt_utc < end_utc:
                 return True
     return False
 
 
-def next_quiet_transition(dt: datetime) -> datetime:
+def next_quiet_transition(
+    dt: datetime,
+    *,
+    asset_kind: str | None = None,
+    symbol: str | None = None,
+) -> datetime:
     """Return the next UTC instant where quiet/active state toggles."""
 
     dt_utc = _as_utc(dt)
-    inside_quiet = is_quiet_time(dt_utc)
+    inside_quiet = is_quiet_time(dt_utc, asset_kind=asset_kind, symbol=symbol)
 
     search_start = dt_utc - timedelta(days=2)
     search_end = dt_utc + timedelta(days=7)
-    intervals = list(iter_quiet_utc_ranges(search_start, search_end))
+    intervals = list(
+        iter_quiet_utc_ranges(
+            search_start,
+            search_end,
+            asset_kind=asset_kind,
+            symbol=symbol,
+        )
+    )
 
     for start_utc, end_utc in intervals:
         if start_utc <= dt_utc < end_utc:

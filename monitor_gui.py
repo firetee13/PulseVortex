@@ -49,6 +49,7 @@ from monitor.quiet_hours import (
     is_quiet_time,
     next_quiet_transition,
 )
+from monitor.symbols import classify_symbol
 
 # Plotting
 try:
@@ -93,7 +94,7 @@ except Exception:
 
 UTC = timezone.utc
 DISPLAY_TZ = timezone(timedelta(hours=3))  # UTC+3 for chart display
-QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45-00:59 UTC+3 and weekends).'
+QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45-00:59 UTC+3; weekends for non-crypto).'
 
 
 class ProcController:
@@ -540,6 +541,7 @@ class App(tk.Tk):
         self._chart_active_req_id: int | None = None
         self._mt5_inited = False
         self._chart_quiet_paused = False
+        self._chart_last_symbol: str | None = None
         # Proximity chart state
         self._prox_fig = None
         self._prox_ax_bins = None
@@ -2090,55 +2092,8 @@ class App(tk.Tk):
 
     def _classify_symbol(self, sym: str) -> str:
         """Heuristically classify a symbol as 'forex', 'crypto', or 'indices'."""
-        s = (sym or '').upper()
 
-        # Crypto keywords/tickers
-        crypto_tickers = [
-            # Common crypto tickers (include broker aliases)
-            'BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOGE', 'BNB', 'DOT', 'AVAX', 'LINK',
-            'LNK',  # alias used by some brokers for Chainlink (LINK)
-            'LTC', 'BCH', 'XLM', 'TRX', 'ETC', 'UNI', 'ATOM', 'APT', 'SHIB', 'PEPE',
-            'AVX',  # Avalanche alias
-            'DOG',  # Dogecoin alias
-            'XTZ'   # Tezos
-        ]
-        if any(t in s for t in crypto_tickers):
-            return 'crypto'
-
-        # Indices keywords
-        index_keys = [
-            'US30', 'US100', 'US500', 'SP500', 'SPX', 'NDX', 'NAS100', 'USTEC',
-            'DAX', 'DE30', 'DE40', 'GER30', 'GER40',
-            'FTSE', 'UK100', 'CAC', 'FCHI', 'FR40',
-            'JP225', 'NIKKEI', 'N225',
-            'AUS200', 'ASX200',
-            'HK50', 'HSI',
-            'ES35', 'IBEX', 'IT40', 'EU50', 'STOXX'
-        ]
-        if any(k in s for k in index_keys):
-            return 'indices'
-
-        # Forex detection by ISO currency pairs
-        iso_ccy = {
-            'USD','EUR','JPY','GBP','AUD','NZD','CAD','CHF','NOK','SEK','DKK',
-            'ZAR','TRY','MXN','PLN','CZK','HUF','CNH','CNY','HKD','SGD'
-        }
-        metals = {'XAU','XAG','XPT','XPD'}  # treat metals as forex-style pairs
-        def is_pair(x: str) -> bool:
-            if len(x) >= 6:
-                a = x[:3]; b = x[3:6]
-                if (a in iso_ccy or a in metals) and (b in iso_ccy):
-                    return True
-            return False
-        if is_pair(s):
-            return 'forex'
-
-        # Fallbacks
-        if s.endswith('USD') and any(t in s for t in crypto_tickers):
-            return 'crypto'
-        if any(ch.isdigit() for ch in s):
-            return 'indices'
-        return 'forex'
+        return classify_symbol(sym)
 
     def _pnl_category_render(self, title: str, ax, fig, canvas, status_label, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
         """Common renderer for 10k-notional category charts."""
@@ -2716,7 +2671,8 @@ class App(tk.Tk):
 
     def _chart_quiet_guard(self) -> None:
         try:
-            if is_quiet_time(datetime.now(UTC)):
+            last_symbol = getattr(self, '_chart_last_symbol', None)
+            if is_quiet_time(datetime.now(UTC), symbol=last_symbol):
                 if not self._chart_quiet_paused:
                     self._chart_pause_for_quiet()
             else:
@@ -2751,13 +2707,14 @@ class App(tk.Tk):
         if not symbol or not entry_utc_str:
             self._set_chart_message('Missing symbol or entry time; cannot render chart.')
             return
+        self._chart_last_symbol = symbol
         try:
             entry_utc = datetime.fromisoformat(entry_utc_str).replace(tzinfo=UTC)
         except Exception:
             self._set_chart_message('Invalid entry time format.')
             return
         now_utc = datetime.now(UTC)
-        if is_quiet_time(now_utc):
+        if is_quiet_time(now_utc, symbol=symbol):
             self._chart_pause_for_quiet()
             return
         self._chart_quiet_paused = False
@@ -3036,14 +2993,26 @@ class App(tk.Tk):
                 start_server = start_utc.replace(tzinfo=None)
                 end_server = end_utc.replace(tzinfo=None)
             # Step 4: Fetch M1 bars first; fall back to ticks only if necessary
-            quiet_segments = list(iter_quiet_utc_ranges(start_utc, fetch_end_utc))
-            active_ranges = list(iter_active_utc_ranges(start_utc, fetch_end_utc))
+            quiet_segments = list(
+                iter_quiet_utc_ranges(
+                    start_utc,
+                    fetch_end_utc,
+                    symbol=symbol,
+                )
+            )
+            active_ranges = list(
+                iter_active_utc_ranges(
+                    start_utc,
+                    fetch_end_utc,
+                    symbol=symbol,
+                )
+            )
             if not active_ranges:
                 self.after(
                     0,
                     self._chart_render_error,
                     rid,
-                    "Requested window falls entirely inside quiet trading hours (23:45-00:59 UTC+3 or weekends).",
+                    "Requested window falls entirely inside quiet trading hours (23:45-00:59 UTC+3 for this symbol).",
                 )
                 return
 
@@ -3089,7 +3058,7 @@ class App(tk.Tk):
             def _finish():
                 if self._chart_active_req_id != rid:
                     return
-                if is_quiet_time(datetime.now(UTC)):
+                if is_quiet_time(datetime.now(UTC), symbol=symbol):
                     self._chart_render_quiet(rid)
                     return
                 self._chart_render_draw(rid, symbol, times, opens, highs, lows, closes,
@@ -3363,9 +3332,9 @@ class App(tk.Tk):
         """Pause/resume the hits monitor when the quiet window is active."""
 
         now_utc = datetime.now(UTC)
-        quiet_active = is_quiet_time(now_utc)
+        quiet_active = is_quiet_time(now_utc, asset_kind="crypto")
         try:
-            transition = next_quiet_transition(now_utc)
+            transition = next_quiet_transition(now_utc, asset_kind="crypto")
             delta_ms = int(max(1.0, min(60.0, (transition - now_utc).total_seconds())) * 1000)
         except Exception:
             delta_ms = 30000
@@ -3376,7 +3345,7 @@ class App(tk.Tk):
             if self._hits_should_run and not self._hits_quiet_paused:
                 self._enqueue_log(
                     "hits",
-                    "Quiet trading window active (23:45-00:59 UTC+3 or weekends); hits monitor paused.\n",
+                    "Quiet trading window active (23:45-00:59 UTC+3); hits monitor paused.\n",
                 )
             self._hits_quiet_paused = True
         else:
@@ -3414,11 +3383,11 @@ class App(tk.Tk):
     def _start_hits(self) -> None:
         self._hits_should_run = True
         now_utc = datetime.now(UTC)
-        if is_quiet_time(now_utc):
+        if is_quiet_time(now_utc, asset_kind="crypto"):
             if not self._hits_quiet_paused:
                 self._enqueue_log(
                     "hits",
-                    "Quiet trading window active (23:45-00:59 UTC+3 or weekends); deferring hits monitor start.\n",
+                    "Quiet trading window active (23:45-00:59 UTC+3); deferring hits monitor start.\n",
                 )
             self._hits_quiet_paused = True
             try:

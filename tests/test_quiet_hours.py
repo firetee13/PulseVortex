@@ -95,6 +95,35 @@ class QuietHoursTests(unittest.TestCase):
             datetime(2024, 5, 5, 21, 59, tzinfo=UTC),
         )
 
+    def test_crypto_weekend_active(self) -> None:
+        saturday_midday = datetime(2024, 5, 4, 9, 0, tzinfo=UTC)
+        sunday_evening = datetime(2024, 5, 5, 20, 0, tzinfo=UTC)
+
+        self.assertFalse(is_quiet_time(saturday_midday, asset_kind="crypto"))
+        self.assertFalse(is_quiet_time(sunday_evening, asset_kind="crypto"))
+
+        nightly_quiet = datetime(2024, 5, 5, 20, 50, tzinfo=UTC)
+        self.assertTrue(is_quiet_time(nightly_quiet, asset_kind="crypto"))
+
+    def test_crypto_quiet_ranges_exclude_weekend_block(self) -> None:
+        start = datetime(2024, 5, 3, 18, 0, tzinfo=UTC)
+        end = datetime(2024, 5, 6, 0, 0, tzinfo=UTC)
+        ranges = list(iter_quiet_utc_ranges(start, end, asset_kind="crypto"))
+
+        expected = [
+            (datetime(2024, 5, 3, 20, 45, tzinfo=UTC), datetime(2024, 5, 3, 21, 59, tzinfo=UTC)),
+            (datetime(2024, 5, 4, 20, 45, tzinfo=UTC), datetime(2024, 5, 4, 21, 59, tzinfo=UTC)),
+            (datetime(2024, 5, 5, 20, 45, tzinfo=UTC), datetime(2024, 5, 5, 21, 59, tzinfo=UTC)),
+        ]
+        self.assertEqual(ranges, expected)
+
+    def test_crypto_next_transition_during_weekend(self) -> None:
+        sunday_noon = datetime(2024, 5, 5, 12, 0, tzinfo=UTC)
+        self.assertEqual(
+            next_quiet_transition(sunday_noon, asset_kind="crypto"),
+            datetime(2024, 5, 5, 20, 45, tzinfo=UTC),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

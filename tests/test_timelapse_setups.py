@@ -539,7 +539,7 @@ class SlDistanceFilterTests(unittest.TestCase):
 
     def test_sell_uses_ask_for_sl_distance(self):
         # Test case where SL is too close to spread (should be rejected)
-        now = datetime.now(UTC)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
         bid = 97239.9
         ask = 97271.9  # spread = 32.0
@@ -638,9 +638,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
         now = datetime.now(UTC)
         sym = 'TESTIDX'
 
-        # Create a snapshot at 23:30 UTC+3 (should be filtered out)
-        blocked_time = now.replace(hour=21, minute=30)  # 21:30 UTC = 23:30 UTC+3
-        blocked_time = blocked_time.replace(tzinfo=UTC)
+        # Create a snapshot inside the shared quiet window: 23:45 UTC+3 (20:45 UTC)
+        blocked_time = datetime(2023, 1, 2, 20, 45, tzinfo=UTC)
 
         first = tls.Snapshot(ts=blocked_time, row={
             tls.HEADER_SYMBOL: sym,
@@ -668,8 +667,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_no_recent_ticks(self):
         # Test filtering when no recent ticks
-        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
-        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
+        # Use a specific weekday time that avoids the quiet window (10:00 UTC = 13:00 UTC+3)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -698,8 +697,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_no_direction_consensus(self):
         # Test filtering when no direction consensus
-        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
-        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
+        # Use a specific weekday time that avoids the quiet window (10:00 UTC = 13:00 UTC+3)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -728,8 +727,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_no_live_bid_ask(self):
         # Test filtering when no live bid/ask
-        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
-        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
+        # Use a specific weekday time that avoids the quiet window (10:00 UTC = 13:00 UTC+3)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -758,8 +757,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_spread_avoid(self):
         # Test filtering when spread is too high
-        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
-        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
+        # Use a specific weekday time that avoids the quiet window (10:00 UTC = 13:00 UTC+3)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={

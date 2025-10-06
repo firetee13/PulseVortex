@@ -1740,6 +1740,7 @@ class App(tk.Tk):
 
         if not payload.get('error') and rows:
             atr_map: dict[str, float | None] = {}
+            spec_map: dict[str, dict[str, float]] = {}
             if _MT5_IMPORTED and mt5 is not None:
                 try:
                     init_ok, init_err = self._ensure_mt5()
@@ -1748,11 +1749,46 @@ class App(tk.Tk):
                 if init_ok:
                     for sym in sorted({r[2] for r in rows if r and r[2]}):
                         atr_map[sym] = None
+                        spec_map[sym] = {}
                         try:
                             try:
                                 mt5.symbol_select(sym, True)
                             except Exception:
                                 pass
+                            # Fetch contract specs (tick_value, tick_size, contract_size)
+                            info = None
+                            try:
+                                info = mt5.symbol_info(sym)
+                            except Exception:
+                                info = None
+                            if info is not None:
+                                try:
+                                    tv = getattr(info, 'trade_tick_value', None)
+                                    if tv in (None, 0.0):
+                                        tv = getattr(info, 'tick_value', None)
+                                    tick_value = float(tv) if tv is not None else 0.0
+                                except Exception:
+                                    tick_value = 0.0
+                                try:
+                                    tsz = getattr(info, 'trade_tick_size', None)
+                                    if tsz in (None, 0.0):
+                                        tsz = getattr(info, 'tick_size', None)
+                                    tick_size = float(tsz) if tsz is not None else 0.0
+                                except Exception:
+                                    tick_size = 0.0
+                                try:
+                                    cs = getattr(info, 'trade_contract_size', None)
+                                    if cs in (None, 0.0):
+                                        cs = getattr(info, 'contract_size', None)
+                                    contract_size = float(cs) if cs is not None else 0.0
+                                except Exception:
+                                    contract_size = 0.0
+                                spec_map[sym] = {
+                                    'tick_value': float(tick_value),
+                                    'tick_size': float(tick_size),
+                                    'contract_size': float(contract_size),
+                                }
+                            # Compute ATR (Wilder-like) for normalization context
                             tf = getattr(mt5, "TIMEFRAME_D1", 0)
                             rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
                             if rates is None or len(rates) < 2:
@@ -1783,6 +1819,7 @@ class App(tk.Tk):
                                 atr_map[sym] = (sum(trs) / len(trs)) if trs else None
                         except Exception:
                             atr_map[sym] = None
+                            spec_map[sym] = {}
 
             risk_capital = 0.01  # 1% per R
             target_vol = 0.10  # 10% annualised target volatility
@@ -1835,12 +1872,42 @@ class App(tk.Tk):
                 trade_r = profit / risk
                 raw_return = trade_r * risk_capital
 
-                # notional 10k
-                try:
-                    units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
-                except Exception:
-                    units = 0.0
-                notional_profit = units * profit
+                # notional 10k using contract specs when available
+                notional_profit = None
+                spec = spec_map.get(symbol) if 'spec_map' in locals() else None
+                if spec and ep not in (None, 0.0):
+                    try:
+                        tick_value = float(spec.get('tick_value', 0.0))
+                    except Exception:
+                        tick_value = 0.0
+                    try:
+                        tick_size = float(spec.get('tick_size', 0.0))
+                    except Exception:
+                        tick_size = 0.0
+                    try:
+                        contract_size = float(spec.get('contract_size', 0.0))
+                    except Exception:
+                        contract_size = 0.0
+                    # Volume sized so that notional ~ 10k of quote for linear instruments
+                    volume = 0.0
+                    try:
+                        if contract_size > 0.0 and ep not in (None, 0.0):
+                            volume = 10000.0 / (contract_size * ep)
+                    except Exception:
+                        volume = 0.0
+                    if volume > 0.0:
+                        if tick_size > 0.0 and tick_value > 0.0:
+                            # Price move -> ticks -> PnL via tick_value, scaled by volume
+                            notional_profit = (profit / tick_size) * tick_value * volume
+                        elif contract_size > 0.0:
+                            notional_profit = profit * contract_size * volume
+                if notional_profit is None:
+                    # Fallback: spot-like units approximation
+                    try:
+                        units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
+                    except Exception:
+                        units = 0.0
+                    notional_profit = units * profit
 
                 atr_val = atr_map.get(symbol) if atr_map else None
                 vol_target_return = raw_return

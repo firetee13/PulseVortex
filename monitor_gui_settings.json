@@ -8,7 +8,7 @@
   "prox_since_hours": 1000,
   "prox_min_trades": 1,
   "prox_symbol_filter": "",
-  "prox_category": "Crypto",
+  "prox_category": "Forex",
   "prox_auto": true,
   "prox_interval": 300
 }

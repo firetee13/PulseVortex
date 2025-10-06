@@ -40,6 +40,7 @@ except Exception:
 
 from monitor.config import default_db_path
 from monitor import mt5_client
+from monitor.quiet_hours import is_quiet_time, UTC_PLUS_3
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import json
@@ -143,7 +144,7 @@ def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_B
 INPUT_TZ = timezone(timedelta(hours=2))
 
 UTC = timezone.utc
-UTC3 = timezone(timedelta(hours=3))
+UTC3 = UTC_PLUS_3
 # Consider market "alive" only if there's at least one tick
 # within this many seconds. Avoid creating entries for closed markets.
 TICK_FRESHNESS_SEC = 60  # 60 seconds
@@ -983,16 +984,15 @@ def analyze(
         first, last = snaps[0], snaps[-1]
         prox: Optional[float] = None
 
-        # Filter out entries between 23:00 and 01:00 (UTC+3).
-        # Intention: block 23:00–00:59 inclusive, allow from 01:00 onward.
-        last_ts_utc3 = last.ts.astimezone(UTC3)
-        hour = last_ts_utc3.hour
-        minute = last_ts_utc3.minute
-        # Block hours 23 and 0; do not block entire hour 1
-        if hour == 23 or hour == 0:
+        # Filter out entries during the shared quiet-trading windows.
+        if is_quiet_time(last.ts, symbol=sym):
             if debug:
                 try:
-                    print(f"[DEBUG] low_vol_time_window at {last_ts_utc3.strftime('%Y-%m-%d %H:%M:%S')} UTC+3; gating 23:00–00:59")
+                    quiet_ts = last.ts.astimezone(UTC3)
+                    print(
+                        f"[DEBUG] low_vol_time_window at "
+                        f"{quiet_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC+3; quiet hours active"
+                    )
                 except Exception:
                     pass
             bump("low_vol_time_window")

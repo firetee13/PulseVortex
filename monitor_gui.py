@@ -249,6 +249,7 @@ class App(tk.Tk):
         self.var_pnl_norm_since_hours = tk.IntVar(value=168)
         self.var_pnl_norm_mode = tk.StringVar(value="risk_units")
         self.var_pnl_norm_category = tk.StringVar(value="overall")
+        self.var_pnl_norm_bin = tk.StringVar(value="All")
         # Load persisted settings (if any) before building controls
         try:
             self._load_settings()
@@ -1594,6 +1595,20 @@ class App(tk.Tk):
         except Exception:
             pass
 
+        ttk.Label(controls, text="Bin:").pack(side=tk.LEFT)
+        self.pnl_norm_bin_combo = ttk.Combobox(
+            controls,
+            textvariable=self.var_pnl_norm_bin,
+            values=("All",),
+            state="readonly",
+            width=8,
+        )
+        self.pnl_norm_bin_combo.pack(side=tk.LEFT, padx=6)
+        try:
+            self.pnl_norm_bin_combo.bind("<<ComboboxSelected>>", self._on_pnl_norm_bin_change)
+        except Exception:
+            pass
+
         ttk.Button(controls, text="Refresh", command=self._pnl_norm_refresh).pack(side=tk.LEFT, padx=(12, 0))
 
         self.pnl_norm_status = ttk.Label(controls, text="Ready", anchor=tk.W)
@@ -1647,6 +1662,11 @@ class App(tk.Tk):
             return
         self._pnl_norm_render()
 
+    def _on_pnl_norm_bin_change(self, _event=None) -> None:
+        if self._pnl_norm_loading:
+            return
+        self._pnl_norm_render()
+
     def _pnl_norm_refresh(self) -> None:
         if self._pnl_norm_loading:
             return
@@ -1663,6 +1683,7 @@ class App(tk.Tk):
         hours = max(1, int(self.var_pnl_norm_since_hours.get()))
         payload: dict[str, object] = {'error': None}
         rows: list[tuple] = []
+        bins: set[str] = set()
         try:
             import sqlite3  # type: ignore
             db_path = db_path_str(dbname)
@@ -1678,7 +1699,8 @@ class App(tk.Tk):
                            COALESCE(h.entry_price, s.price) AS entry_price,
                            h.hit_price,
                            s.sl,
-                           s.direction
+                           s.direction,
+                           s.proximity_bin
                     FROM timelapse_setups s
                     JOIN timelapse_hits h ON h.setup_id = s.id
                     WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
@@ -1687,6 +1709,11 @@ class App(tk.Tk):
                 )
                 cur.execute(sql, (thr,))
                 rows = cur.fetchall() or []
+                for row in rows:
+                    if len(row) >= 7:
+                        bin_label = row[7]
+                        if bin_label:
+                            bins.add(str(bin_label))
             finally:
                 try:
                     conn.close()
@@ -1701,6 +1728,7 @@ class App(tk.Tk):
         returns_log: list[float] = []
         returns_vol_target: list[float] = []
         returns_notional: list[float] = []
+        bin_labels: list[str] = []
 
         if not payload.get('error') and rows:
             atr_map: dict[str, float | None] = {}
@@ -1752,7 +1780,7 @@ class App(tk.Tk):
             target_vol = 0.10  # 10% annualised target volatility
             sqrt_252 = math.sqrt(252.0)
 
-            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction in rows:
+            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction, prox_bin in rows:
                 if not hit:
                     continue
                 dt: datetime | None = None
@@ -1821,11 +1849,16 @@ class App(tk.Tk):
                     log_return = raw_return
 
                 times.append(dt)
-                symbols.append(str(symbol))
+                sym_str = str(symbol)
+                symbols.append(sym_str)
                 returns_risk.append(trade_r)
                 returns_log.append(log_return)
                 returns_vol_target.append(vol_target_return)
                 returns_notional.append(notional_profit)
+                bin_val = str(prox_bin) if prox_bin not in (None, "") else ""
+                bin_labels.append(bin_val)
+                if bin_val:
+                    bins.add(bin_val)
 
         def _cumulative(values: list[float]) -> list[float]:
             total = 0.0
@@ -1855,6 +1888,7 @@ class App(tk.Tk):
         cumulative: dict[str, dict[str, list[float]]] = {}
         times_map: dict[str, list[datetime]] = {}
 
+        bin_map: dict[str, list[str]] = {}
         for cat, idxs in categories.items():
             times_map[cat] = _select_times(idxs, times)
             cat_series = {
@@ -1865,10 +1899,13 @@ class App(tk.Tk):
             }
             series[cat] = cat_series
             cumulative[cat] = {key: _cumulative(vals) for key, vals in cat_series.items()}
+            bin_map[cat] = _select(idxs, bin_labels)
 
         payload['times'] = times_map
         payload['series'] = series
         payload['cumulative'] = cumulative
+        payload['bins'] = sorted(bins, key=lambda x: (1, x)) if bins else []
+        payload['bin_map'] = bin_map
 
         self.after(0, self._pnl_norm_update_ui, payload)
 
@@ -1894,6 +1931,22 @@ class App(tk.Tk):
             return
 
         self._pnl_norm_data = payload
+        # Update bin list in UI
+        items = payload.get('bins') if isinstance(payload, dict) else None
+        if isinstance(items, list):
+            values = ['All'] + items if items else ['All']
+            try:
+                self.pnl_norm_bin_combo.configure(values=values)
+            except Exception:
+                pass
+            if self.var_pnl_norm_bin.get() not in values:
+                self.var_pnl_norm_bin.set('All')
+        else:
+            try:
+                self.pnl_norm_bin_combo.configure(values=('All',))
+            except Exception:
+                pass
+            self.var_pnl_norm_bin.set('All')
         self._pnl_norm_render()
 
     def _pnl_norm_render(self) -> None:
@@ -1918,9 +1971,18 @@ class App(tk.Tk):
         times = times_map.get(category) if isinstance(times_map, dict) else None
         cat_series = series_map.get(category) if isinstance(series_map, dict) else None
         cat_cumulative = cumulative_map.get(category) if isinstance(cumulative_map, dict) else None
+        cat_bins = data.get('bin_map', {}).get(category) if isinstance(data, dict) else None
 
         values = cat_cumulative.get(mode) if isinstance(cat_cumulative, dict) else None
         raw_values = cat_series.get(mode) if isinstance(cat_series, dict) else None
+
+        # Apply bin filter if requested
+        selected_bin = self.var_pnl_norm_bin.get()
+        if selected_bin and selected_bin != 'All' and times and raw_values is not None and cat_bins is not None:
+            filtered_idx = [i for i, label in enumerate(cat_bins) if label == selected_bin]
+            times = [times[i] for i in filtered_idx]
+            values = [values[i] for i in filtered_idx] if values else values
+            raw_values = [raw_values[i] for i in filtered_idx]
 
         if not times or not values:
             ax.text(0.5, 0.5, 'No trades available.', ha='center', va='center', transform=ax.transAxes)

@@ -364,50 +364,50 @@ Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 
 ```mermaid
 graph TD
-    subgraph "External"
-        MT5[MT5 Terminal]
+    subgraph External ["External"]
+        MT5["MT5 Terminal"]
     end
-    subgraph "Core Modules (monitor/)"
-        MC[mt5_client.py<br/>MT5 wrapper, caching, ticks/rates]
-        DB[db.py<br/>SQLite ops, schema, inserts/queries]
-        QH[quiet_hours.py<br/>Timezone-aware pauses/exclusions]
-        SY[symbols.py<br/>Classification: forex/crypto/indices]
-        CF[config.py<br/>DB path, env vars]
-        DM[domain.py<br/>Dataclasses: Setup, Hit, etc.]
+    subgraph Core ["Core Modules (monitor/)"]
+        MC["mt5_client.py: MT5 wrapper, caching, ticks/rates"]
+        DB["db.py: SQLite ops, schema, inserts/queries"]
+        QH["quiet_hours.py: Timezone-aware pauses/exclusions"]
+        SY["symbols.py: Classification: forex/crypto/indices"]
+        CF["config.py: DB path, env vars"]
+        DM["domain.py: Dataclasses: Setup, Hit, etc."]
     end
-    subgraph "CLI Tools"
-        TS[timelapse_setups.py<br/>Setup analysis, scoring, DB insert]
-        CH[check_tp_sl_hits.py<br/>TP/SL hit detection, tick scanning]
+    subgraph CLI ["CLI Tools"]
+        TS["timelapse_setups.py: Setup analysis, scoring, DB insert"]
+        CH["check_tp_sl_hits.py: TP/SL hit detection, tick scanning"]
     end
-    subgraph "GUI"
-        GUI[monitor_gui.py<br/>Tabs: Monitors, DB Results, SL Proximity, PnL]
+    subgraph GUISub ["GUI"]
+        MG["monitor_gui.py: Tabs: Monitors, DB Results, SL Proximity, PnL"]
     end
-    subgraph "Persistence"
-        TIMELAPSE[timelapse.db<br/>Setups & Hits tables]
-        SETTINGS[monitor_gui_settings.json<br/>UI prefs, excludes/filters]
+    subgraph Persist ["Persistence"]
+        TIMELAPSE["timelapse.db: Setups & Hits tables"]
+        SETTINGS["monitor_gui_settings.json: UI prefs, excludes/filters"]
     end
-    MT5 -->|Live data: ticks, rates, symbols| MC
-    MC -->|Cached data| TS
-    MC -->|Ticks/Bars| CH
-    MC -->|Live charts| GUI
-    TS -->|Analysis results| DB
-    CH -->|Hit records| DB
-    DB <-->|CRUD ops| TIMELAPSE
-    TIMELAPSE -->|Queries: results, stats, PnL| GUI
-    QH -.->|Quiet checks| TS
-    QH -.->|Pause monitoring| CH
-    QH -.->|Chart pauses| GUI
-    SY -.->|Symbol filtering| TS
-    SY -.->|Category stats| CH
-    SY -.->|Per-symbol views| GUI
-    CF -->|Config resolution| DB
-    DM -->|Data models| TS
-    DM -->|Hit structs| CH
-    DM -->|GUI bindings| GUI
-    GUI -->|Saved settings| SETTINGS
+    MT5 -->|"Live data: ticks, rates, symbols"| MC
+    MC -->|"Cached data"| TS
+    MC -->|"Ticks/Bars"| CH
+    MC -->|"Live charts"| MG
+    TS -->|"Analysis results"| DB
+    CH -->|"Hit records"| DB
+    DB <-->|"CRUD ops"| TIMELAPSE
+    TIMELAPSE -->|"Queries: results, stats, PnL"| MG
+    QH -.->|"Quiet checks"| TS
+    QH -.->|"Pause monitoring"| CH
+    QH -.->|"Chart pauses"| MG
+    SY -.->|"Symbol filtering"| TS
+    SY -.->|"Category stats"| CH
+    SY -.->|"Per-symbol views"| MG
+    CF -->|"Config resolution"| DB
+    DM -->|"Data models"| TS
+    DM -->|"Hit structs"| CH
+    DM -->|"GUI bindings"| MG
+    MG -->|"Saved settings"| SETTINGS
     style MT5 fill:#f9f,stroke:#333
     style TIMELAPSE fill:#bbf,stroke:#333
-    style GUI fill:#bfb,stroke:#333
+    style MG fill:#bfb,stroke:#333
 ```
 
 ### Common Issues

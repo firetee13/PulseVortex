@@ -624,6 +624,7 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             except Exception:
                 return None
 
+        ss_1h = pct_change(h1) if (h1 is not None and len(h1) >= 2) else None
         ss_4h = pct_change(h4) if (h4 is not None and len(h4) >= 2) else None
         ss_1d = pct_change(d1) if (d1 is not None and len(d1) >= 2) else None
         ss_1w = pct_change(w1) if (w1 is not None and len(w1) >= 2) else None
@@ -681,6 +682,7 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             'Ask': ask,
             'Spread%': spreadpct,
             'Backfilled': 0,
+            'Strength 1H': ss_1h,
             'Strength 4H': ss_4h,
             'Strength 1D': ss_1d,
             'Strength 1W': ss_1w,
@@ -981,6 +983,7 @@ def analyze(
             continue
 
         # Extract metrics from latest
+        ss1h = last.g("Strength 1H")
         ss4 = last.g("Strength 4H")
         ss1d = last.g("Strength 1D")
         ss1w = last.g("Strength 1W")
@@ -1013,8 +1016,8 @@ def analyze(
         ss4_trend = None if (ss4 is None or first.g("Strength 4H") is None) else ss4 - (first.g("Strength 4H") or 0.0)
 
         # Direction from strength across TFs (require 4H alignment when available)
-        pos = sum(1 for v in (ss4, ss1d, ss1w) if v is not None and v > 0)
-        neg = sum(1 for v in (ss4, ss1d, ss1w) if v is not None and v < 0)
+        pos = sum(1 for v in (ss1h, ss4, ss1d) if v is not None and v > 0)
+        neg = sum(1 for v in (ss1h, ss4, ss1d) if v is not None and v < 0)
         direction: Optional[str] = None
         if pos >= 2 and neg == 0 and (ss4 is None or ss4 > 0):
             direction = "Buy"
@@ -1185,8 +1188,8 @@ def analyze(
 
         # Build explanation
         parts: List[str] = []
-        if ss4 is not None and ss1d is not None and ss1w is not None:
-            parts.append(f"Strength 4H/1D/1W: {ss4:.1f}/{ss1d:.1f}/{ss1w:.1f}")
+        if ss1h is not None and ss4 is not None and ss1d is not None:
+            parts.append(f"Strength 1H/4H/1D: {ss1h:.1f}/{ss4:.1f}/{ss1d:.1f}")
         if atr is not None and atrp is not None:
             parts.append(f"ATR: {atr:.1f} pips ({atrp:.1f}%)")
         if (s1 is not None) or (r1 is not None):

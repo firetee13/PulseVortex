@@ -424,6 +424,14 @@ def _evaluate_setup(
                 symbol=resolved_symbol,
             )
         )
+        intro_start = max(cursor, window_start)
+        if active_ranges and intro_start < window_end:
+            already_covered = any(start <= intro_start < end for start, end in active_ranges)
+            if not already_covered:
+                intro_end = min(window_end, intro_start + timedelta(minutes=1), now_utc)
+                if intro_end > intro_start:
+                    active_ranges.append((intro_start, intro_end))
+                    active_ranges.sort(key=lambda rng: rng[0])
         if not active_ranges:
             new_cursor = max(new_cursor, min(window_end, now_utc))
             continue

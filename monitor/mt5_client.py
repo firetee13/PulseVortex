@@ -460,6 +460,8 @@ def earliest_hit_from_ticks(
             n = 0
     if n == 0:
         return None
+    last_bid: Optional[float] = None
+    last_ask: Optional[float] = None
     for i in range(n):
         tk = ticks[i]
         bid = getattr(tk, 'bid', None)
@@ -478,10 +480,14 @@ def earliest_hit_from_ticks(
                     ask = tk.get('ask')
         bid_val = _coerce_price(bid)
         ask_val = _coerce_price(ask)
-        if bid_val is None and ask_val is not None:
-            bid_val = ask_val
-        if ask_val is None and bid_val is not None:
-            ask_val = bid_val
+        if bid_val is not None:
+            last_bid = bid_val
+        else:
+            bid_val = last_bid
+        if ask_val is not None:
+            last_ask = ask_val
+        else:
+            ask_val = last_ask
         if bid_val is None and ask_val is None:
             continue
         tms = getattr(tk, 'time_msc', None)
@@ -508,14 +514,19 @@ def earliest_hit_from_ticks(
         if dt_raw is None:
             continue
         dt_utc = dt_raw - timedelta(hours=server_offset_hours)
-        if direction.lower() == 'buy':
-            if bid_val is not None and bid_val <= sl:
+        lower_direction = direction.lower()
+        if lower_direction == 'buy':
+            if bid_val is None:
+                continue
+            if bid_val <= sl:
                 return Hit(kind='SL', time_utc=dt_utc, price=bid_val)
-            if bid_val is not None and bid_val >= tp:
+            if bid_val >= tp:
                 return Hit(kind='TP', time_utc=dt_utc, price=bid_val)
         else:
-            if ask_val is not None and ask_val >= sl:
+            if ask_val is None:
+                continue
+            if ask_val >= sl:
                 return Hit(kind='SL', time_utc=dt_utc, price=ask_val)
-            if ask_val is not None and ask_val <= tp:
+            if ask_val <= tp:
                 return Hit(kind='TP', time_utc=dt_utc, price=ask_val)
     return None

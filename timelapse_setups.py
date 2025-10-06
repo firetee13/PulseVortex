@@ -118,6 +118,8 @@ def parse_args() -> argparse.Namespace:
 
 
 PROXIMITY_BIN_BUCKET = 0.1
+# Multiplier for minimum SL/TP distance in spread units (default 10x; override via TIMELAPSE_SPREAD_MULT)
+SPREAD_MULTIPLIER = float(os.environ.get("TIMELAPSE_SPREAD_MULT", "10"))
 
 
 def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET) -> Optional[str]:
@@ -524,18 +526,30 @@ class Snapshot:
 
 
 def _atr(values: List[Tuple[float, float, float]], period: int = 14) -> Optional[float]:
+    """Average True Range using Wilder's smoothing.
+
+    Requires at least period+1 bars to compute the initial ATR.
+    """
     if len(values) < period + 1:
         return None
-    vals = np.array(values)  # shape (n, 3): high, low, close
-    highs = vals[1:period+1, 0]
-    lows = vals[1:period+1, 1]
-    closes = vals[1:period+1, 2]
-    prev_closes = vals[0:period, 2]
-    tr1 = highs - lows
-    tr2 = np.abs(highs - prev_closes)
-    tr3 = np.abs(prev_closes - lows)
-    trs = np.maximum.reduce([tr1, tr2, tr3])
-    return np.mean(trs)
+    try:
+        vals = np.asarray(values, dtype=float)  # shape (n, 3): high, low, close
+        highs = vals[1:, 0]
+        lows = vals[1:, 1]
+        prev_closes = vals[:-1, 2]
+        tr = np.maximum.reduce([
+            highs - lows,
+            np.abs(highs - prev_closes),
+            np.abs(prev_closes - lows),
+        ])
+        # Initial ATR: simple mean of first `period` TRs
+        atr = float(np.mean(tr[:period]))
+        # Wilder smoothing over remaining TRs (if any)
+        for tr_val in tr[period:]:
+            atr = (atr * (period - 1) + float(tr_val)) / period
+        return atr
+    except Exception:
+        return None
 
 def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]]:
     try:
@@ -1144,7 +1158,7 @@ def analyze(
                 distance = sl - ask
 
             # Enforce minimum distance threshold (10x spread) with tiny epsilon
-            if distance is None or (distance + eps) < (20 * spread_abs):
+            if distance is None or (distance + eps) < (SPREAD_MULTIPLIER * spread_abs):
                 bump("sl_too_close_to_spread")
                 if debug:
                     print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
@@ -1164,7 +1178,7 @@ def analyze(
             else:
                 tp_distance = ask - tp
 
-            if tp_distance is None or (tp_distance + eps) < (20 * spread_abs):
+            if tp_distance is None or (tp_distance + eps) < (SPREAD_MULTIPLIER * spread_abs):
                 bump("too_far_from_tp_prox")
                 if debug:
                     print(f"[DEBUG] TP too close to spread: sym={sym}, dir={direction}, price={price}, tp={tp}, spread_abs={spread_abs}, distance={tp_distance}")
@@ -1246,7 +1260,7 @@ def analyze(
         )
 
     # Order by score then RRR
-    results.sort(key=lambda x: (-float(x["score"]), -float(x["rrr"])), reverse=True)
+    results.sort(key=lambda x: (float(x["score"]), float(x["rrr"])), reverse=True)
     if debug:
         print("--- Diagnostics ---")
         print(f"Symbols evaluated: {len(series)}")

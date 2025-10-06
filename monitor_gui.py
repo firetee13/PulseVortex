@@ -983,7 +983,7 @@ class App(tk.Tk):
                 'count': 0,
                 'wins': 0,
                 'losses': 0,
-                'sum_rrr_completed': 0.0,
+                'sum_rrr_wins': 0.0,
             })
         if not bins:
             bins.append({
@@ -994,7 +994,7 @@ class App(tk.Tk):
                 'count': 0,
                 'wins': 0,
                 'losses': 0,
-                'sum_rrr_completed': 0.0,
+                'sum_rrr_wins': 0.0,
             })
 
         def pick_bin(value: float) -> dict[str, object]:
@@ -1040,7 +1040,7 @@ class App(tk.Tk):
                 'losses': 0,
                 'sum_prox': 0.0,
                 'sum_prox_completed': 0.0,
-                'sum_rrr_completed': 0.0,
+                'sum_rrr_wins': 0.0,
             })
             stat['trades'] = int(stat['trades']) + 1
             stat['sum_prox'] = float(stat['sum_prox']) + float(prox)
@@ -1048,14 +1048,14 @@ class App(tk.Tk):
                 stat['completed'] = int(stat['completed']) + 1
                 stat['wins'] = int(stat['wins']) + 1
                 stat['sum_prox_completed'] = float(stat['sum_prox_completed']) + float(prox)
+                if rrr_float is not None:
+                    bin_item['sum_rrr_wins'] = float(bin_item.get('sum_rrr_wins', 0.0)) + rrr_float
+                    stat['sum_rrr_wins'] = float(stat.get('sum_rrr_wins', 0.0)) + rrr_float
+                    global_rrr_sum += rrr_float
             elif outcome == 'loss':
                 stat['completed'] = int(stat['completed']) + 1
                 stat['losses'] = int(stat['losses']) + 1
                 stat['sum_prox_completed'] = float(stat['sum_prox_completed']) + float(prox)
-            if outcome in ('win', 'loss') and rrr_float is not None:
-                bin_item['sum_rrr_completed'] = float(bin_item.get('sum_rrr_completed', 0.0)) + rrr_float
-                stat['sum_rrr_completed'] = float(stat.get('sum_rrr_completed', 0.0)) + rrr_float
-                global_rrr_sum += rrr_float
 
             cat_bins = category_bins.setdefault(category, {})
             bin_label = bin_item.get('label')
@@ -1065,17 +1065,15 @@ class App(tk.Tk):
                 'count': 0,
                 'wins': 0,
                 'losses': 0,
-                'sum_rrr_completed': 0.0,
+                'sum_rrr_wins': 0.0,
             })
             cat_entry['count'] = int(cat_entry.get('count', 0)) + 1
             if outcome == 'win':
                 cat_entry['wins'] = int(cat_entry.get('wins', 0)) + 1
                 if rrr_float is not None:
-                    cat_entry['sum_rrr_completed'] = float(cat_entry.get('sum_rrr_completed', 0.0)) + rrr_float
+                    cat_entry['sum_rrr_wins'] = float(cat_entry.get('sum_rrr_wins', 0.0)) + rrr_float
             elif outcome == 'loss':
                 cat_entry['losses'] = int(cat_entry.get('losses', 0)) + 1
-                if rrr_float is not None:
-                    cat_entry['sum_rrr_completed'] = float(cat_entry.get('sum_rrr_completed', 0.0)) + rrr_float
 
         for b in bins:
             wins_b = int(b.get('wins', 0))
@@ -1086,8 +1084,8 @@ class App(tk.Tk):
             b['pending'] = max(0, total_b - completed_b)
             if completed_b:
                 b['success_rate'] = wins_b / completed_b
-                sum_rrr_completed = float(b.get('sum_rrr_completed', 0.0))
-                avg_rrr = (sum_rrr_completed / completed_b) if sum_rrr_completed > 0 else None
+                sum_rrr_wins = float(b.get('sum_rrr_wins', 0.0))
+                avg_rrr = (sum_rrr_wins / wins_b) if (wins_b and sum_rrr_wins > 0) else None
                 b['avg_rrr'] = avg_rrr
                 if avg_rrr is not None:
                     success = b['success_rate']
@@ -1109,8 +1107,8 @@ class App(tk.Tk):
             avg_all = float(stat['sum_prox']) / trades if trades else 0.0
             avg_completed = (float(stat['sum_prox_completed']) / completed) if completed else avg_all
             success = (wins_s / completed) if completed else None
-            sum_rrr_completed = float(stat.get('sum_rrr_completed', 0.0)) if completed else 0.0
-            avg_rrr_completed = (sum_rrr_completed / completed) if (completed and sum_rrr_completed > 0) else None
+            sum_rrr_wins = float(stat.get('sum_rrr_wins', 0.0)) if wins_s else 0.0
+            avg_rrr_completed = (sum_rrr_wins / wins_s) if (wins_s and sum_rrr_wins > 0) else None
             expectancy = None
             if success is not None and avg_rrr_completed is not None:
                 expectancy = success * avg_rrr_completed - (1 - success)
@@ -1129,10 +1127,10 @@ class App(tk.Tk):
             }
             symbol_entries.append(entry)
             if completed:
-                cat_data = category_summary.setdefault(stat['category'], {'wins': 0, 'completed': 0, 'sum_rrr_completed': 0.0})
+                cat_data = category_summary.setdefault(stat['category'], {'wins': 0, 'completed': 0, 'sum_rrr_wins': 0.0})
                 cat_data['wins'] += wins_s
                 cat_data['completed'] += completed
-                cat_data['sum_rrr_completed'] += sum_rrr_completed
+                cat_data['sum_rrr_wins'] += sum_rrr_wins
 
         eligible_symbols = [
             s for s in symbol_entries
@@ -1143,7 +1141,7 @@ class App(tk.Tk):
 
         global_completed = wins_total + losses_total
         global_rate = (wins_total / global_completed) if global_completed else None
-        global_avg_rrr = (global_rrr_sum / global_completed) if global_completed and global_rrr_sum > 0 else None
+        global_avg_rrr = (global_rrr_sum / wins_total) if wins_total and global_rrr_sum > 0 else None
         global_expectancy = None
         if global_rate is not None and global_avg_rrr is not None:
             global_expectancy = global_rate * global_avg_rrr - (1 - global_rate)
@@ -1170,8 +1168,9 @@ class App(tk.Tk):
             completed_cat = data.get('completed', 0)
             if completed_cat:
                 rate_cat = data.get('wins', 0) / completed_cat
-                sum_rrr_cat = data.get('sum_rrr_completed', 0.0)
-                avg_rrr_cat = (sum_rrr_cat / completed_cat) if sum_rrr_cat > 0 else None
+                wins_cat = data.get('wins', 0)
+                sum_rrr_cat = data.get('sum_rrr_wins', 0.0)
+                avg_rrr_cat = (sum_rrr_cat / wins_cat) if (wins_cat and sum_rrr_cat > 0) else None
                 expectancy_cat = None
                 if avg_rrr_cat is not None:
                     expectancy_cat = rate_cat * avg_rrr_cat - (1 - rate_cat)
@@ -1188,9 +1187,9 @@ class App(tk.Tk):
                 success_cat = (wins_cat / completed_cat_bin) if completed_cat_bin else None
                 avg_rrr_cat_bin = None
                 if completed_cat_bin:
-                    sum_rrr_cat_bin = float(bin_stats.get('sum_rrr_completed', 0.0))
-                    if sum_rrr_cat_bin > 0:
-                        avg_rrr_cat_bin = sum_rrr_cat_bin / completed_cat_bin
+                    sum_rrr_cat_bin = float(bin_stats.get('sum_rrr_wins', 0.0))
+                    if wins_cat and sum_rrr_cat_bin > 0:
+                        avg_rrr_cat_bin = sum_rrr_cat_bin / wins_cat
                 expectancy_cat_bin = None
                 if success_cat is not None and avg_rrr_cat_bin is not None:
                     expectancy_cat_bin = success_cat * avg_rrr_cat_bin - (1 - success_cat)
@@ -1779,6 +1778,7 @@ class App(tk.Tk):
             risk_capital = 0.01  # 1% per R
             target_vol = 0.10  # 10% annualised target volatility
             sqrt_252 = math.sqrt(252.0)
+            sqrt_365 = math.sqrt(365.0)
 
             for event_time, hit, symbol, entry_price, hit_price, sl_val, direction, prox_bin in rows:
                 if not hit:
@@ -1837,7 +1837,9 @@ class App(tk.Tk):
                 vol_target_return = raw_return
                 if atr_val is not None and atr_val > 0 and ep not in (None, 0.0):
                     try:
-                        annual_vol = (atr_val / ep) * sqrt_252
+                        asset_kind = self._classify_symbol(symbol)
+                        sqrt_factor = sqrt_365 if asset_kind == 'crypto' else sqrt_252
+                        annual_vol = (atr_val / ep) * sqrt_factor
                         if annual_vol > 0:
                             vol_target_return = raw_return * (target_vol / annual_vol)
                     except Exception:

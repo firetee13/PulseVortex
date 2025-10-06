@@ -364,32 +364,40 @@ Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 
 ```mermaid
 graph TD
-    subgraph External ["External"]
-        MT5["MT5 Terminal"]
+    subgraph External ["External Dependencies"]
+        MT5([🔌 MT5 Terminal])
     end
-    subgraph Core ["Core Modules (monitor/)"]
-        MC["mt5_client.py: MT5 wrapper, caching, ticks/rates"]
-        DB["db.py: SQLite ops, schema, inserts/queries"]
-        QH["quiet_hours.py: Timezone-aware pauses/exclusions"]
-        SY["symbols.py: Classification: forex/crypto/indices"]
-        CF["config.py: DB path, env vars"]
-        DM["domain.py: Dataclasses: Setup, Hit, etc."]
+
+    subgraph Core ["Core Modules monitor"]
+        direction TB
+        MC{{📡 mt5_client.py<br/>MT5 wrapper, caching,<br/>ticks/rates}}
+        DB[(💾 db.py<br/>SQLite ops, schema,<br/>inserts/queries)]
+        QH{⏰ quiet_hours.py<br/>Timezone-aware pauses/<br/>exclusions}
+        SY[🏷️ symbols.py<br/>Classification: forex/<br/>crypto/indices]
+        CF[⚙️ config.py<br/>DB path, env vars]
+        DM[/📋 domain.py<br/>Dataclasses: Setup,<br/>Hit, etc./]
     end
+
     subgraph CLI ["CLI Tools"]
-        TS["timelapse_setups.py: Setup analysis, scoring, DB insert"]
-        CH["check_tp_sl_hits.py: TP/SL hit detection, tick scanning"]
+        direction TB
+        TS{{🔍 timelapse_setups.py<br/>Setup analysis, scoring,<br/>DB insert}}
+        CH[🎯 check_tp_sl_hits.py<br/>TP/SL hit detection,<br/>tick scanning]
     end
-    subgraph GUISub ["GUI"]
-        MG["monitor_gui.py: Tabs: Monitors, DB Results, SL Proximity, PnL"]
+
+    subgraph GUISub ["GUI Interface"]
+        MG([📊 monitor_gui.py<br/>Tabs: Monitors, DB Results,<br/>SL Proximity, PnL])
     end
-    subgraph Persist ["Persistence"]
-        TIMELAPSE["timelapse.db: Setups & Hits tables"]
-        SETTINGS["monitor_gui_settings.json: UI prefs, excludes/filters"]
+
+    subgraph Persist ["Persistence Layer"]
+        direction TB
+        TIMELAPSE[(📁 timelapse.db<br/>Setups & Hits tables)]
+        SETTINGS[⚡ monitor_gui_settings.json<br/>UI prefs, excludes/filters]
     end
-    MT5 -->|"Live data: ticks, rates, symbols"| MC
+
+    MT5 -.->|"Live data: ticks, rates, symbols"| MC
     MC -->|"Cached data"| TS
     MC -->|"Ticks/Bars"| CH
-    MC -->|"Live charts"| MG
+    MC -.->|"Live charts"| MG
     TS -->|"Analysis results"| DB
     CH -->|"Hit records"| DB
     DB <-->|"CRUD ops"| TIMELAPSE
@@ -403,11 +411,22 @@ graph TD
     CF -->|"Config resolution"| DB
     DM -->|"Data models"| TS
     DM -->|"Hit structs"| CH
-    DM -->|"GUI bindings"| MG
+    DM -.->|"GUI bindings"| MG
     MG -->|"Saved settings"| SETTINGS
-    style MT5 fill:#f9f,stroke:#333
-    style TIMELAPSE fill:#bbf,stroke:#333
-    style MG fill:#bfb,stroke:#333
+
+    classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:3px,color:#000
+    classDef core fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,color:#000
+    classDef cli fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px,color:#000
+    classDef gui fill:#fff3e0,stroke:#e65100,stroke-width:3px,color:#000
+    classDef persist fill:#fce4ec,stroke:#880e4f,stroke-width:2px,color:#000
+
+    class MT5 external
+    class MC,DB,QH,SY,CF,DM core
+    class TS,CH cli
+    class MG gui
+    class TIMELAPSE,SETTINGS persist
+
+    linkStyle default stroke:#333,stroke-width:2px
 ```
 
 ### Common Issues
@@ -449,6 +468,75 @@ graph TD
 - Tick history: Download in MT5 History Center (F2 > Symbol > Bars)
 - Quiet ignore: Hits in quiet windows skipped; check `--verbose` for "IGNORED HIT"
 - Server offset: `--verbose` shows offset; mismatches cause missed ticks
+
+### GUI-Specific Issues
+
+#### GUI Not Launching or Freezing
+```
+[GUI] Tkinter import failed or window not responding.
+```
+- **Tkinter Missing**: Ensure Python installation includes Tkinter. On Windows, reinstall Python from python.org (check "Add Python to PATH" and "Install Tcl/Tk"). Test: `python -c "import tkinter; root = tkinter.Tk(); root.destroy()"`.
+- **Matplotlib Backend**: Set `matplotlib.use('TkAgg')` if using non-interactive mode. Install: `pip install matplotlib[tk]`.
+- **Resource Limits**: Close other MT5/Python processes; GUI polls DB/MT5—reduce symbols or increase intervals in settings.
+- **Permissions**: Run as admin if DB in protected folder (e.g., Program Files); move project to user dir like `C:\Users\YourName\monitor_prod`.
+- **Quiet Hours**: GUI charts pause during quiet periods—check status bar for "Paused: Quiet Hours".
+
+#### Chart Rendering Errors
+```
+[GUI] Matplotlib plot failed: No data or invalid timeframe.
+```
+- **No Data**: Ensure setups/hits in DB (`sqlite3 timelapse.db "SELECT COUNT(*) FROM timelapse_setups"`). Run CLI first to populate.
+- **MT5 Disconnected**: Reconnect via Monitors tab; check MT5 terminal is running with symbols.
+- **Timezone Mismatch**: Charts use UTC+3—verify `hit_time_utc3` in DB matches expected.
+- **Memory Leak**: Restart GUI after long sessions (>24h); limit chart history (e.g., last 100 bars) in code if needed.
+- **Font/Emoji Issues**: If labels garbled, update matplotlib (`pip install --upgrade matplotlib`); fallback to ASCII if emojis unsupported.
+
+#### Settings Not Saving
+```
+[GUI] monitor_gui_settings.json not updated on close.
+```
+- **Write Permissions**: Check file perms in project dir; run VSCode/PowerShell as admin.
+- **JSON Corruption**: Delete file (recreates on next launch); validate syntax with `python -m json.tool monitor_gui_settings.json`.
+- **Path Issues**: If moved project, settings path relative—relocate or edit manually.
+
+### Testing Issues
+
+#### Unit Tests Failing
+```
+FAILED tests/test_mt5_client.py::TestMT5Client::test_rates_caching
+```
+- **MT5 Not Running**: Tests use fakes, but if live mode enabled, start MT5. Set `MT5_FAKE_MODE=1` env for isolation.
+- **SQLite Temp Files**: Ensure write access to temp dir; use `tempfile` in tests for DB fixtures.
+- **Coverage <90%**: Run `pip install coverage; coverage run -m unittest discover -s tests; coverage report`—add missing tests for new code.
+- **Version Conflicts**: Pin deps in requirements.txt (e.g., `MetaTrader5==5.0.45`); use virtualenv: `python -m venv venv; venv\Scripts\activate; pip install -r requirements.txt`.
+- **Platform-Specific**: Windows-only MT5; on Linux/Mac, use Wine or skip MT5 tests.
+
+#### Integration Testing
+- **Manual Validation**: Run full flow: Start MT5 > `python timelapse_setups.py --symbols EURUSD` > Check DB > Launch GUI > Verify charts/hits.
+- **Edge Cases**: Test quiet hours (set mock time), invalid symbols, high-spread rejects, weekend crypto (no pause).
+- **Performance Benchmarks**: Time CLI runs (`python -m cProfile timelapse_setups.py`); aim <500ms/symbol for 50 symbols.
+
+### Advanced Troubleshooting
+
+#### Database Locking or Corruption
+- **Locking**: Only one writer—close other connections (GUI/CLI). Use `sqlite3 timelapse.db "PRAGMA busy_timeout=5000;"` for retries.
+- **Corruption**: `sqlite3 timelapse.db "PRAGMA integrity_check;"`—if failed, restore from backup: `sqlite3 timelapse.db < backup.sql`.
+- **Migration Fails**: Manual add columns: `sqlite3 timelapse.db "ALTER TABLE timelapse_setups ADD COLUMN proximity_bin TEXT;"`.
+- **Large DB (>1GB)**: Vacuum: `sqlite3 timelapse.db "VACUUM;"`; archive old setups: `DELETE FROM timelapse_setups WHERE as_of < date('now', '-30 days')`.
+
+#### MT5 Advanced
+- **Symbol Not Found**: Ensure in MarketWatch and history downloaded (F2 > Symbol > Bars > Download).
+- **Broker Timezone**: Detect offset via `mt5_client.py` logs; mismatches skip ticks—manual set `MT5_SERVER_OFFSET_HOURS=2`.
+- **DLL Errors**: Tools > Options > Expert Advisors > Allow DLL imports; restart MT5.
+- **Portable Mode**: If MT5 in custom dir, set `MT5_PORTABLE=1` and full path to `terminal64.exe`.
+
+#### Environment & Dependencies
+- **Python Path**: Add to PATH; use `where python` to verify.
+- **Virtual Environment**: Recommended: `python -m venv .venv; .venv\Scripts\activate; pip install -r requirements.txt`.
+- **Firewall**: Allow MT5/Python.exe; test connection: `python -c "import MetaTrader5 as mt5; print(mt5.initialize())"`.
+- **Logs**: Enable debug in CLI (`--debug --verbose`); GUI console mode (`python monitor_gui.py`).
+
+For persistent issues, check GitHub issues or provide logs/DB schema/output from debug mode.
 
 ### Debug Mode
 

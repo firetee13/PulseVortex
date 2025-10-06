@@ -360,6 +360,55 @@ Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 7. **GUI**: Tabs query DB for results/prox/PnL; MT5 for charts; auto-pause quiet hours
 
 ## Troubleshooting
+## Architecture Diagram
+
+```mermaid
+graph TD
+    subgraph "External"
+        MT5[MT5 Terminal]
+    end
+    subgraph "Core Modules (monitor/)"
+        MC[mt5_client.py<br/>MT5 wrapper, caching, ticks/rates]
+        DB[db.py<br/>SQLite ops, schema, inserts/queries]
+        QH[quiet_hours.py<br/>Timezone-aware pauses/exclusions]
+        SY[symbols.py<br/>Classification: forex/crypto/indices]
+        CF[config.py<br/>DB path, env vars]
+        DM[domain.py<br/>Dataclasses: Setup, Hit, etc.]
+    end
+    subgraph "CLI Tools"
+        TS[timelapse_setups.py<br/>Setup analysis, scoring, DB insert]
+        CH[check_tp_sl_hits.py<br/>TP/SL hit detection, tick scanning]
+    end
+    subgraph "GUI"
+        GUI[monitor_gui.py<br/>Tabs: Monitors, DB Results, SL Proximity, PnL]
+    end
+    subgraph "Persistence"
+        TIMELAPSE[timelapse.db<br/>Setups & Hits tables]
+        SETTINGS[monitor_gui_settings.json<br/>UI prefs, excludes/filters]
+    end
+    MT5 -->|Live data: ticks, rates, symbols| MC
+    MC -->|Cached data| TS
+    MC -->|Ticks/Bars| CH
+    MC -->|Live charts| GUI
+    TS -->|Analysis results| DB
+    CH -->|Hit records| DB
+    DB <-->|CRUD ops| TIMELAPSE
+    TIMELAPSE -->|Queries: results, stats, PnL| GUI
+    QH -.->|Quiet checks| TS
+    QH -.->|Pause monitoring| CH
+    QH -.->|Chart pauses| GUI
+    SY -.->|Symbol filtering| TS
+    SY -.->|Category stats| CH
+    SY -.->|Per-symbol views| GUI
+    CF -->|Config resolution| DB
+    DM -->|Data models| TS
+    DM -->|Hit structs| CH
+    DM -->|GUI bindings| GUI
+    GUI -->|Saved settings| SETTINGS
+    style MT5 fill:#f9f,stroke:#333
+    style TIMELAPSE fill:#bbf,stroke:#333
+    style GUI fill:#bfb,stroke:#333
+```
 
 ### Common Issues
 

@@ -1,14 +1,14 @@
 {
   "exclude_symbols": "",
-  "since_hours": 268,
+  "since_hours": 300,
   "interval": 120,
-  "symbol_category": "Crypto",
+  "symbol_category": "All",
   "hit_status": "All",
   "symbol_filter": "",
-  "prox_since_hours": 336,
-  "prox_min_trades": 1,
+  "prox_since_hours": 1000,
+  "prox_min_trades": 5,
   "prox_symbol_filter": "",
-  "prox_category": "Crypto",
+  "prox_category": "All",
   "prox_auto": true,
   "prox_interval": 300
 }

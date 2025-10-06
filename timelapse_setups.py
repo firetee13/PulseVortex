@@ -154,6 +154,16 @@ _RATE_CACHE: Dict[Tuple[str, int, int], Tuple[float, Any]] = {}
 _DB_CONN: Optional["sqlite3.Connection"] = None
 _DB_CONN_PATH: Optional[str] = None
 
+CONSENSUS_TABLE = "consensus"
+# Score/RRR/proximity thresholds for the three timeframes. A tighter proximity
+# threshold means the stop loss sits further away relative to price, which we
+# treat as higher conviction.
+_CONSENSUS_THRESHOLDS = {
+    "1h": {"score": 3.0, "rrr": 1.2, "proximity": 0.6},
+    "4h": {"score": 4.5, "rrr": 1.4, "proximity": 0.45},
+    "1d": {"score": 6.0, "rrr": 1.6, "proximity": 0.35},
+}
+
 if sqlite3 is not None:
     class _ManagedConnection(sqlite3.Connection):  # type: ignore[misc]
         _closed: bool = False
@@ -197,6 +207,107 @@ def _get_db_connection() -> Optional["sqlite3.Connection"]:
         _DB_CONN = _connect_sqlite(db_path, timeout=5.0)
         _DB_CONN_PATH = db_path
     return _DB_CONN
+
+
+def _ensure_consensus_schema(cur: "sqlite3.Cursor", source_table: str) -> None:
+    """Create the consensus table if missing."""
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CONSENSUS_TABLE} (
+            id INTEGER PRIMARY KEY,
+            is_1h_consensus INTEGER NOT NULL,
+            is_4h_consensus INTEGER NOT NULL,
+            is_1d_consensus INTEGER NOT NULL,
+            FOREIGN KEY(id) REFERENCES {source_table}(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _calculate_consensus_flags(score: object, rrr: object, proximity_to_sl: object) -> Tuple[bool, bool, bool]:
+    """Translate raw setup metrics into timeframe consensus booleans.
+
+    The algorithm assumes higher timeframe agreement requires progressively
+    stricter filters. We treat the existing score as a proxy for directional
+    conviction, RRR as reward quality, and proximity_to_sl as risk tightness.
+    """
+    def _to_float(value: object, default: float = float("nan")) -> float:
+        try:
+            fval = float(value)
+            return fval if math.isfinite(fval) else default
+        except Exception:
+            return default
+
+    score_val = _to_float(score, 0.0)
+    rrr_val = _to_float(rrr, 0.0)
+    prox_val = _to_float(proximity_to_sl, float("nan"))
+
+    def _meets(thr: Dict[str, float]) -> bool:
+        proximity_limit = thr.get("proximity")
+        proximity_ok = not math.isfinite(prox_val) or prox_val <= proximity_limit
+        return (
+            score_val >= thr.get("score", 0.0)
+            and rrr_val >= thr.get("rrr", 0.0)
+            and proximity_ok
+        )
+
+    return (
+        _meets(_CONSENSUS_THRESHOLDS["1h"]),
+        _meets(_CONSENSUS_THRESHOLDS["4h"]),
+        _meets(_CONSENSUS_THRESHOLDS["1d"]),
+    )
+
+
+def _rebuild_consensus_table(conn: "sqlite3.Connection", *, source_table: str = "timelapse_setups") -> None:
+    """Recreate consensus rows for every setup, updating in place."""
+    try:
+        cur = conn.cursor()
+        _ensure_consensus_schema(cur, source_table)
+        cur.execute(f"PRAGMA table_info({source_table})")
+        columns = [str(row[1]) for row in (cur.fetchall() or [])]
+        if "id" not in columns or "score" not in columns or "rrr" not in columns:
+            return
+        proximity_selector = "proximity_to_sl" if "proximity_to_sl" in columns else "NULL AS proximity_to_sl"
+        cur.execute(
+            f"SELECT id, score, rrr, {proximity_selector} FROM {source_table}"
+        )
+        rows = cur.fetchall() or []
+        if not rows:
+            cur.execute(f"DELETE FROM {CONSENSUS_TABLE}")
+            return
+
+        payload: List[Tuple[int, int, int, int]] = []
+        for row in rows:
+            setup_id = row[0]
+            if setup_id is None:
+                continue
+            flags = _calculate_consensus_flags(row[1], row[2], row[3])
+            payload.append((
+                int(setup_id),
+                int(flags[0]),
+                int(flags[1]),
+                int(flags[2]),
+            ))
+
+        if not payload:
+            return
+
+        cur.executemany(
+            f"""
+            INSERT INTO {CONSENSUS_TABLE} (id, is_1h_consensus, is_4h_consensus, is_1d_consensus)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                is_1h_consensus=excluded.is_1h_consensus,
+                is_4h_consensus=excluded.is_4h_consensus,
+                is_1d_consensus=excluded.is_1d_consensus
+            """,
+            payload,
+        )
+        cur.execute(
+            f"DELETE FROM {CONSENSUS_TABLE} WHERE id NOT IN (SELECT id FROM {source_table})"
+        )
+    except sqlite3.Error as exc:
+        print(f"[DB] Warning: consensus refresh failed: {exc}")
 
 
 def _close_db_connection() -> None:
@@ -789,7 +900,11 @@ def process_once(
             score = r["score"]
             print(f"{sym} | {direction} @ {price} | SL {sl} | TP {tp} | RRR {rrr:.2f} | score {score:.2f}")
             if not brief:
-                print(f"  -> {r['explain']}")
+                try:
+                    rich = {k: v for k, v in r.items() if k not in ('series', 'raw_snaps')}
+                    print(json.dumps(rich, indent=2, default=str))
+                except Exception:
+                    print(r)
 
     # Insert results into SQLite
     try:
@@ -1118,7 +1233,6 @@ def analyze(
                 "tp": tp_out if tp_out is not None else tp,
                 "rrr": rrr,
                 "score": score,
-                "explain": "; ".join(parts),
                 "as_of": as_of_value,
                 "proximity_to_sl": prox,
                 # Meta for logging; not used for DB schema
@@ -1170,7 +1284,6 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 tp REAL,
                 rrr REAL,
                 score REAL,
-                explain TEXT,
                 as_of TEXT NOT NULL,
                 detected_at TEXT,
                 proximity_to_sl REAL,
@@ -1237,7 +1350,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     has_prox_bin = False
 
             column_list = [
-                "symbol", "direction", "price", "sl", "tp", "rrr", "score", "explain", "as_of"
+                "symbol", "direction", "price", "sl", "tp", "rrr", "score", "as_of"
             ]
             if has_detected:
                 column_list.append("detected_at")
@@ -1296,7 +1409,6 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     r.get("tp"),
                     r.get("rrr"),
                     r.get("score"),
-                    r.get("explain"),
                     as_of_val,
                 ]
                 if has_detected:
@@ -1358,6 +1470,8 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
             except Exception:
                 print(f"[DB] Inserted {inserted} new setup(s)")
+
+        _rebuild_consensus_table(conn, source_table=table)
 
 
 def main() -> None:

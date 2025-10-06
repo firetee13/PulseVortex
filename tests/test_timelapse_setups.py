@@ -413,7 +413,6 @@ class FilterFunctionsTests(unittest.TestCase):
                 tp REAL,
                 rrr REAL,
                 score REAL,
-                explain TEXT,
                 as_of TEXT NOT NULL,
                 proximity_to_sl REAL,
                 UNIQUE(symbol, direction, as_of)
@@ -440,8 +439,8 @@ class FilterFunctionsTests(unittest.TestCase):
 
         # Insert an open setup (no hit record) with proximity_to_sl to test bin filtering
         cur.execute("""
-            INSERT INTO timelapse_setups (symbol, direction, price, sl, tp, rrr, score, explain, as_of, proximity_to_sl)
-            VALUES ('EURUSD', 'Buy', 1.1, 1.0, 1.2, 2.0, 1.5, 'test', '2023-01-01 00:00:00', 0.3)
+            INSERT INTO timelapse_setups (symbol, direction, price, sl, tp, rrr, score, as_of, proximity_to_sl)
+            VALUES ('EURUSD', 'Buy', 1.1, 1.0, 1.2, 2.0, 1.5, '2023-01-01 00:00:00', 0.3)
         """)
 
         conn.commit()
@@ -501,8 +500,8 @@ class FilterFunctionsTests(unittest.TestCase):
 
         # Insert a setup with a hit record (closed)
         cur.execute("""
-            INSERT INTO timelapse_setups (symbol, direction, price, sl, tp, rrr, score, explain, as_of)
-            VALUES ('EURUSD', 'Buy', 1.1, 1.0, 1.2, 2.0, 1.5, 'test', '2023-01-01 00:00:00')
+            INSERT INTO timelapse_setups (symbol, direction, price, sl, tp, rrr, score, as_of)
+            VALUES ('EURUSD', 'Buy', 1.1, 1.0, 1.2, 2.0, 1.5, '2023-01-01 00:00:00')
         """)
 
         setup_id = cur.lastrowid
@@ -1196,7 +1195,6 @@ class ProcessOnceTests(unittest.TestCase):
                 'tp': 1.15,
                 'rrr': 1.5,
                 'score': 3.0,
-                'explain': 'Test explanation',
                 'as_of': datetime.now(UTC),
                 'proximity_to_sl': 0.3
             }
@@ -1227,7 +1225,6 @@ class ProcessOnceTests(unittest.TestCase):
                 'tp': 1.15,
                 'rrr': 1.5,
                 'score': 3.0,
-                'explain': 'Test explanation',
                 'as_of': datetime.now(UTC),
                 'proximity_to_sl': 0.3
             }
@@ -1261,7 +1258,6 @@ class ProcessOnceTests(unittest.TestCase):
                 'tp': 1.15,
                 'rrr': 1.5,
                 'score': 3.0,
-                'explain': 'Test explanation',
                 'as_of': datetime.now(UTC),
                 'proximity_to_sl': 0.3
             },
@@ -1273,7 +1269,6 @@ class ProcessOnceTests(unittest.TestCase):
                 'tp': 1.25,
                 'rrr': 1.2,
                 'score': 2.5,
-                'explain': 'Test explanation',
                 'as_of': datetime.now(UTC),
                 'proximity_to_sl': 0.4
             }

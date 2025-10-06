@@ -1,8 +1,8 @@
 __pycache__/
 .vscode
-*.db
+*.db*
 backup
 *en.md
 *ts.md
 .clinerules
-monitor_gui_settings.json
+*.json

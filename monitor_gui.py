@@ -1981,8 +1981,22 @@ class App(tk.Tk):
         if selected_bin and selected_bin != 'All' and times and raw_values is not None and cat_bins is not None:
             filtered_idx = [i for i, label in enumerate(cat_bins) if label == selected_bin]
             times = [times[i] for i in filtered_idx]
-            values = [values[i] for i in filtered_idx] if values else values
             raw_values = [raw_values[i] for i in filtered_idx]
+            # Recompute cumulative series from filtered raw returns to avoid inheriting
+            # earlier trades outside the bin.
+            if raw_values:
+                running = 0.0
+                values = []
+                for v in raw_values:
+                    running += v
+                    values.append(running)
+            else:
+                values = []
+
+        if raw_values is None:
+            raw_values = []
+        if values is None:
+            values = []
 
         if not times or not values:
             ax.text(0.5, 0.5, 'No trades available.', ha='center', va='center', transform=ax.transAxes)
@@ -2001,7 +2015,7 @@ class App(tk.Tk):
         n = min(len(times), len(values))
         times = times[:n]
         values = values[:n]
-        raw_slice = raw_values[:n] if raw_values else None
+        raw_slice = raw_values[:n]
 
         try:
             times_disp = [t.astimezone(DISPLAY_TZ) for t in times]

@@ -1079,7 +1079,7 @@ def analyze(
                 bump("price_outside_buy_sr")
                 continue
             risk = price - sl if price is not None and sl is not None else None
-            reward = (tp - sl) if (tp is not None and sl is not None) else None
+            reward = (tp - price) if (tp is not None and price is not None) else None
             rrr = None
             if risk is not None and reward is not None and risk > 0 and reward > 0:
                 rrr = reward / risk
@@ -1105,7 +1105,7 @@ def analyze(
                 bump("price_outside_sell_sr")
                 continue
             risk = (sl - price) if price is not None and sl is not None else None
-            reward = (sl - tp) if (sl is not None and tp is not None) else None
+            reward = (price - tp) if (price is not None and tp is not None) else None
             rrr = None
             if risk is not None and reward is not None and risk > 0 and reward > 0:
                 rrr = reward / risk

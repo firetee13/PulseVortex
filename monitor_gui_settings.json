@@ -1,9 +1,14 @@
 {
   "exclude_symbols": "",
-  "min_prox_sl": "0.33",
-  "max_prox_sl": "0.49",
-  "since_hours": 168,
-  "interval": 20,
+  "since_hours": 500,
+  "interval": 120,
   "symbol_category": "All",
-  "hit_status": "All"
+  "hit_status": "All",
+  "symbol_filter": "",
+  "prox_since_hours": 1000,
+  "prox_min_trades": 1,
+  "prox_symbol_filter": "",
+  "prox_category": "Crypto",
+  "prox_auto": true,
+  "prox_interval": 300
 }

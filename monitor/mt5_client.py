@@ -5,7 +5,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .domain import Hit, TickFetchStats
 
@@ -16,9 +16,101 @@ except Exception:  # pragma: no cover
 
 UTC = timezone.utc
 
+def _coerce_price(value: object) -> Optional[float]:
+    """Best-effort float conversion that ignores missing values."""
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if out != out or out in (float('inf'), float('-inf')):
+        return None
+    return out
+
+
+_TIMEFRAME_SECOND_MAP: Dict[int, int] = {}
+
+
+def _register_timeframe_seconds() -> None:
+    if mt5 is None:
+        return
+    mapping = [
+        ("TIMEFRAME_M1", 60),
+        ("TIMEFRAME_M2", 120),
+        ("TIMEFRAME_M3", 180),
+        ("TIMEFRAME_M4", 240),
+        ("TIMEFRAME_M5", 300),
+        ("TIMEFRAME_M6", 360),
+        ("TIMEFRAME_M10", 600),
+        ("TIMEFRAME_M12", 720),
+        ("TIMEFRAME_M15", 900),
+        ("TIMEFRAME_M20", 1200),
+        ("TIMEFRAME_M30", 1800),
+        ("TIMEFRAME_H1", 3600),
+        ("TIMEFRAME_H2", 7200),
+        ("TIMEFRAME_H3", 10800),
+        ("TIMEFRAME_H4", 14400),
+        ("TIMEFRAME_H6", 21600),
+        ("TIMEFRAME_H8", 28800),
+        ("TIMEFRAME_H12", 43200),
+        ("TIMEFRAME_D1", 86400),
+        ("TIMEFRAME_W1", 604800),
+        ("TIMEFRAME_MN1", 2592000),
+    ]
+    for name, seconds in mapping:
+        try:
+            value = getattr(mt5, name)
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        try:
+            _TIMEFRAME_SECOND_MAP[int(value)] = int(seconds)
+        except Exception:
+            continue
+
+
+_register_timeframe_seconds()
+
 
 def has_mt5() -> bool:
     return mt5 is not None
+
+
+def timeframe_m1() -> int:
+    if mt5 is None:
+        return 1
+    try:
+        return int(getattr(mt5, "TIMEFRAME_M1"))
+    except Exception:
+        return 1
+
+
+def timeframe_seconds(timeframe: int) -> int:
+    try:
+        key = int(timeframe)
+    except Exception:
+        return 60
+    return _TIMEFRAME_SECOND_MAP.get(key, 60)
+
+
+def timeframe_from_code(code: str) -> Optional[int]:
+    if not code:
+        return None
+    name = f"TIMEFRAME_{code.strip().upper()}"
+    if mt5 is None:
+        return None
+    try:
+        value = getattr(mt5, name)
+    except Exception:
+        value = None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _candidate_terminal_paths(user_hint: Optional[str]) -> List[Optional[str]]:
@@ -149,6 +241,15 @@ def resolve_symbol(base: str) -> Optional[str]:
     return None
 
 
+def get_symbol_info(symbol: str):
+    if mt5 is None:
+        return None
+    try:
+        return mt5.symbol_info(symbol)
+    except Exception:
+        return None
+
+
 def get_server_offset_hours(symbol_for_probe: str) -> int:
     """Infer whole-hour server offset using latest tick time vs now UTC."""
     if mt5 is None:
@@ -185,6 +286,31 @@ def epoch_to_server_naive(epoch_seconds: float, offset_hours: int) -> datetime:
 def from_server_naive(dt_naive: datetime, offset_hours: int) -> datetime:
     epoch = dt_naive.timestamp() - (offset_hours * 3600.0)
     return datetime.fromtimestamp(epoch, tz=UTC)
+
+
+def rates_range_utc(
+    symbol: str,
+    timeframe: int,
+    start_utc: datetime,
+    end_utc: datetime,
+    offset_hours: int,
+    trace: bool = False,
+):
+    """Fetch bars for [start_utc, end_utc] and return them as a list."""
+
+    if mt5 is None or start_utc >= end_utc:
+        return []
+    start_server = to_server_naive(start_utc, offset_hours)
+    end_server = to_server_naive(end_utc, offset_hours)
+    call_t0 = perf_counter()
+    rates = mt5.copy_rates_range(symbol, timeframe, start_server, end_server)
+    elapsed = perf_counter() - call_t0
+    if trace:
+        count = 0 if rates is None else len(rates)
+        print(
+            f"    [rates-range] {symbol} tf={timeframe} bars={count} in {elapsed*1000:.1f} ms"
+        )
+    return [] if rates is None else list(rates)
 
 
 def ticks_paged(
@@ -334,6 +460,8 @@ def earliest_hit_from_ticks(
             n = 0
     if n == 0:
         return None
+    last_bid: Optional[float] = None
+    last_ask: Optional[float] = None
     for i in range(n):
         tk = ticks[i]
         bid = getattr(tk, 'bid', None)
@@ -350,7 +478,17 @@ def earliest_hit_from_ticks(
             except Exception:
                 if isinstance(tk, dict):
                     ask = tk.get('ask')
-        if bid is None and ask is None:
+        bid_val = _coerce_price(bid)
+        ask_val = _coerce_price(ask)
+        if bid_val is not None:
+            last_bid = bid_val
+        else:
+            bid_val = last_bid
+        if ask_val is not None:
+            last_ask = ask_val
+        else:
+            ask_val = last_ask
+        if bid_val is None and ask_val is None:
             continue
         tms = getattr(tk, 'time_msc', None)
         if tms is None:
@@ -376,14 +514,19 @@ def earliest_hit_from_ticks(
         if dt_raw is None:
             continue
         dt_utc = dt_raw - timedelta(hours=server_offset_hours)
-        if direction.lower() == 'buy':
-            if bid is not None and bid <= sl:
-                return Hit(kind='SL', time_utc=dt_utc, price=bid)
-            if bid is not None and bid >= tp:
-                return Hit(kind='TP', time_utc=dt_utc, price=bid)
+        lower_direction = direction.lower()
+        if lower_direction == 'buy':
+            if bid_val is None:
+                continue
+            if bid_val <= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=bid_val)
+            if bid_val >= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=bid_val)
         else:
-            if ask is not None and ask >= sl:
-                return Hit(kind='SL', time_utc=dt_utc, price=ask)
-            if ask is not None and ask <= tp:
-                return Hit(kind='TP', time_utc=dt_utc, price=ask)
+            if ask_val is None:
+                continue
+            if ask_val >= sl:
+                return Hit(kind='SL', time_utc=dt_utc, price=ask_val)
+            if ask_val <= tp:
+                return Hit(kind='TP', time_utc=dt_utc, price=ask_val)
     return None

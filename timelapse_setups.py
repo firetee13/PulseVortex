@@ -11,6 +11,7 @@ Notes:
   - Spread filter: Only spreads <0.3% accepted, others filtered out.
   - SL/TP logic: Buy -> SL=S1 or D1 Low, TP=R1 or D1 High; Sell -> SL=R1 or D1 High, TP=S1 or D1 Low. Price must lie between SL and TP.
   - SL distance filter: Stop loss must be at least 10x the current spread away from entry price (Buy: bid-SL >= 10x spread, Sell: SL-ask >= 10x spread).
+  - TP distance filter: Take profit must also be at least 10x the current spread away from entry (Buy: TP-bid >= 10x spread, Sell: ask-TP >= 10x spread).
   - Current price and RRR use Bid/Ask at signal timestamp (Buy: Ask, Sell: Bid).
   - ATR(%) effect: adds +0.5 score bonus when within [60, 150] (for informational purposes).
   - Timelapse: simulated from previous values in MT5 data for momentum context.
@@ -21,36 +22,30 @@ from __future__ import annotations
 
 import atexit
 import argparse
+import math
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set, TypedDict, Union
+from typing import Any, Dict, List, Optional, Tuple, Set
+import types
 # DB backend: SQLite only
 try:
     import sqlite3  # type: ignore
 except Exception:
     sqlite3 = None  # type: ignore
 
-# Optional filesystem event support (watchdog)
-HAS_WATCHDOG = False
-try:
-    from watchdog.observers import Observer  # type: ignore
-    from watchdog.events import PatternMatchingEventHandler  # type: ignore
-    HAS_WATCHDOG = True
-except Exception:
-    HAS_WATCHDOG = False
 
 from monitor.config import default_db_path
 from monitor import mt5_client
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SQLITE_PATH = str(default_db_path())
 import json
 import numpy as np  # required for ATR computations
 
-# Optional MT5 for tick backfill
+# Optional MT5
 mt5 = getattr(mt5_client, "mt5", None)  # type: ignore
 _MT5_IMPORTED = mt5_client.has_mt5()
 atexit.register(mt5_client.shutdown_mt5)
@@ -69,7 +64,10 @@ def _infer_decimals_from_price(price: Optional[float]) -> int:
     try:
         if price is None:
             return 5
-        s = f"{float(price):.10f}".rstrip("0").rstrip(".")
+        value = float(price)
+        if not math.isfinite(value):
+            return 5
+        s = f"{value:.10f}".rstrip("0").rstrip(".")
         if "." in s:
             return max(0, min(10, len(s.split(".")[1])))
         return 0
@@ -110,10 +108,6 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Analyze MT5 symbols for trade setups (MT5 is the only source)")
     p.add_argument("--symbols", default="", help="Comma-separated symbols (default: all visible in MarketWatch)")
     p.add_argument("--min-rrr", type=float, default=1.0, help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering")
-    # Optional guards (disabled by default). Primary fix is bid/ask backfill.
-    p.add_argument("--min-prox-sl", type=float, default=0.0, help="Optional: require entry to be at least this fraction away from SL relative to SL/TP range")
-    p.add_argument("--max-prox-sl", type=float, default=1.0, help="Optional: require entry to be at most this fraction away from SL relative to SL/TP range")
-    p.add_argument("--min-sl-pct", type=float, default=0.0, help="Optional: require |price-SL| to exceed this percent of price (units in %%)")
     p.add_argument("--top", type=int, default=None, help="Limit to top N setups (after filtering)")
     p.add_argument("--brief", action="store_true", help="Brief output without detailed explanation")
     p.add_argument("--watch", action="store_true", help="Run continuously and poll MT5 for updates")
@@ -123,6 +117,28 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+PROXIMITY_BIN_BUCKET = 0.1
+# Multiplier for minimum SL/TP distance in spread units (default 10x; override via TIMELAPSE_SPREAD_MULT)
+SPREAD_MULTIPLIER = float(os.environ.get("TIMELAPSE_SPREAD_MULT", "10"))
+
+
+def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET) -> Optional[str]:
+    """Return the proximity bucket label (e.g., '0.4-0.5') used for gating/stats."""
+    try:
+        if proximity is None:
+            return None
+        value = float(proximity)
+        if not math.isfinite(value):
+            return None
+        if value < 0:
+            value = 0.0
+        start = math.floor(value / bucket) * bucket
+        end = start + bucket
+        return f"{start:.1f}-{end:.1f}"
+    except Exception:
+        return None
+
+
 # Fixed offset timezone for input interpretation (Europe/Berlin UTC+2)
 INPUT_TZ = timezone(timedelta(hours=2))
 
@@ -130,33 +146,182 @@ UTC = timezone.utc
 UTC3 = timezone(timedelta(hours=3))
 # Consider market "alive" only if there's at least one tick
 # within this many seconds. Avoid creating entries for closed markets.
-TICK_FRESHNESS_SEC = 30  # 30 seconds
+TICK_FRESHNESS_SEC = 60  # 60 seconds
 # Cache last tick data to minimize expensive history lookups
 _LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[datetime]]] = {}
 
 # Cache MT5 rate data with lightweight TTLs per timeframe to reduce IPC churn
 _RATE_CACHE: Dict[Tuple[str, int, int], Tuple[float, Any]] = {}
 # Reusable SQLite connection handle (populated lazily)
-_DB_CONN: Optional[Any] = None
+_DB_CONN: Optional["sqlite3.Connection"] = None
+_DB_CONN_PATH: Optional[str] = None
 
-def _get_db_connection() -> Optional[Any]:
-    global _DB_CONN
+CONSENSUS_TABLE = "consensus"
+# Score/RRR/proximity thresholds for the three timeframes. A tighter proximity
+# threshold means the stop loss sits further away relative to price, which we
+# treat as higher conviction.
+_CONSENSUS_THRESHOLDS = {
+    "1h": {"score": 3.0, "rrr": 1.2, "proximity": 0.6},
+    "4h": {"score": 4.5, "rrr": 1.4, "proximity": 0.45},
+    "1d": {"score": 6.0, "rrr": 1.6, "proximity": 0.35},
+}
+
+if sqlite3 is not None:
+    class _ManagedConnection(sqlite3.Connection):  # type: ignore[misc]
+        _closed: bool = False
+
+        def close(self) -> None:  # type: ignore[override]
+            if getattr(self, "_closed", False):
+                return
+            try:
+                super().close()
+            finally:
+                self._closed = True
+
+        def __del__(self) -> None:  # pragma: no cover - defensive close
+            try:
+                self.close()
+            except Exception:
+                pass
+
+
+def _connect_sqlite(db_path: str, *, timeout: float = 5.0) -> "sqlite3.Connection":
+    if sqlite3 is None:
+        raise RuntimeError("sqlite3 not available")
+    kwargs: Dict[str, Any] = {
+        "timeout": timeout,
+        "check_same_thread": False,
+    }
+    if "_ManagedConnection" in globals():
+        kwargs["factory"] = _ManagedConnection  # type: ignore[assignment]
+    return sqlite3.connect(db_path, **kwargs)
+
+
+def _get_db_connection() -> Optional["sqlite3.Connection"]:
+    global _DB_CONN, _DB_CONN_PATH
     if sqlite3 is None:
         return None
+    db_path = str(default_db_path())
+    if _DB_CONN is not None and _DB_CONN_PATH and _DB_CONN_PATH != db_path:
+        _close_db_connection()
     if _DB_CONN is None:
-        db_path = DEFAULT_SQLITE_PATH
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        _DB_CONN = sqlite3.connect(db_path, timeout=5, check_same_thread=False)
+        _DB_CONN = _connect_sqlite(db_path, timeout=5.0)
+        _DB_CONN_PATH = db_path
     return _DB_CONN
 
+
+def _ensure_consensus_schema(cur: "sqlite3.Cursor", source_table: str) -> None:
+    """Create the consensus table if missing."""
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CONSENSUS_TABLE} (
+            id INTEGER PRIMARY KEY,
+            is_1h_consensus INTEGER NOT NULL,
+            is_4h_consensus INTEGER NOT NULL,
+            is_1d_consensus INTEGER NOT NULL,
+            FOREIGN KEY(id) REFERENCES {source_table}(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _calculate_consensus_flags(score: object, rrr: object, proximity_to_sl: object) -> Tuple[bool, bool, bool]:
+    """Translate raw setup metrics into timeframe consensus booleans.
+
+    The algorithm assumes higher timeframe agreement requires progressively
+    stricter filters. We treat the existing score as a proxy for directional
+    conviction, RRR as reward quality, and proximity_to_sl as risk tightness.
+    """
+    def _to_float(value: object, default: float = float("nan")) -> float:
+        try:
+            fval = float(value)
+            return fval if math.isfinite(fval) else default
+        except Exception:
+            return default
+
+    score_val = _to_float(score, 0.0)
+    rrr_val = _to_float(rrr, 0.0)
+    prox_val = _to_float(proximity_to_sl, float("nan"))
+
+    def _meets(thr: Dict[str, float]) -> bool:
+        proximity_limit = thr.get("proximity")
+        proximity_ok = not math.isfinite(prox_val) or prox_val <= proximity_limit
+        return (
+            score_val >= thr.get("score", 0.0)
+            and rrr_val >= thr.get("rrr", 0.0)
+            and proximity_ok
+        )
+
+    return (
+        _meets(_CONSENSUS_THRESHOLDS["1h"]),
+        _meets(_CONSENSUS_THRESHOLDS["4h"]),
+        _meets(_CONSENSUS_THRESHOLDS["1d"]),
+    )
+
+
+def _rebuild_consensus_table(conn: "sqlite3.Connection", *, source_table: str = "timelapse_setups") -> None:
+    """Recreate consensus rows for every setup, updating in place."""
+    try:
+        cur = conn.cursor()
+        _ensure_consensus_schema(cur, source_table)
+        cur.execute(f"PRAGMA table_info({source_table})")
+        columns = [str(row[1]) for row in (cur.fetchall() or [])]
+        if "id" not in columns or "score" not in columns or "rrr" not in columns:
+            return
+        proximity_selector = "proximity_to_sl" if "proximity_to_sl" in columns else "NULL AS proximity_to_sl"
+        cur.execute(
+            f"SELECT id, score, rrr, {proximity_selector} FROM {source_table}"
+        )
+        rows = cur.fetchall() or []
+        if not rows:
+            cur.execute(f"DELETE FROM {CONSENSUS_TABLE}")
+            return
+
+        payload: List[Tuple[int, int, int, int]] = []
+        for row in rows:
+            setup_id = row[0]
+            if setup_id is None:
+                continue
+            flags = _calculate_consensus_flags(row[1], row[2], row[3])
+            payload.append((
+                int(setup_id),
+                int(flags[0]),
+                int(flags[1]),
+                int(flags[2]),
+            ))
+
+        if not payload:
+            return
+
+        cur.executemany(
+            f"""
+            INSERT INTO {CONSENSUS_TABLE} (id, is_1h_consensus, is_4h_consensus, is_1d_consensus)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                is_1h_consensus=excluded.is_1h_consensus,
+                is_4h_consensus=excluded.is_4h_consensus,
+                is_1d_consensus=excluded.is_1d_consensus
+            """,
+            payload,
+        )
+        cur.execute(
+            f"DELETE FROM {CONSENSUS_TABLE} WHERE id NOT IN (SELECT id FROM {source_table})"
+        )
+    except sqlite3.Error as exc:
+        print(f"[DB] Warning: consensus refresh failed: {exc}")
+
+
 def _close_db_connection() -> None:
-    global _DB_CONN
+    global _DB_CONN, _DB_CONN_PATH
     if _DB_CONN is not None:
         try:
             _DB_CONN.close()
         except Exception:
             pass
-        _DB_CONN = None
+    _DB_CONN = None
+    _DB_CONN_PATH = None
+
 
 if sqlite3 is not None:
     atexit.register(_close_db_connection)
@@ -214,63 +379,6 @@ def _mt5_ensure_init() -> bool:
 
 
 
-def _mt5_backfill_bid_ask(symbol: str, as_of: datetime, need_bid: bool, need_ask: bool, max_lookback_sec: int = 180) -> Tuple[Optional[float], Optional[float]]:
-    """Fetch nearest prior Bid/Ask from MT5 tick history up to max_lookback_sec.
-
-    Searches backwards from `as_of` (interpreted as UTC) within a sliding window
-    for the last tick that updated the needed side(s). Returns (bid, ask) for
-    the sides requested; non-requested sides are returned as None.
-    """
-    if not _mt5_ensure_init():
-        return (None, None)
-    try:
-        # Convert as_of to UTC aware
-        if as_of.tzinfo is None:
-            end_utc = as_of.replace(tzinfo=UTC)
-        else:
-            end_utc = as_of.astimezone(UTC)
-
-        window = 7  # seconds per fetch window
-        looked = 0
-        out_bid: Optional[float] = None
-        out_ask: Optional[float] = None
-        while looked < max_lookback_sec and ((need_bid and out_bid is None) or (need_ask and out_ask is None)):
-            start_utc = end_utc - timedelta(seconds=min(window, max_lookback_sec - looked))
-            ticks = mt5.copy_ticks_range(symbol, start_utc, end_utc, mt5.COPY_TICKS_ALL)  # type: ignore[union-attr, reportUnknownMember]
-            if ticks is not None and len(ticks) > 0:
-                # Scan backwards for last updates
-                for t in reversed(ticks):
-                    # mt5 returns numpy structured array; handle by attribute names if present
-                    try:
-                        flags = int(t['flags'])
-                        bid_v = float(t['bid'])
-                        ask_v = float(t['ask'])
-                    except Exception:
-                        try:
-                            # Fallback for tuple-like
-                            flags = int(t[6]) if len(t) > 6 else 0
-                            bid_v = float(t[1])
-                            ask_v = float(t[2])
-                        except Exception:
-                            continue
-                    if need_bid and out_bid is None:
-                        has = (flags & getattr(mt5, 'TICK_FLAG_BID', 0)) != 0
-                        if has or bid_v != 0.0:
-                            out_bid = bid_v
-                    if need_ask and out_ask is None:
-                        has = (flags & getattr(mt5, 'TICK_FLAG_ASK', 0)) != 0
-                        if has or ask_v != 0.0:
-                            out_ask = ask_v
-                    if ((not need_bid) or out_bid is not None) and ((not need_ask) or out_ask is not None):
-                        break
-            # expand window backwards
-            end_utc = start_utc
-            looked += window
-        return (out_bid if need_bid else None, out_ask if need_ask else None)
-    except Exception:
-        return (None, None)
-
-
 
 def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     """Fetch MT5 rates with a short TTL-based cache to limit IPC overhead."""
@@ -278,8 +386,10 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     ttl = float(_RATE_TTL_SECONDS.get(timeframe, 5.0))
     now = time.time()
     cached = _RATE_CACHE.get(key)
-    if cached is not None and (now - cached[0]) <= ttl:
-        return cached[1]
+    if cached is not None:
+        age = now - cached[0]
+        if 0.0 <= age <= ttl:
+            return cached[1]
     try:
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)  # type: ignore[union-attr, reportUnknownMember]
     except Exception:
@@ -289,71 +399,6 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     else:
         _RATE_CACHE.pop(key, None)
     return rates
-
-def _get_tick_volume_last_2_bars(symbol: str) -> Optional[bool]:
-    """Check tick volume for each of the last 2 completed minutes (M1 bars).
-
-    For each minute in the last 2 minutes (excluding the current open minute),
-    ensures the M1 bar exists and has tick_volume >= 10. Missing bars are treated
-    as zero volume and fail the check.
-
-    Returns:
-        True  -> all 2 completed minutes have tick_volume >= 10
-        False -> any minute missing or tick_volume < 10
-        None  -> MT5 not available/initialized
-    """
-    if not _mt5_ensure_init():
-        return None
-    try:
-        now_ts = int(time.time())
-        this_minute_start = (now_ts // 60) * 60
-        # Minutes to check: t-60, t-120
-        target_opens = [this_minute_start - i * 60 for i in range(1, 3)]
-
-        # Fetch bars covering exactly that window
-        dt_from = datetime.fromtimestamp(target_opens[-1], tz=UTC)
-        dt_to = datetime.fromtimestamp(this_minute_start, tz=UTC)
-        try:
-            rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1, dt_from, dt_to)  # type: ignore[union-attr, reportUnknownMember]
-        except Exception:
-            rates = None
-
-        if rates is None or len(rates) == 0:
-            return False
-
-        # Map open time -> tick_volume using numpy for speed
-        try:
-            times = rates['time'].astype(int)
-            vols = rates['tick_volume'].astype(int)
-            vol_by_time = dict(zip(times, vols))
-        except Exception:
-            # Fallback to loop
-            vol_by_time: Dict[int, int] = {}
-            for r in rates:
-                try:
-                    t_open = int(r['time'])
-                except Exception:
-                    try:
-                        t_open = int(r[0])
-                    except Exception:
-                        continue
-                try:
-                    vol = int(r['tick_volume'])
-                except Exception:
-                    try:
-                        vol = int(r[5])
-                    except Exception:
-                        continue
-                vol_by_time[t_open] = vol
-
-        # Verify each minute
-        for t_open in target_opens:
-            vol = vol_by_time.get(t_open)
-            if vol is None or vol < 10:
-                return False
-        return True
-    except Exception:
-        return None
 
 def canonicalize_key(s: Optional[str]) -> str:
     """Canonicalize CSV header / lookup keys for case-insensitive, punctuation-robust matching.
@@ -442,12 +487,15 @@ def normalize_spread_pct(pct: Optional[float]) -> Optional[float]:
     if pct is None:
         return None
     try:
+        value = float(pct)
+        if not math.isfinite(value):
+            return None
         # If the value looks like a tiny fraction (< 0.01), treat it as fraction-of-price
         # and convert to percent units by multiplying by 100. Otherwise assume it's
         # already expressed in percent units.
-        if abs(pct) < 0.01:
-            return pct * 100.0
-        return pct
+        if abs(value) < 0.01:
+            return value * 100.0
+        return value
     except Exception:
         return None
 
@@ -480,18 +528,30 @@ class Snapshot:
 
 
 def _atr(values: List[Tuple[float, float, float]], period: int = 14) -> Optional[float]:
+    """Average True Range using Wilder's smoothing.
+
+    Requires at least period+1 bars to compute the initial ATR.
+    """
     if len(values) < period + 1:
         return None
-    vals = np.array(values)  # shape (n, 3): high, low, close
-    highs = vals[1:period+1, 0]
-    lows = vals[1:period+1, 1]
-    closes = vals[1:period+1, 2]
-    prev_closes = vals[0:period, 2]
-    tr1 = highs - lows
-    tr2 = np.abs(highs - prev_closes)
-    tr3 = np.abs(prev_closes - lows)
-    trs = np.maximum.reduce([tr1, tr2, tr3])
-    return np.mean(trs)
+    try:
+        vals = np.asarray(values, dtype=float)  # shape (n, 3): high, low, close
+        highs = vals[1:, 0]
+        lows = vals[1:, 1]
+        prev_closes = vals[:-1, 2]
+        tr = np.maximum.reduce([
+            highs - lows,
+            np.abs(highs - prev_closes),
+            np.abs(prev_closes - lows),
+        ])
+        # Initial ATR: simple mean of first `period` TRs
+        atr = float(np.mean(tr[:period]))
+        # Wilder smoothing over remaining TRs (if any)
+        for tr_val in tr[period:]:
+            atr = (atr * (period - 1) + float(tr_val)) / period
+        return atr
+    except Exception:
+        return None
 
 def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]]:
     try:
@@ -510,12 +570,12 @@ def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]
 
 
 def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Optional[str], Optional[datetime]]:
-    if not _mt5_ensure_init():
-        print('[MT5] initialize() failed; cannot read symbols.')
-        return {}, None, None
-    series: Dict[str, List[Snapshot]] = {}
     now_utc = datetime.now(UTC)
     latest_ts = now_utc.astimezone(INPUT_TZ)
+    if not _mt5_ensure_init():
+        print('[MT5] initialize() failed; cannot read symbols.')
+        return {}, None, latest_ts
+    series: Dict[str, List[Snapshot]] = {}
     for sym in symbols:
         try:
             mt5.symbol_select(sym, True)  # type: ignore[union-attr, reportUnknownMember]
@@ -531,7 +591,6 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         tick_time_utc: Optional[datetime] = None
         tick_age: Optional[float] = None
         has_recent_tick = False
-        used_backfill = False
 
         if tick is not None:
             try:
@@ -564,103 +623,11 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
                 except Exception:
                     tick_age = None
 
-        if not has_recent_tick:
-            cached_tick = _LAST_TICK_CACHE.get(sym)
-            if cached_tick is not None:
-                _, _, cached_ts = cached_tick
-                if cached_ts is not None:
-                    try:
-                        cache_age = abs((now_utc - cached_ts).total_seconds())
-                        if cache_age <= TICK_FRESHNESS_SEC:
-                            has_recent_tick = True
-                    except Exception:
-                        pass
-
-        # Ensure Bid/Ask represent the latest available tick values.
-        # Previous behavior only backfilled when a side was None, which could
-        # leave us with stale prices if symbol_info_tick had both sides but an
-        # old or missing timestamp. To honor the "previous second" intent,
-        # refresh from tick history when the tick is stale or un-timestamped.
-        STALE_TICK_THRESHOLD_SEC = 2.0
-        needs_refresh = (
-            (bid is None or ask is None)
-            or (tick_age is None)  # missing/unknown tick time
-            or (tick_age is not None and tick_age > STALE_TICK_THRESHOLD_SEC)
-        )
-        if needs_refresh:
-            used_backfill = True
-            mt5_bid, mt5_ask = _mt5_backfill_bid_ask(
-                sym,
-                now_utc,
-                need_bid=True,
-                need_ask=True,
-            )
-            if mt5_bid is not None:
-                bid = mt5_bid
-            if mt5_ask is not None:
-                ask = mt5_ask
-            # Try to also refresh tick_time_utc using the last tick in a short window
-            # so downstream freshness checks reflect what we used.
-            try:
-                ticks_recent = mt5.copy_ticks_range(  # type: ignore[union-attr, reportUnknownMember]
-                    sym,
-                    now_utc - timedelta(seconds=5),
-                    now_utc,
-                    mt5.COPY_TICKS_ALL,  # type: ignore[union-attr, reportUnknownMember]
-                )
-                if ticks_recent is not None and len(ticks_recent) > 0:
-                    lt = ticks_recent[-1]
-                    try:
-                        # numpy structured array style
-                        tmsc = None
-                        try:
-                            tmsc = lt['time_msc']  # type: ignore[index]
-                        except Exception:
-                            tmsc = getattr(lt, 'time_msc', None)
-                        if tmsc:
-                            tick_time_utc = datetime.fromtimestamp(float(tmsc) / 1000.0, tz=UTC)
-                        else:
-                            ts_val = None
-                            try:
-                                ts_val = lt['time']  # type: ignore[index]
-                            except Exception:
-                                ts_val = getattr(lt, 'time', None)
-                            if ts_val is not None:
-                                tick_time_utc = datetime.fromtimestamp(float(ts_val), tz=UTC)
-                    except Exception:
-                        pass
-                    if tick_time_utc is not None:
-                        try:
-                            tick_age = max(0.0, (now_utc - tick_time_utc).total_seconds())
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-        if not has_recent_tick:
-            try:
-                recent = mt5.copy_ticks_range(  # type: ignore[union-attr, reportUnknownMember]
-                    sym,
-                    now_utc - timedelta(seconds=TICK_FRESHNESS_SEC),
-                    now_utc,
-                    mt5.COPY_TICKS_ALL,  # type: ignore[union-attr, reportUnknownMember]
-                )
-                has_recent_tick = bool(recent is not None and len(recent) > 0)
-            except Exception:
-                has_recent_tick = False
-
-        if bid is not None or ask is not None:
-            cache_ts = tick_time_utc
-            if cache_ts is None:
-                prev = _LAST_TICK_CACHE.get(sym)
-                cache_ts = prev[2] if prev else None
-            _LAST_TICK_CACHE[sym] = (bid, ask, cache_ts)
-
-        d1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_D1, 20)  # type: ignore[union-attr, reportUnknownMember]
-        h4 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H4, 4)  # type: ignore[union-attr, reportUnknownMember]
-        w1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_W1, 4)  # type: ignore[union-attr, reportUnknownMember]
-        h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 1)  # type: ignore[union-attr, reportUnknownMember]
-        m15 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_M15, 1)  # type: ignore[union-attr, reportUnknownMember]
+        d1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_D1, 20)
+        h4 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H4, 4)
+        w1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_W1, 4)
+        h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 1)
+        m15 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_M15, 1)
 
         d1_close = float(d1[-1]['close']) if (d1 is not None and len(d1) >= 1) else None
         d1_high = float(d1[-1]['high']) if (d1 is not None and len(d1) >= 1) else None
@@ -673,6 +640,7 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             except Exception:
                 return None
 
+        ss_1h = pct_change(h1) if (h1 is not None and len(h1) >= 2) else None
         ss_4h = pct_change(h4) if (h4 is not None and len(h4) >= 2) else None
         ss_1d = pct_change(d1) if (d1 is not None and len(d1) >= 2) else None
         ss_1w = pct_change(w1) if (w1 is not None and len(w1) >= 2) else None
@@ -729,7 +697,8 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             'Bid': bid,
             'Ask': ask,
             'Spread%': spreadpct,
-            'Backfilled': 1 if used_backfill else 0,
+            'Backfilled': 0,
+            'Strength 1H': ss_1h,
             'Strength 4H': ss_4h,
             'Strength 1D': ss_1d,
             'Strength 1W': ss_1w,
@@ -750,6 +719,55 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
     return series, None, latest_ts
 
 
+def _ensure_proximity_bin_schema(cur: "sqlite3.Cursor", table: str) -> bool:
+    """Ensure the proximity_bin column exists on the setups table."""
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = {str(r[1]) for r in (cur.fetchall() or [])}
+        if "proximity_bin" in cols:
+            return True
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_bin TEXT")
+        return True
+    except Exception:
+        return False
+
+
+def _backfill_missing_proximity_bins(cur: "sqlite3.Cursor", table: str) -> int:
+    """Populate proximity_bin for rows that already have proximity_to_sl recorded."""
+    try:
+        cur.execute(
+            f"""
+            SELECT id, proximity_to_sl
+            FROM {table}
+            WHERE (proximity_bin IS NULL OR proximity_bin = '')
+              AND proximity_to_sl IS NOT NULL
+            """
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        return 0
+    updates: List[Tuple[str, int]] = []
+    for row in rows:
+        try:
+            rec_id = int(row[0])
+        except Exception:
+            continue
+        prox = row[1]
+        bin_label = _proximity_bin_label(prox)
+        if bin_label:
+            updates.append((bin_label, rec_id))
+    if not updates:
+        return 0
+    try:
+        cur.executemany(
+            f"UPDATE {table} SET proximity_bin = ? WHERE id = ?",
+            updates,
+        )
+        return len(updates)
+    except Exception:
+        return 0
+
+
 def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "timelapse_setups") -> Tuple[List[Dict[str, object]], Set[str]]:
     """Filter out results for symbols that already have an unsettled (open) setup.
 
@@ -761,12 +779,10 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
     """
     if not results or sqlite3 is None:
         return results, set()
-    db_path = DEFAULT_SQLITE_PATH
+    db_path = str(default_db_path())
+    conn: Optional["sqlite3.Connection"] = None
     try:
-        conn = sqlite3.connect(db_path, timeout=3)
-    except Exception:
-        return results, set()
-    try:
+        conn = _connect_sqlite(db_path, timeout=3.0)
         cur = conn.cursor()
         # Ensure setups table exists
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
@@ -776,28 +792,59 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ("timelapse_hits",))
         if cur.fetchone() is None:
             return results, set()
-        # Compute symbols that currently have at least one open setup
+        schema_ready = _ensure_proximity_bin_schema(cur, table)
+        backfilled = 0
+        if schema_ready:
+            backfilled = _backfill_missing_proximity_bins(cur, table)
+        if backfilled > 0:
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        # Compute open setups grouped by symbol, direction, and proximity bin
         cur.execute(
             f"""
-            SELECT DISTINCT t.symbol
+            SELECT t.symbol, t.direction, COALESCE(t.proximity_bin, '')
             FROM {table} t
             LEFT JOIN timelapse_hits h ON h.setup_id = t.id
             WHERE h.setup_id IS NULL
             """
         )
-        open_symbols = {str(r[0]) for r in (cur.fetchall() or []) if r and r[0] is not None}
-        if not open_symbols:
+        open_groups = set()
+        for rec in cur.fetchall() or []:
+            if not rec:
+                continue
+            sym = str(rec[0] or "")
+            direction = str(rec[1] or "")
+            bin_label = str(rec[2] or "")
+            if sym:
+                open_groups.add((sym.upper(), direction.upper(), bin_label))
+        if not open_groups:
             return results, set()
-        filtered = [r for r in results if str(r.get("symbol")) not in open_symbols]
-        excluded = {str(r.get("symbol")) for r in results if str(r.get("symbol")) in open_symbols}
+
+        filtered: List[Dict[str, object]] = []
+        excluded: Set[str] = set()
+        for row in results:
+            sym = str(row.get("symbol") or "")
+            direction = str(row.get("direction") or "")
+            prox = row.get("proximity_to_sl")
+            bin_label = _proximity_bin_label(prox) or ""
+            key = (sym.upper(), direction.upper(), bin_label)
+            if key in open_groups:
+                excluded.add(sym)
+                continue
+            filtered.append(row)
+            if sym:
+                open_groups.add(key)
         return filtered, excluded
     except Exception:
         return results, set()
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 
@@ -805,9 +852,6 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
 def process_once(
     symbols: List[str],
     min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
-    min_sl_pct: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -834,9 +878,6 @@ def process_once(
     results, reasons = analyze(
         series,
         min_rrr=min_rrr,
-        min_prox_sl=min_prox_sl,
-        max_prox_sl=max_prox_sl,
-        min_sl_pct=min_sl_pct,
         as_of_ts=as_of_ts,
         debug=debug,
     )
@@ -847,8 +888,8 @@ def process_once(
     # Suppress symbols that have an open (unsettled) setup in the DB already
     filtered, db_excluded = _filter_recent_duplicates(results, table="timelapse_setups")
     # Track DB exclusions in rejection reasons
-    if db_excluded: # Only add if there are excluded symbols
-        reasons.setdefault("already_in_db", []).extend(list(db_excluded)) # Extend with the list of excluded symbols
+    if db_excluded:  # Only add if there are excluded symbols
+        reasons.setdefault("one_trade_per_bin", []).extend(list(db_excluded))
 
     # Apply top limit after filtering
     top_results = filtered[: top] if top else filtered
@@ -877,7 +918,11 @@ def process_once(
             score = r["score"]
             print(f"{sym} | {direction} @ {price} | SL {sl} | TP {tp} | RRR {rrr:.2f} | score {score:.2f}")
             if not brief:
-                print(f"  -> {r['explain']}")
+                try:
+                    rich = {k: v for k, v in r.items() if k not in ('series', 'raw_snaps')}
+                    print(json.dumps(rich, indent=2, default=str))
+                except Exception:
+                    print(r)
 
     # Insert results into SQLite
     try:
@@ -891,9 +936,6 @@ def watch_loop(
     symbols: List[str],
     interval: float,
     min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
-    min_sl_pct: float,
     top: Optional[int],
     brief: bool,
     debug: bool = False,
@@ -906,59 +948,27 @@ def watch_loop(
             print(f"[EXCLUDE] Will filter out symbols: {sorted(exclude_set)}")
     try:
         while True:
-            time.sleep(interval)
             detected_at = datetime.now(UTC)
             process_once(
                 symbols,
                 min_rrr=min_rrr,
-                min_prox_sl=min_prox_sl,
-                max_prox_sl=max_prox_sl,
-                min_sl_pct=min_sl_pct,
                 top=top,
                 brief=brief,
                 debug=debug,
                 exclude_set=exclude_set,
                 detected_at=detected_at,
             )
+            time.sleep(max(0.0, interval))
     except KeyboardInterrupt:
         if debug:
             print("\nStopped watching.")
 
 
-def _watch_loop_events(
-    symbols: List[str],
-    min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
-    min_sl_pct: float,
-    top: Optional[int],
-    brief: bool,
-    debug: bool = False,
-    exclude_set: Optional[Set[str]] = None,
-    settle_delay: float = 0.2,
-) -> None:
-    """Poll MT5 periodically (watchdog not used)."""
-    watch_loop(
-        symbols=symbols,
-        interval=1.0,
-        min_rrr=min_rrr,
-        min_prox_sl=min_prox_sl,
-        max_prox_sl=max_prox_sl,
-        min_sl_pct=min_sl_pct,
-        top=top,
-        brief=brief,
-        debug=debug,
-        exclude_set=exclude_set,
-    )
-    return
 
 
 def analyze(
     series: Dict[str, List[Snapshot]],
     min_rrr: float,
-    min_prox_sl: float,
-    max_prox_sl: float,
-    min_sl_pct: float,
     as_of_ts: Optional[datetime],
     debug: bool = False,
 ) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
@@ -971,6 +981,7 @@ def analyze(
             continue
         snaps.sort(key=lambda s: s.ts)
         first, last = snaps[0], snaps[-1]
+        prox: Optional[float] = None
 
         # Filter out entries between 23:00 and 01:00 (UTC+3).
         # Intention: block 23:00–00:59 inclusive, allow from 01:00 onward.
@@ -988,6 +999,7 @@ def analyze(
             continue
 
         # Extract metrics from latest
+        ss1h = last.g("Strength 1H")
         ss4 = last.g("Strength 4H")
         ss1d = last.g("Strength 1D")
         ss1w = last.g("Strength 1W")
@@ -1006,35 +1018,6 @@ def analyze(
             tick_time_str = str(last.row.get(canonicalize_key('Last Tick UTC'), '') or '')
         except Exception:
             tick_time_str = ''
-        backfilled_flag = 0
-        try:
-            val_bf = last.row.get(canonicalize_key('Backfilled'))
-            if isinstance(val_bf, str):
-                val_bf = val_bf.strip()
-                if val_bf.isdigit():
-                    backfilled_flag = int(val_bf)
-            elif isinstance(val_bf, (int, float)):
-                backfilled_flag = int(val_bf)
-        except Exception:
-            backfilled_flag = 0
-
-        # Try MT5 tick backfill first if Bid/Ask missing at the latest snapshot
-        if bid is None or ask is None:
-            # Reference timestamp: prefer global latest (as_of_ts) if available
-            ref_ts = as_of_ts or last.ts
-            # Convert to UTC aware for MT5
-            if ref_ts.tzinfo is None:
-                ref_utc = ref_ts.replace(tzinfo=INPUT_TZ).astimezone(UTC)
-            else:
-                ref_utc = ref_ts.astimezone(UTC)
-            need_bid = bid is None
-            need_ask = ask is None
-            mt5_bid, mt5_ask = _mt5_backfill_bid_ask(sym, ref_utc, need_bid=need_bid, need_ask=need_ask)
-            if need_bid and mt5_bid is not None:
-                bid = mt5_bid
-            if need_ask and mt5_ask is not None:
-                ask = mt5_ask
-
 
         # Drop symbols without recent ticks (avoid closed markets)
         recent_tick_flag = last.g("Recent Tick")
@@ -1044,27 +1027,19 @@ def analyze(
                 print(f"[DEBUG] no_recent_ticks for {sym}")
             continue
 
-        # Filter out symbols with low tick volume in the last 2 M1 bars
-        volume_check_passed = _get_tick_volume_last_2_bars(sym)
-        if volume_check_passed is not None and not volume_check_passed:
-            bump("low_tick_volume_last_2_bars")
-            if debug:
-                print(f"[DEBUG] low_tick_volume_last_2_bars for {sym}: insufficient tick volume detected in the last 2 bars")
-            continue
-
         # Timelapse deltas (context)
         d1_close_trend = None if (d1_close is None or first.g("D1 Close") is None) else d1_close - (first.g("D1 Close") or 0.0)
         ss4_trend = None if (ss4 is None or first.g("Strength 4H") is None) else ss4 - (first.g("Strength 4H") or 0.0)
 
         # Direction from strength across TFs (require 4H alignment when available)
-        pos = sum(1 for v in (ss4, ss1d, ss1w) if v is not None and v > 0)
-        neg = sum(1 for v in (ss4, ss1d, ss1w) if v is not None and v < 0)
+        pos = sum(1 for v in (ss1h, ss4, ss1d) if v is not None and v > 0)
+        neg = sum(1 for v in (ss1h, ss4, ss1d) if v is not None and v < 0)
         direction: Optional[str] = None
-        if pos >= 2 and (ss4 is None or ss4 > 0):
+        if pos >= 2 and neg == 0 and (ss4 is None or ss4 > 0):
             direction = "Buy"
-        if neg >= 2 and (ss4 is None or ss4 < 0) and direction is None:
+        elif neg >= 2 and pos == 0 and (ss4 is None or ss4 < 0):
             direction = "Sell"
-        if direction is None:
+        else:
             bump("no_direction_consensus")
             continue
 
@@ -1074,7 +1049,7 @@ def analyze(
         else:  # Sell
             price = bid
 
-        # If Bid/Ask are not available even after backfill, skip until live tick arrives
+        # If Bid/Ask are not available, skip until live tick arrives
         if price is None:
             bump("no_live_bid_ask")
             if debug:
@@ -1084,7 +1059,7 @@ def analyze(
                     pass
             continue
 
-        # Spread and ATR(%) handling — prefer computing directly from Bid/Ask
+        # Spread calculation only when bid and ask is available
         spreadpct = None
         try:
             if bid is not None and ask is not None and bid > 0 and ask > 0 and ask > bid:
@@ -1092,8 +1067,6 @@ def analyze(
                 spreadpct = ((ask - bid) / mid) * 100.0
         except Exception:
             spreadpct = None
-        if spreadpct is None:
-            spreadpct = spreadpct_row
         spr_class = spread_class(spreadpct)
         if spr_class == "Avoid":
             bump("spread_avoid")
@@ -1109,6 +1082,9 @@ def analyze(
         prox_flag = None
         prox_late = False
         if direction == "Buy":
+            if s1 is None and r1 is None:
+                bump("missing_sl_tp")
+                continue
             sl = s1 if s1 is not None else d1l
             tp = r1 if r1 is not None else d1h
             # Basic sanity for S/R orientation
@@ -1118,27 +1094,13 @@ def analyze(
             if not (sl <= price <= tp):
                 bump("price_outside_buy_sr")
                 continue
-            risk = price - sl
-            reward = tp - price
-            rrr = reward / risk if risk > 0 else None
+            risk = price - sl if price is not None and sl is not None else None
+            reward = (tp - price) if (tp is not None and price is not None) else None
+            rrr = None
+            if risk is not None and reward is not None and risk > 0 and reward > 0:
+                rrr = reward / risk
             if (tp is not None and sl is not None) and (tp - sl) != 0:
                 prox = (price - sl) / (tp - sl)
-                # Gate: require minimum distance from SL as fraction of range
-                try:
-                    min_thr = max(0.0, min(0.49, float(min_prox_sl)))
-                except Exception:
-                    min_thr = 0.0
-                if prox < min_thr:
-                    bump("too_close_to_sl_prox")
-                    continue
-                # Gate: require maximum distance from SL as fraction of range
-                try:
-                    max_thr = max(0.0, min(1.0, float(max_prox_sl)))
-                except Exception:
-                    max_thr = 1.0
-                if prox > max_thr:
-                    bump("too_far_from_sl_prox")
-                    continue
                 if prox <= 0.35:
                     prox_flag = "near_support"
                     prox_note = "near S1 support"
@@ -1147,6 +1109,9 @@ def analyze(
                     prox_late = True
                     prox_note = "near R1 resistance (late)"
         else:  # Sell
+            if s1 is None and r1 is None:
+                bump("missing_sl_tp")
+                continue
             sl = r1 if r1 is not None else d1h
             tp = s1 if s1 is not None else d1l
             if sl is None or tp is None:
@@ -1155,27 +1120,13 @@ def analyze(
             if not (tp <= price <= sl):
                 bump("price_outside_sell_sr")
                 continue
-            risk = sl - price
-            reward = price - tp
-            rrr = reward / risk if risk > 0 else None
+            risk = (sl - price) if price is not None and sl is not None else None
+            reward = (price - tp) if (price is not None and tp is not None) else None
+            rrr = None
+            if risk is not None and reward is not None and risk > 0 and reward > 0:
+                rrr = reward / risk
             if (sl is not None and tp is not None) and (sl - tp) != 0:
                 prox = (sl - price) / (sl - tp)
-                # Gate: require minimum distance from SL as fraction of range
-                try:
-                    min_thr = max(0.0, min(0.49, float(min_prox_sl)))
-                except Exception:
-                    min_thr = 0.0
-                if prox < min_thr:
-                    bump("too_close_to_sl_prox")
-                    continue
-                # Gate: require maximum distance from SL as fraction of range
-                try:
-                    max_thr = max(0.0, min(1.0, float(max_prox_sl)))
-                except Exception:
-                    max_thr = 1.0
-                if prox > max_thr:
-                    bump("too_far_from_sl_prox")
-                    continue
                 if prox <= 0.35:
                     prox_flag = "near_resistance"
                     prox_note = "near R1 resistance"
@@ -1183,63 +1134,58 @@ def analyze(
                     prox_flag = "near_support"
                     prox_late = True
                     prox_note = "near S1 support (late)"
+        if rrr is None or rrr <= 0:
+            bump("invalid_rrr")
+            continue
 
         # Spread-based SL distance filter: SL must be at least 10x spread away from the side
         # that actually triggers the stop:
         #   - Buy: stop is hit on Bid -> use (bid - SL)
         #   - Sell: stop is hit on Ask -> use (SL - ask)
-        # If the preferred side is missing, fall back to entry `price` to avoid false negatives.
-        # Also support deriving absolute spread from `spreadpct` when bid/ask are missing.
         eps = 1e-12
         if sl is not None:
-            spread_abs: Optional[float] = None
-            # Prefer absolute spread from ask-bid when available
-            if bid is not None and ask is not None and ask > bid:
-                spread_abs = ask - bid
-            elif spreadpct is not None and price is not None:
-                try:
-                    # spreadpct is in percent units (e.g., 0.12 == 0.12%)
-                    spread_abs = (spreadpct / 100.0) * abs(price)
-                except Exception:
-                    spread_abs = None
-            # If we have a usable spread, evaluate distance
-            if spread_abs is not None and spread_abs > 0:
-                distance: Optional[float] = None
-                # Prefer distance measured from the correct side that triggers the stop
-                if direction == "Buy":
-                    if bid is not None:
-                        distance = bid - sl
-                    elif price is not None:
-                        # Fallback to entry price (typically Ask); this is lenient but avoids None
-                        distance = price - sl
-                else:  # Sell
-                    if ask is not None:
-                        distance = sl - ask
-                    elif price is not None:
-                        # Fallback to entry price (typically Bid)
-                        distance = sl - price
-                # Enforce minimum distance threshold (10x spread) with tiny epsilon
-                if distance is None or (distance + eps) < (10 * spread_abs):
-                    bump("sl_too_close_to_spread")
-                    if debug:
-                        print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
-                    continue
+            # Require both bid and ask to be available
+            if bid is None or ask is None or ask <= bid:
+                bump("invalid_bid_ask_for_spread_calculation")
+                if debug:
+                    print(f"[DEBUG] Invalid bid/ask for spread calculation: sym={sym}, bid={bid}, ask={ask}")
+                continue
 
-        # Additional SL distance gate in percent of price (works even without Bid/Ask)
-        if min_sl_pct and price is not None and sl is not None:
-            try:
-                dist = (price - sl) if direction == "Buy" else (sl - price)
-                if dist <= 0:
-                    bump("sl_distance_nonpositive")
-                    continue
-                pct = (dist / abs(price)) * 100.0
-                if pct < float(min_sl_pct):
-                    bump("sl_distance_pct_too_small")
-                    if debug:
-                        print(f"[DEBUG] SL pct too small: sym={sym}, dir={direction}, price={price}, sl={sl}, pct={pct:.5f} < {min_sl_pct}")
-                    continue
-            except Exception:
-                pass
+            spread_abs = ask - bid
+            # Calculate distance based on direction
+            distance: Optional[float] = None
+            if direction == "Buy":
+                distance = bid - sl
+            else:  # Sell
+                distance = sl - ask
+
+            # Enforce minimum distance threshold (10x spread) with tiny epsilon
+            if distance is None or (distance + eps) < (SPREAD_MULTIPLIER * spread_abs):
+                bump("sl_too_close_to_spread")
+                if debug:
+                    print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
+                continue
+
+        if tp is not None:
+            if bid is None or ask is None or ask <= bid:
+                bump("invalid_bid_ask_for_spread_calculation")
+                if debug:
+                    print(f"[DEBUG] Invalid bid/ask for TP spread calculation: sym={sym}, bid={bid}, ask={ask}")
+                continue
+
+            spread_abs = ask - bid
+            tp_distance: Optional[float] = None
+            if direction == "Buy":
+                tp_distance = tp - bid
+            else:
+                tp_distance = ask - tp
+
+            if tp_distance is None or (tp_distance + eps) < (SPREAD_MULTIPLIER * spread_abs):
+                bump("too_far_from_tp_prox")
+                if debug:
+                    print(f"[DEBUG] TP too close to spread: sym={sym}, dir={direction}, price={price}, tp={tp}, spread_abs={spread_abs}, distance={tp_distance}")
+                continue
+
 
         # Composite score
         score = 0.0
@@ -1258,8 +1204,8 @@ def analyze(
 
         # Build explanation
         parts: List[str] = []
-        if ss4 is not None and ss1d is not None and ss1w is not None:
-            parts.append(f"Strength 4H/1D/1W: {ss4:.1f}/{ss1d:.1f}/{ss1w:.1f}")
+        if ss1h is not None and ss4 is not None and ss1d is not None:
+            parts.append(f"Strength 1H/4H/1D: {ss1h:.1f}/{ss4:.1f}/{ss1d:.1f}")
         if atr is not None and atrp is not None:
             parts.append(f"ATR: {atr:.1f} pips ({atrp:.1f}%)")
         if (s1 is not None) or (r1 is not None):
@@ -1282,6 +1228,11 @@ def analyze(
 
         # Round SL/TP to the same precision as price for this symbol
         digits = _symbol_digits(sym, price)
+        digits = max(
+            digits,
+            _infer_decimals_from_price(sl),
+            _infer_decimals_from_price(tp),
+        )
         def _r(v: Optional[float]) -> Optional[float]:
             try:
                 return None if v is None else round(float(v), int(digits))
@@ -1301,18 +1252,17 @@ def analyze(
                 "tp": tp_out if tp_out is not None else tp,
                 "rrr": rrr,
                 "score": score,
-                "explain": "; ".join(parts),
                 "as_of": as_of_value,
+                "proximity_to_sl": prox,
                 # Meta for logging; not used for DB schema
                 "bid": bid,
                 "ask": ask,
                 "tick_utc": tick_time_str,
-                "source": ("backfill" if backfilled_flag else "normal"),
             }
         )
 
     # Order by score then RRR
-    results.sort(key=lambda x: (-x["score"], -x["rrr"]))
+    results.sort(key=lambda x: (float(x["score"]), float(x["rrr"])), reverse=True)
     if debug:
         print("--- Diagnostics ---")
         print(f"Symbols evaluated: {len(series)}")
@@ -1353,14 +1303,22 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 tp REAL,
                 rrr REAL,
                 score REAL,
-                explain TEXT,
                 as_of TEXT NOT NULL,
                 detected_at TEXT,
+                proximity_to_sl REAL,
                 inserted_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 UNIQUE(symbol, direction, as_of)
             )
             """
         )
+        # Add proximity_to_sl column if it doesn't exist
+        try:
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = {str(r[1]) for r in (cur.fetchall() or [])}
+            if 'proximity_to_sl' not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_to_sl REAL")
+        except Exception as e:
+            print(f"[DB] Warning: Could not add proximity_to_sl column: {e}")
         # Ensure hits table exists for open/settled gating
         try:
             cur.execute(
@@ -1395,6 +1353,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
             cur.execute(f"PRAGMA table_info({table})")
             cols = {str(r[1]) for r in (cur.fetchall() or [])}
             has_detected = 'detected_at' in cols
+            has_prox_bin = 'proximity_bin' in cols
             # Try to migrate by adding detected_at if missing
             if not has_detected:
                 try:
@@ -1402,37 +1361,46 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     has_detected = True
                 except Exception:
                     has_detected = False
+            if not has_prox_bin:
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_bin TEXT")
+                    has_prox_bin = True
+                except Exception:
+                    has_prox_bin = False
 
+            column_list = [
+                "symbol", "direction", "price", "sl", "tp", "rrr", "score", "as_of"
+            ]
             if has_detected:
-                ins = (
-                    f"""
-                    INSERT INTO {table}
-                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM {table} t2
-                        LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
-                        WHERE t2.symbol = ?
-                          AND h.setup_id IS NULL
-                    )
-                    ON CONFLICT(symbol, direction, as_of) DO NOTHING
-                    """
+                column_list.append("detected_at")
+            column_list.append("proximity_to_sl")
+            if has_prox_bin:
+                column_list.append("proximity_bin")
+
+            select_placeholders = ["?" for _ in column_list]
+
+            gating_conditions = [
+                "COALESCE(t2.symbol, '') = COALESCE(?, '')",
+                "COALESCE(t2.direction, '') = COALESCE(?, '')",
+                "h.setup_id IS NULL",
+            ]
+            gating_has_bin = has_prox_bin
+            if gating_has_bin:
+                gating_conditions.insert(2, "COALESCE(t2.proximity_bin, '') = COALESCE(?, '')")
+
+            ins = (
+                f"""
+                INSERT INTO {table}
+                    ({', '.join(column_list)})
+                SELECT {', '.join(select_placeholders)}
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {table} t2
+                    LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
+                    WHERE {' AND '.join(gating_conditions)}
                 )
-            else:
-                ins = (
-                    f"""
-                    INSERT INTO {table}
-                        (symbol, direction, price, sl, tp, rrr, score, explain, as_of)
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM {table} t2
-                        LEFT JOIN timelapse_hits h ON h.setup_id = t2.id
-                        WHERE t2.symbol = ?
-                          AND h.setup_id IS NULL
-                    )
-                    ON CONFLICT(symbol, direction, as_of) DO NOTHING
-                    """
-                )
+                ON CONFLICT(symbol, direction, as_of) DO NOTHING
+                """
+            )
 
             params: List[Tuple[object, ...]] = []
             for r in results:
@@ -1448,37 +1416,34 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     else:
                         detected_at_val = str(detected_at)
                 sym_val = r.get("symbol")
+                direction_val = r.get("direction")
+                proximity_val = r.get("proximity_to_sl")
+                bin_val = _proximity_bin_label(proximity_val)
+
+                row_values: List[object] = [
+                    sym_val,
+                    direction_val,
+                    r.get("price"),
+                    r.get("sl"),
+                    r.get("tp"),
+                    r.get("rrr"),
+                    r.get("score"),
+                    as_of_val,
+                ]
                 if has_detected:
-                    params.append(
-                        (
-                            sym_val,
-                            r.get("direction"),
-                            r.get("price"),
-                            r.get("sl"),
-                            r.get("tp"),
-                            r.get("rrr"),
-                            r.get("score"),
-                            r.get("explain"),
-                            as_of_val,
-                            detected_at_val,
-                            sym_val,
-                        )
-                    )
-                else:
-                    params.append(
-                        (
-                            sym_val,
-                            r.get("direction"),
-                            r.get("price"),
-                            r.get("sl"),
-                            r.get("tp"),
-                            r.get("rrr"),
-                            r.get("score"),
-                            r.get("explain"),
-                            as_of_val,
-                            sym_val,
-                        )
-                    )
+                    row_values.append(detected_at_val)
+                row_values.append(proximity_val)
+                if has_prox_bin:
+                    row_values.append(bin_val)
+
+                gating_params_row: List[object] = [
+                    sym_val or "",
+                    direction_val or "",
+                ]
+                if gating_has_bin:
+                    gating_params_row.append(bin_val or "")
+
+                params.append(tuple(row_values + gating_params_row))
 
             if params:
                 before = conn.total_changes
@@ -1525,6 +1490,8 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
             except Exception:
                 print(f"[DB] Inserted {inserted} new setup(s)")
 
+        _rebuild_consensus_table(conn, source_table=table)
+
 
 def main() -> None:
     args = parse_args()
@@ -1564,46 +1531,42 @@ def main() -> None:
     if exclude_set:
         syms = [s for s in syms if s.upper() not in exclude_set]
     if args.watch:
-        if HAS_WATCHDOG:
-            _watch_loop_events(
-                symbols=syms,
-                min_rrr=args.min_rrr,
-                min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-                max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-                min_sl_pct=max(0.0, args.min_sl_pct),
-                top=args.top,
-                brief=args.brief,
-                debug=args.debug,
-                exclude_set=exclude_set,
-            )
-        else:
-            print("[watch] watchdog not installed; falling back to polling. Run 'pip install watchdog' for real-time events.")
-            watch_loop(
-                symbols=syms,
-                interval=max(0.5, args.interval),
-                min_rrr=args.min_rrr,
-                min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-                max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-                min_sl_pct=max(0.0, args.min_sl_pct),
-                top=args.top,
-                brief=args.brief,
-                debug=args.debug,
-                exclude_set=exclude_set,
-            )
+        watch_loop(
+            symbols=syms,
+            interval=max(0.5, args.interval),
+            min_rrr=args.min_rrr,
+            top=args.top,
+            brief=args.brief,
+            debug=args.debug,
+            exclude_set=exclude_set,
+        )
         return
     # Single-run mode
     process_once(
         symbols=syms,
         min_rrr=args.min_rrr,
-        min_prox_sl=max(0.0, min(0.49, args.min_prox_sl)),
-        max_prox_sl=max(0.0, min(1.0, args.max_prox_sl)),
-        min_sl_pct=max(0.0, args.min_sl_pct),
         top=args.top,
         brief=args.brief,
         debug=args.debug,
         exclude_set=exclude_set,
     )
 
-
 if __name__ == "__main__":
     main()
+
+
+class _TimelapseModule(types.ModuleType):
+    """Custom module wrapper to ensure global DB connection closes on reassignment."""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_DB_CONN":
+            old = getattr(self, "_DB_CONN", None)
+            if old is not None and old is not value:
+                try:
+                    old.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _TimelapseModule  # type: ignore[misc]

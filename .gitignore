@@ -1,7 +1,8 @@
 __pycache__/
 .vscode
-*.db
+*.db*
 backup
 *en.md
 *ts.md
-*.csv
+.clinerules
+*.json

@@ -6,3 +6,4 @@ backup
 *ts.md
 .clinerules
 *.json
+.python-version

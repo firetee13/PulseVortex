@@ -222,6 +222,9 @@ class App(tk.Tk):
         self.tab_pnl = ttk.Frame(self.nb)
         self.nb.add(self.tab_pnl, text="PnL")
 
+        self.tab_pnl_norm = ttk.Frame(self.nb)
+        self.nb.add(self.tab_pnl_norm, text="PnL (Normalized)")
+
         # Set DB Results tab as default active tab
         self.nb.select(self.tab_db)
 
@@ -242,6 +245,10 @@ class App(tk.Tk):
         self.var_prox_category = tk.StringVar(value="All")
         self.var_prox_auto = tk.BooleanVar(value=False)
         self.var_prox_interval = tk.IntVar(value=300)
+        # Normalized PnL tab variables
+        self.var_pnl_norm_since_hours = tk.IntVar(value=168)
+        self.var_pnl_norm_mode = tk.StringVar(value="risk_units")
+        self.var_pnl_norm_category = tk.StringVar(value="overall")
         # Load persisted settings (if any) before building controls
         try:
             self._load_settings()
@@ -272,6 +279,7 @@ class App(tk.Tk):
         self._make_prox_tab(self.tab_prox)
         # UI elements in PnL tab
         self._make_pnl_tab(self.tab_pnl)
+        self._make_pnl_norm_tab(self.tab_pnl_norm)
         # Ensure DB results refresh once at startup and auto-refresh is active
         try:
             self.var_auto.set(True)
@@ -281,6 +289,11 @@ class App(tk.Tk):
         # Also refresh PnL once at startup
         try:
             self._pnl_refresh()
+        except Exception:
+            pass
+        # Prime normalized PnL view
+        try:
+            self._pnl_norm_refresh()
         except Exception:
             pass
         # Prime proximity stats view
@@ -562,6 +575,15 @@ class App(tk.Tk):
         self._pnl_loading = False
         self.pnl_status = None
         self.pnl_chart_frame = None
+        # Normalized PnL chart state
+        self._pnl_norm_fig = None
+        self._pnl_norm_ax = None
+        self._pnl_norm_canvas = None
+        self._pnl_norm_toolbar = None
+        self._pnl_norm_loading = False
+        self.pnl_norm_status = None
+        self.pnl_norm_chart_frame = None
+        self._pnl_norm_data: dict[str, object] | None = None
         # Second PnL (10k notional) chart state
         self._pnl2_fig = None
         self._pnl2_ax = None
@@ -1526,6 +1548,454 @@ class App(tk.Tk):
         self._init_fx_chart_widgets()
         self._init_crypto_chart_widgets()
         self._init_indices_chart_widgets()
+
+    def _make_pnl_norm_tab(self, parent) -> None:
+        """Create the normalized PnL tab with selectable metrics."""
+        container = ttk.Frame(parent)
+        container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        controls = ttk.Frame(container)
+        controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        ttk.Label(controls, text="Since(h):").pack(side=tk.LEFT)
+        ttk.Spinbox(
+            controls,
+            from_=1,
+            to=24 * 365,
+            textvariable=self.var_pnl_norm_since_hours,
+            width=6,
+        ).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(controls, text="Metric:").pack(side=tk.LEFT)
+        mode_combo = ttk.Combobox(
+            controls,
+            textvariable=self.var_pnl_norm_mode,
+            values=("risk_units", "log_equity", "vol_target", "notional"),
+            state="readonly",
+            width=14,
+        )
+        mode_combo.pack(side=tk.LEFT, padx=6)
+        try:
+            mode_combo.bind("<<ComboboxSelected>>", self._on_pnl_norm_mode_change)
+        except Exception:
+            pass
+
+        ttk.Label(controls, text="Category:").pack(side=tk.LEFT)
+        cat_combo = ttk.Combobox(
+            controls,
+            textvariable=self.var_pnl_norm_category,
+            values=("overall", "forex", "crypto", "indices"),
+            state="readonly",
+            width=10,
+        )
+        cat_combo.pack(side=tk.LEFT, padx=6)
+        try:
+            cat_combo.bind("<<ComboboxSelected>>", self._on_pnl_norm_category_change)
+        except Exception:
+            pass
+
+        ttk.Button(controls, text="Refresh", command=self._pnl_norm_refresh).pack(side=tk.LEFT, padx=(12, 0))
+
+        self.pnl_norm_status = ttk.Label(controls, text="Ready", anchor=tk.W)
+        self.pnl_norm_status.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(12, 0))
+
+        chart_wrap = ttk.Frame(container)
+        chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self.pnl_norm_chart_frame = ttk.Frame(chart_wrap)
+        self.pnl_norm_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self._init_pnl_norm_chart_widgets()
+
+    def _init_pnl_norm_chart_widgets(self) -> None:
+        """Initialise Matplotlib widgets for the normalized PnL chart."""
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self.pnl_norm_chart_frame is None:
+            return
+        for child in list(self.pnl_norm_chart_frame.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        fig = Figure(figsize=(6, 3), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_title('Normalized PnL')
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (UTC+3)')
+        ax.set_ylabel('Value')
+        canvas = FigureCanvasTkAgg(fig, master=self.pnl_norm_chart_frame)
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.pnl_norm_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._pnl_norm_toolbar = toolbar
+        except Exception:
+            self._pnl_norm_toolbar = None
+        self._pnl_norm_fig = fig
+        self._pnl_norm_ax = ax
+        self._pnl_norm_canvas = canvas
+
+    def _on_pnl_norm_mode_change(self, _event=None) -> None:
+        if self._pnl_norm_loading:
+            return
+        self._pnl_norm_render()
+
+    def _on_pnl_norm_category_change(self, _event=None) -> None:
+        if self._pnl_norm_loading:
+            return
+        self._pnl_norm_render()
+
+    def _pnl_norm_refresh(self) -> None:
+        if self._pnl_norm_loading:
+            return
+        try:
+            if self.pnl_norm_status is not None:
+                self.pnl_norm_status.config(text="Loading normalized PnL…")
+        except Exception:
+            pass
+        self._pnl_norm_loading = True
+        threading.Thread(target=self._pnl_norm_fetch_thread, daemon=True).start()
+
+    def _pnl_norm_fetch_thread(self) -> None:
+        dbname = self.var_db_name.get().strip()
+        hours = max(1, int(self.var_pnl_norm_since_hours.get()))
+        payload: dict[str, object] = {'error': None}
+        rows: list[tuple] = []
+        try:
+            import sqlite3  # type: ignore
+            db_path = db_path_str(dbname)
+            conn = sqlite3.connect(db_path, timeout=3)
+            try:
+                cur = conn.cursor()
+                thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+                sql = (
+                    """
+                    SELECT COALESCE(h.hit_time, s.inserted_at) as event_time,
+                           h.hit,
+                           s.symbol,
+                           COALESCE(h.entry_price, s.price) AS entry_price,
+                           h.hit_price,
+                           s.sl,
+                           s.direction
+                    FROM timelapse_setups s
+                    JOIN timelapse_hits h ON h.setup_id = s.id
+                    WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
+                    ORDER BY COALESCE(h.hit_time, s.inserted_at) ASC
+                    """
+                )
+                cur.execute(sql, (thr,))
+                rows = cur.fetchall() or []
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            payload['error'] = str(exc)
+
+        times: list[datetime] = []
+        symbols: list[str] = []
+        returns_risk: list[float] = []
+        returns_log: list[float] = []
+        returns_vol_target: list[float] = []
+        returns_notional: list[float] = []
+
+        if not payload.get('error') and rows:
+            atr_map: dict[str, float | None] = {}
+            if _MT5_IMPORTED and mt5 is not None:
+                try:
+                    init_ok, init_err = self._ensure_mt5()
+                except Exception:
+                    init_ok, init_err = False, None
+                if init_ok:
+                    for sym in sorted({r[2] for r in rows if r and r[2]}):
+                        atr_map[sym] = None
+                        try:
+                            try:
+                                mt5.symbol_select(sym, True)
+                            except Exception:
+                                pass
+                            tf = getattr(mt5, "TIMEFRAME_D1", 0)
+                            rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
+                            if rates is None or len(rates) < 2:
+                                continue
+                            vals = []
+                            for b in rates[-15:]:
+                                try:
+                                    high = float(b['high'])
+                                    low = float(b['low'])
+                                    close = float(b['close'])
+                                except Exception:
+                                    try:
+                                        high = float(getattr(b, 'high', 0.0))
+                                        low = float(getattr(b, 'low', 0.0))
+                                        close = float(getattr(b, 'close', 0.0))
+                                    except Exception:
+                                        high = low = close = 0.0
+                                vals.append((high, low, close))
+                            if len(vals) >= 2:
+                                trs = []
+                                prev_close = vals[0][2]
+                                for h, l, c in vals[1:]:
+                                    tr1 = h - l
+                                    tr2 = abs(h - prev_close)
+                                    tr3 = abs(prev_close - l)
+                                    trs.append(max(tr1, tr2, tr3))
+                                    prev_close = c
+                                atr_map[sym] = (sum(trs) / len(trs)) if trs else None
+                        except Exception:
+                            atr_map[sym] = None
+
+            risk_capital = 0.01  # 1% per R
+            target_vol = 0.10  # 10% annualised target volatility
+            sqrt_252 = math.sqrt(252.0)
+
+            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction in rows:
+                if not hit:
+                    continue
+                dt: datetime | None = None
+                if isinstance(event_time, str):
+                    try:
+                        dt = datetime.fromisoformat(event_time)
+                    except Exception:
+                        try:
+                            dt = datetime.strptime(event_time.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            dt = None
+                elif isinstance(event_time, datetime):
+                    dt = event_time
+                if dt is None:
+                    continue
+                try:
+                    dt = dt.replace(tzinfo=UTC)
+                except Exception:
+                    pass
+
+                try:
+                    ep = float(entry_price) if entry_price is not None else None
+                except Exception:
+                    ep = None
+                try:
+                    hp = float(hit_price) if hit_price is not None else None
+                except Exception:
+                    hp = None
+                try:
+                    slp = float(sl_val) if sl_val is not None else None
+                except Exception:
+                    slp = None
+
+                if ep is None or hp is None or slp is None:
+                    continue
+
+                dir_s = (str(direction) or '').lower()
+                profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
+                risk = (ep - slp) if dir_s == 'buy' else (slp - ep)
+                if risk is None or risk <= 0:
+                    continue
+
+                trade_r = profit / risk
+                raw_return = trade_r * risk_capital
+
+                # notional 10k
+                try:
+                    units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
+                except Exception:
+                    units = 0.0
+                notional_profit = units * profit
+
+                atr_val = atr_map.get(symbol) if atr_map else None
+                vol_target_return = raw_return
+                if atr_val is not None and atr_val > 0 and ep not in (None, 0.0):
+                    try:
+                        annual_vol = (atr_val / ep) * sqrt_252
+                        if annual_vol > 0:
+                            vol_target_return = raw_return * (target_vol / annual_vol)
+                    except Exception:
+                        pass
+
+                try:
+                    log_return = math.log1p(raw_return)
+                except Exception:
+                    log_return = raw_return
+
+                times.append(dt)
+                symbols.append(str(symbol))
+                returns_risk.append(trade_r)
+                returns_log.append(log_return)
+                returns_vol_target.append(vol_target_return)
+                returns_notional.append(notional_profit)
+
+        def _cumulative(values: list[float]) -> list[float]:
+            total = 0.0
+            out: list[float] = []
+            for v in values:
+                total += v
+                out.append(total)
+            return out
+
+        payload['times'] = times
+        payload['symbols'] = symbols
+        # Split series by category
+        categories = {
+            'overall': list(range(len(times))),
+            'forex': [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'forex'],
+            'crypto': [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'crypto'],
+            'indices': [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'indices'],
+        }
+
+        def _select(idx_list: list[int], seq: list[float]) -> list[float]:
+            return [seq[i] for i in idx_list]
+
+        def _select_times(idx_list: list[int], seq: list[datetime]) -> list[datetime]:
+            return [seq[i] for i in idx_list]
+
+        series: dict[str, dict[str, list[float]]] = {}
+        cumulative: dict[str, dict[str, list[float]]] = {}
+        times_map: dict[str, list[datetime]] = {}
+
+        for cat, idxs in categories.items():
+            times_map[cat] = _select_times(idxs, times)
+            cat_series = {
+                'risk_units': _select(idxs, returns_risk),
+                'log_equity': _select(idxs, returns_log),
+                'vol_target': _select(idxs, returns_vol_target),
+                'notional': _select(idxs, returns_notional),
+            }
+            series[cat] = cat_series
+            cumulative[cat] = {key: _cumulative(vals) for key, vals in cat_series.items()}
+
+        payload['times'] = times_map
+        payload['series'] = series
+        payload['cumulative'] = cumulative
+
+        self.after(0, self._pnl_norm_update_ui, payload)
+
+    def _pnl_norm_update_ui(self, payload: dict[str, object]) -> None:
+        self._pnl_norm_loading = False
+
+        error = payload.get('error') if isinstance(payload, dict) else None
+        if error:
+            try:
+                if self.pnl_norm_status is not None:
+                    self.pnl_norm_status.config(text=f"Error: {error}")
+            except Exception:
+                pass
+            if self._pnl_norm_ax is not None:
+                try:
+                    self._pnl_norm_ax.clear()
+                    if self._pnl_norm_fig is not None:
+                        self._pnl_norm_fig.tight_layout()
+                    if self._pnl_norm_canvas is not None:
+                        self._pnl_norm_canvas.draw_idle()
+                except Exception:
+                    pass
+            return
+
+        self._pnl_norm_data = payload
+        self._pnl_norm_render()
+
+    def _pnl_norm_render(self) -> None:
+        data = self._pnl_norm_data
+        if not data:
+            return
+        if self._pnl_norm_ax is None or self._pnl_norm_canvas is None:
+            self._init_pnl_norm_chart_widgets()
+        ax = self._pnl_norm_ax
+        if ax is None:
+            return
+
+        ax.clear()
+        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+
+        mode = self.var_pnl_norm_mode.get()
+        category = self.var_pnl_norm_category.get()
+        times_map = data.get('times', {}) if isinstance(data, dict) else {}
+        series_map = data.get('series', {}) if isinstance(data, dict) else {}
+        cumulative_map = data.get('cumulative', {}) if isinstance(data, dict) else {}
+
+        times = times_map.get(category) if isinstance(times_map, dict) else None
+        cat_series = series_map.get(category) if isinstance(series_map, dict) else None
+        cat_cumulative = cumulative_map.get(category) if isinstance(cumulative_map, dict) else None
+
+        values = cat_cumulative.get(mode) if isinstance(cat_cumulative, dict) else None
+        raw_values = cat_series.get(mode) if isinstance(cat_series, dict) else None
+
+        if not times or not values:
+            ax.text(0.5, 0.5, 'No trades available.', ha='center', va='center', transform=ax.transAxes)
+            try:
+                if self.pnl_norm_status is not None:
+                    self.pnl_norm_status.config(text="No trades in range.")
+            except Exception:
+                pass
+            if self._pnl_norm_fig is not None:
+                self._pnl_norm_fig.tight_layout()
+            if self._pnl_norm_canvas is not None:
+                self._pnl_norm_canvas.draw_idle()
+            return
+
+        # Align lengths
+        n = min(len(times), len(values))
+        times = times[:n]
+        values = values[:n]
+        raw_slice = raw_values[:n] if raw_values else None
+
+        try:
+            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
+        except Exception:
+            times_disp = [t + timedelta(hours=3) for t in times]
+
+        labels = {
+            'risk_units': 'Cumulative R',
+            'log_equity': 'Cumulative log return (1% risk)',
+            'vol_target': 'Vol-target cumulative return',
+            'notional': 'Cumulative PnL (10k notionals)',
+        }
+        ax.plot(times_disp, values, color='#1f77b4', label=labels.get(mode, mode))
+        ax.axhline(0.0, color='#888888', linestyle='--', linewidth=1)
+        ax.set_ylabel(labels.get(mode, 'Value'))
+
+        try:
+            last_val = values[-1]
+            ax.annotate(
+                f"{last_val:+.2f}",
+                xy=(times_disp[-1], last_val),
+                xytext=(10, 10),
+                textcoords='offset points',
+                arrowprops=dict(arrowstyle='->', color='#1f77b4'),
+                color='#1f77b4',
+            )
+        except Exception:
+            pass
+
+        try:
+            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+        except Exception:
+            pass
+
+        try:
+            ax.legend(loc='upper left')
+        except Exception:
+            pass
+
+        if self._pnl_norm_fig is not None:
+            self._pnl_norm_fig.tight_layout()
+        if self._pnl_norm_canvas is not None:
+            self._pnl_norm_canvas.draw_idle()
+
+        try:
+            count = len(raw_slice) if raw_slice else len(values)
+            last_value = values[-1] if values else 0.0
+            if self.pnl_norm_status is not None:
+                self.pnl_norm_status.config(
+                    text=f"Trades: {count} | Last {last_value:+.2f}"
+                )
+        except Exception:
+            pass
 
     def _init_pnl_chart_widgets(self) -> None:
         """Initialize Matplotlib widgets for the PnL chart."""

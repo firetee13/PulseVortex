@@ -668,7 +668,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_no_recent_ticks(self):
         # Test filtering when no recent ticks
-        now = datetime.now(UTC)
+        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
+        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -697,7 +698,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_no_direction_consensus(self):
         # Test filtering when no direction consensus
-        now = datetime.now(UTC)
+        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
+        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -726,7 +728,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_no_live_bid_ask(self):
         # Test filtering when no live bid/ask
-        now = datetime.now(UTC)
+        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
+        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -755,7 +758,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_spread_avoid(self):
         # Test filtering when spread is too high
-        now = datetime.now(UTC)
+        # Use a specific time that avoids the low volume window (10:00 UTC = 12:00 UTC+3)
+        now = datetime(2023, 1, 1, 10, 0, tzinfo=UTC)
         sym = 'TESTIDX'
 
         first = tls.Snapshot(ts=now, row={
@@ -992,7 +996,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
             tls.canonicalize_key('D1 High'): 1.15,
             tls.canonicalize_key('D1 Low'): 0.95,
             tls.canonicalize_key('S1 Level M5'): 1.0,  # SL
-            tls.canonicalize_key('R1 Level M5'): 1.15,  # TP
+            tls.canonicalize_key('R1 Level M5'): 1.25,  # TP
             tls.canonicalize_key('Recent Tick'): 1,
             tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
         })
@@ -1006,7 +1010,7 @@ class AnalyzeFunctionTests(unittest.TestCase):
         self.assertEqual(result['direction'], 'Buy')
         self.assertEqual(result['price'], 1.1001)  # Ask price
         self.assertEqual(result['sl'], 1.0)
-        self.assertEqual(result['tp'], 1.15)
+        self.assertEqual(result['tp'], 1.25)
         rrr = float(result['rrr'])  # type: ignore
         score = float(result['score'])  # type: ignore
         self.assertTrue(rrr > 1.0)

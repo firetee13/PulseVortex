@@ -859,6 +859,14 @@ class App(tk.Tk):
             'since_hours': hours,
             'min_trades': min_trades,
         }
+        def _as_float(value: object) -> float | None:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except Exception:
+                return None
+
         try:
             try:
                 import sqlite3  # type: ignore
@@ -2287,13 +2295,17 @@ class App(tk.Tk):
         except Exception as e:
             error = str(e)
 
-        # Compute ATR per symbol (D1, period 14-ish) and normalize P/L as profit / ATR.
-        times: list[datetime] = []
+        # Compute ATR per symbol (D1, period 14-ish) for normalized P/L,
+        # while also preparing contract specs for 10k-notional scaling.
+        times_norm: list[datetime] = []
         norm_returns: list[float] = []
-        symbols: list[str] = []  # trade symbol per hit
+        symbols_norm: list[str] = []
+        times_abs: list[datetime] = []
+        symbols_abs: list[str] = []
         notional_returns: list[float] = []
         try:
             atr_map: dict[str, float | None] = {}
+            spec_map: dict[str, dict[str, float]] = {}
             if _MT5_IMPORTED and mt5 is not None:
                 try:
                     init_ok, init_err = self._ensure_mt5()
@@ -2301,11 +2313,32 @@ class App(tk.Tk):
                         atr_syms = sorted({r[2] for r in rows if r and r[2]})
                         for sym in atr_syms:
                             atr_map[sym] = None
+                            spec_map[sym] = {}
                             try:
                                 try:
                                     mt5.symbol_select(sym, True)
                                 except Exception:
                                     pass
+                                info = None
+                                try:
+                                    info = mt5.symbol_info(sym)
+                                except Exception:
+                                    info = None
+                                if info is not None:
+                                    tick_value = _as_float(getattr(info, 'trade_tick_value', None))
+                                    if tick_value is None or tick_value == 0.0:
+                                        tick_value = _as_float(getattr(info, 'tick_value', None))
+                                    tick_size = _as_float(getattr(info, 'trade_tick_size', None))
+                                    if tick_size is None or tick_size == 0.0:
+                                        tick_size = _as_float(getattr(info, 'tick_size', None))
+                                    contract_size = _as_float(getattr(info, 'trade_contract_size', None))
+                                    if contract_size is None or contract_size == 0.0:
+                                        contract_size = _as_float(getattr(info, 'contract_size', None))
+                                    spec_map[sym] = {
+                                        'tick_value': float(tick_value or 0.0),
+                                        'tick_size': float(tick_size or 0.0),
+                                        'contract_size': float(contract_size or 0.0),
+                                    }
                                 tf = getattr(mt5, "TIMEFRAME_D1", 0)
                                 rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
                                 if rates is None or len(rates) < 2:
@@ -2339,8 +2372,10 @@ class App(tk.Tk):
                                     atr_map[sym] = None
                             except Exception:
                                 atr_map[sym] = None
+                                spec_map[sym] = {}
                 except Exception:
                     atr_map = {}
+                    spec_map = {}
 
             # Compute normalized returns using ATR
             for event_time, hit, symbol, entry_price, hit_price, sl_val, direction in rows:
@@ -2381,31 +2416,51 @@ class App(tk.Tk):
                 dir_s = (str(direction) or '').lower()
                 profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
                 atr = atr_map.get(symbol)
-                if atr is None or atr == 0:
-                    # skip if ATR not available
-                    continue
-                norm = profit / atr
-                # 10k-notional absolute PnL (units = 10000 / entry_price)
-                try:
-                    units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
-                except Exception:
-                    units = 0.0
-                notional_profit = units * profit
-                times.append(dt)
-                norm_returns.append(norm)
-                symbols.append(str(symbol))
+                norm: float | None = None
+                if atr is not None and atr != 0:
+                    norm = profit / atr
+                notional_profit: float | None = None
+                spec = spec_map.get(symbol)
+                if spec and ep not in (None, 0.0):
+                    tick_value = float(spec.get('tick_value', 0.0))
+                    tick_size = float(spec.get('tick_size', 0.0))
+                    contract_size = float(spec.get('contract_size', 0.0))
+                    try:
+                        volume = 0.0
+                        if contract_size > 0.0 and ep not in (None, 0.0):
+                            volume = 10000.0 / (contract_size * ep)
+                        if volume > 0.0:
+                            if tick_size > 0.0 and tick_value > 0.0:
+                                ticks = profit / tick_size
+                                notional_profit = ticks * tick_value * volume
+                            elif contract_size > 0.0:
+                                notional_profit = profit * contract_size * volume
+                    except Exception:
+                        notional_profit = None
+                if notional_profit is None:
+                    try:
+                        units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
+                    except Exception:
+                        units = 0.0
+                    notional_profit = units * profit
+                times_abs.append(dt)
+                symbols_abs.append(str(symbol))
                 notional_returns.append(notional_profit)
+                if norm is not None:
+                    times_norm.append(dt)
+                    norm_returns.append(norm)
+                    symbols_norm.append(str(symbol))
         except Exception as e:
             if error is None:
                 error = str(e)
 
         # Compute cumulative and average per trade (ATR-normalized)
-        cum: list[float] = []
+        cum_norm: list[float] = []
         ssum = 0.0
         for v in norm_returns:
             ssum += v
-            cum.append(ssum)
-        avg = [c / (i + 1) for i, c in enumerate(cum)] if cum else []
+            cum_norm.append(ssum)
+        avg_norm = [c / (i + 1) for i, c in enumerate(cum_norm)] if cum_norm else []
 
         # Compute cumulative and average for 10k-notional series
         not_cum: list[float] = []
@@ -2416,17 +2471,33 @@ class App(tk.Tk):
         not_avg = [c / (i + 1) for i, c in enumerate(not_cum)] if not_cum else []
 
         # Hand off to UI thread
-        self.after(0, self._pnl_update_ui, times, norm_returns, cum, avg, symbols, notional_returns, not_cum, not_avg, error)
+        self.after(0, self._pnl_update_ui, times_norm, norm_returns, cum_norm, avg_norm, symbols_norm,
+                   times_abs, symbols_abs, notional_returns, not_cum, not_avg, error)
 
-    def _pnl_update_ui(self, times, norm_returns, cum, avg, symbols, notional_returns, not_cum, not_avg, error: str | None) -> None:
+    def _pnl_update_ui(
+        self,
+        times_norm,
+        norm_returns,
+        cum_norm,
+        avg_norm,
+        symbols_norm,
+        times_abs,
+        symbols_abs,
+        notional_returns,
+        not_cum,
+        not_avg,
+        error: str | None,
+    ) -> None:
         """UI-thread handler for ATR-normalized and 10k-notional PnL series.
 
         Expects:
-          - times: list[datetime] (UTC-aware or naive)
+          - times_norm: list[datetime] for normalized series
           - norm_returns: list[float] (per-trade profit divided by ATR)
-          - cum: list[float] (cumulative sums of norm_returns)
-          - avg: list[float] (average per-trade for normalized series)
-          - symbols: list[str] (trade symbol at each point)
+          - cum_norm: list[float] (cumulative sums of norm_returns)
+          - avg_norm: list[float] (average per-trade for normalized series)
+          - symbols_norm: list[str] (trade symbol at each normalized point)
+          - times_abs: list[datetime] for absolute 10k-notional series
+          - symbols_abs: list[str] aligned with times_abs
           - notional_returns: list[float] (per-trade PnL for 10k notional)
           - not_cum: list[float] (cumulative notional PnL)
           - not_avg: list[float] (average notional PnL per trade)
@@ -2452,7 +2523,31 @@ class App(tk.Tk):
                     pass
             return
 
-        if not times or not notional_returns:
+        # Render normalized PnL chart if data is available; otherwise clear it.
+        if times_norm and norm_returns:
+            try:
+                self._pnl_render_draw(times_norm, norm_returns, cum_norm, avg_norm, symbols_norm)
+            except Exception as exc:
+                try:
+                    if self.pnl_status is not None:
+                        self.pnl_status.config(text=f"Normalized render error: {exc}")
+                except Exception:
+                    pass
+        else:
+            if self._pnl_ax is not None:
+                try:
+                    self._pnl_ax.clear()
+                    if self._pnl_canvas is not None:
+                        self._pnl_canvas.draw_idle()
+                except Exception:
+                    pass
+            try:
+                if self.pnl_status is not None:
+                    self.pnl_status.config(text="No normalized PnL trades available.")
+            except Exception:
+                pass
+
+        if not times_abs or not notional_returns:
             try:
                 if self.pnl_fx_status is not None:
                     self.pnl_fx_status.config(text="No 10k-notional hits in the requested time range.")
@@ -2478,9 +2573,9 @@ class App(tk.Tk):
             return
 
         # Ensure lists align
-        n = min(len(times), len(notional_returns), len(symbols))
-        times = times[:n]
-        symbols = symbols[:n]
+        n = min(len(times_abs), len(notional_returns), len(symbols_abs))
+        times = times_abs[:n]
+        symbols = symbols_abs[:n]
         notional_returns = notional_returns[:n]
 
         # Split by instrument class

@@ -136,7 +136,6 @@ class EvaluateSetupQuietHoursTests(unittest.TestCase):
         self.assertEqual(result.last_checked_utc, now_utc)
 
 
-
 class DemoSpreadGuardTests(unittest.TestCase):
 
     def tearDown(self) -> None:

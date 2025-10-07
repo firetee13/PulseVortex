@@ -326,9 +326,9 @@ python check_tp_sl_hits.py [OPTIONS]
 ## Testing
 
 ### Unit Tests
-Run via `unittest` (≥90% coverage target; MT5 fakes for isolation):
+Run the full suite with pytest (≥90% coverage target; MT5 fakes for isolation):
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
+python -m pytest
 ```
 - `tests/test_timelapse_setups.py`: Strength, pivots, ATR, filtering, scoring
 - `tests/test_check_tp_sl_hits.py`: Tick scanning, bar prefilter, quiet hours
@@ -507,7 +507,7 @@ FAILED tests/test_mt5_client.py::TestMT5Client::test_rates_caching
 ```
 - **MT5 Not Running**: Tests use fakes, but if live mode enabled, start MT5. Set `MT5_FAKE_MODE=1` env for isolation.
 - **SQLite Temp Files**: Ensure write access to temp dir; use `tempfile` in tests for DB fixtures.
-- **Coverage <90%**: Run `pip install coverage; coverage run -m unittest discover -s tests; coverage report`—add missing tests for new code.
+- **Coverage <90%**: Run `pip install coverage; coverage run -m pytest; coverage report`—add missing tests for new code.
 - **Version Conflicts**: Pin deps in requirements.txt (e.g., `MetaTrader5==5.0.45`); use virtualenv: `python -m venv venv; venv\Scripts\activate; pip install -r requirements.txt`.
 - **Platform-Specific**: Windows-only MT5; on Linux/Mac, use Wine or skip MT5 tests.
 
@@ -560,7 +560,7 @@ python check_tp_sl_hits.py --verbose --trace-pages
 1. Fork/clone repo; create feature branch (`feat(gui): add bin filter`)
 2. Install deps: `pip install -r requirements.txt`
 3. Add tests in `tests/` (mirror existing; ≥90% coverage)
-4. Run suite: `python -m unittest discover -s tests -v`
+4. Run suite: `python -m pytest`
 5. Validate: Manual MT5 session (symbols visible), GUI screenshots, DB queries
 6. Commit/PR: Conventional messages; link issues; flag DB schema changes (backup timelapse.db)
 

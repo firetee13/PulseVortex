@@ -109,6 +109,8 @@ def ensure_tp_sl_setup_state_sqlite(conn) -> None:
             cur.execute("ALTER TABLE tp_sl_setup_state ADD COLUMN order_ticket TEXT")
         if "order_sent_at" not in columns:
             cur.execute("ALTER TABLE tp_sl_setup_state ADD COLUMN order_sent_at TEXT")
+        if "order_volume" not in columns:
+            cur.execute("ALTER TABLE tp_sl_setup_state ADD COLUMN order_volume REAL")
 
 
 def ensure_live_bin_filters_sqlite(conn) -> None:
@@ -284,6 +286,7 @@ def persist_order_sent_sqlite(
     ticket: Optional[str],
     sent_at: Optional[datetime] = None,
     last_checked_fallback: Optional[datetime] = None,
+    volume: Optional[float] = None,
 ) -> None:
     """Persist MT5 order metadata for a setup while keeping checkpoint semantics intact.
 
@@ -313,14 +316,60 @@ def persist_order_sent_sqlite(
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO tp_sl_setup_state (setup_id, last_checked_utc, order_ticket, order_sent_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO tp_sl_setup_state (setup_id, last_checked_utc, order_ticket, order_sent_at, order_volume)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(setup_id) DO UPDATE SET
                 order_ticket = excluded.order_ticket,
                 order_sent_at = excluded.order_sent_at,
+                order_volume = excluded.order_volume,
                 last_checked_utc = COALESCE(tp_sl_setup_state.last_checked_utc, excluded.last_checked_utc)
             """,
-            (setup_id, last_checked_str, ticket, sent_str),
+            (setup_id, last_checked_str, ticket, sent_str, float(volume) if volume is not None else volume),
+        )
+
+
+def load_tp_sl_order_info_sqlite(conn, setup_ids: Iterable[int]) -> Dict[int, Dict[str, Optional[object]]]:
+    """Return order metadata (ticket, sent_at, volume) for specified setups."""
+
+    ids = list(dict.fromkeys(int(sid) for sid in setup_ids))
+    if not ids:
+        return {}
+    placeholder = ",".join(["?"] * len(ids))
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT setup_id, order_ticket, order_sent_at, order_volume
+        FROM tp_sl_setup_state
+        WHERE setup_id IN ({placeholder})
+        """,
+        ids,
+    )
+    rows = cur.fetchall() or []
+    out: Dict[int, Dict[str, Optional[object]]] = {}
+    for setup_id, ticket, sent_at, volume in rows:
+        sid = int(setup_id)
+        out[sid] = {
+            "order_ticket": str(ticket) if ticket not in (None, "") else None,
+            "order_sent_at": _parse_utc_datetime(sent_at) if sent_at else None,
+            "order_volume": float(volume) if volume is not None else None,
+        }
+    return out
+
+
+def clear_order_sent_sqlite(conn, setup_id: int) -> None:
+    """Clear stored order metadata once the position has been closed."""
+
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE tp_sl_setup_state
+               SET order_ticket = NULL,
+                   order_sent_at = NULL,
+                   order_volume = NULL
+             WHERE setup_id = ?
+            """,
+            (int(setup_id),),
         )
 
 

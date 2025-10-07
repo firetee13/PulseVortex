@@ -3399,7 +3399,7 @@ class App(tk.Tk):
                                h.hit_time_utc3, h.hit_time, h.hit, h.hit_price,
                                s.tp, s.sl, COALESCE(h.entry_price, s.price) AS entry_price,
                                s.proximity_to_sl, s.proximity_bin,
-                               st.order_ticket, st.order_sent_at
+                               st.order_ticket, st.order_sent_at, st.order_volume
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
                         LEFT JOIN tp_sl_setup_state st ON st.setup_id = s.id
@@ -3414,7 +3414,7 @@ class App(tk.Tk):
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
-                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin, order_ticket, order_sent_at) = row
+                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin, order_ticket, order_sent_at, order_volume) = row
 
                         # Apply symbol category filter
                         if symbol_category != "All":
@@ -3442,7 +3442,7 @@ class App(tk.Tk):
                         filtered_rows.append(row)
 
                     # Process filtered rows
-                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin, order_ticket, order_sent_at) in filtered_rows:
+                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin, order_ticket, order_sent_at, order_volume) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''
                         dir_s = str(direction) if direction is not None else ''
                         try:
@@ -3490,6 +3490,7 @@ class App(tk.Tk):
                             'proximity_bin': prox_bin_s,
                             'order_ticket': str(order_ticket) if order_ticket not in (None, "") else None,
                             'order_sent_at': str(order_sent_at) if order_sent_at not in (None, "") else None,
+                            'order_volume': float(order_volume) if order_volume is not None else None,
                             'has_live_order': order_ticket not in (None, ""),
                             'hit_price': (float(hit_price) if hit_price is not None else None),
                         })
@@ -4706,4 +4707,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
 

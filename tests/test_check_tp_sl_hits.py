@@ -4,7 +4,16 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from check_tp_sl_hits import RateBar, _bar_crosses_price, _evaluate_setup
+from check_tp_sl_hits import (
+    DEMO_FOREX_SPREAD_POINTS,
+    RateBar,
+    _SYMBOL_POINT_CACHE,
+    _augment_spread_points,
+    _bar_crosses_price,
+    _close_live_order,
+    _compute_spread_guard,
+    _evaluate_setup,
+)
 from monitor.domain import Setup, TickFetchStats
 
 
@@ -127,5 +136,65 @@ class EvaluateSetupQuietHoursTests(unittest.TestCase):
         self.assertEqual(result.last_checked_utc, now_utc)
 
 
+
+class DemoSpreadGuardTests(unittest.TestCase):
+
+    def tearDown(self) -> None:
+        _SYMBOL_POINT_CACHE.clear()
+
+    def test_augment_spread_points_demo_forex(self) -> None:
+        with patch('check_tp_sl_hits._is_demo_account', return_value=True), \
+             patch('check_tp_sl_hits.classify_symbol', return_value='forex'):
+            augmented = _augment_spread_points('EURUSD', 0.0)
+            self.assertEqual(augmented, DEMO_FOREX_SPREAD_POINTS)
+
+    def test_compute_spread_guard_inflates_for_demo(self) -> None:
+        with patch('check_tp_sl_hits._is_demo_account', return_value=True), \
+             patch('check_tp_sl_hits.classify_symbol', return_value='forex'), \
+             patch('check_tp_sl_hits.get_symbol_info', return_value=SimpleNamespace(point=0.0001, spread=0.0)):
+            guard = _compute_spread_guard('EURUSD')
+            expected_points = max(DEMO_FOREX_SPREAD_POINTS * 1.5, 5.0)
+            self.assertAlmostEqual(guard, 0.0001 * expected_points)
+
+
+class CloseLiveOrderTests(unittest.TestCase):
+
+    def test_close_live_order_success(self) -> None:
+        class FakeMT5:
+            ORDER_TYPE_BUY = 0
+            ORDER_TYPE_SELL = 1
+            TRADE_ACTION_DEAL = 1
+            ORDER_TIME_GTC = 0
+            TRADE_RETCODE_DONE = 10009
+            TRADE_RETCODE_PLACED = 10008
+
+            def __init__(self) -> None:
+                self.tick = SimpleNamespace(bid=1.2345, ask=1.2347)
+                self.sent_requests = []
+
+            def symbol_info_tick(self, symbol):
+                return self.tick
+
+            def positions_get(self, **kwargs):
+                return [SimpleNamespace(volume=0.1)]
+
+            def order_send(self, request):
+                self.sent_requests.append(request)
+                return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, deal=987654)
+
+        fake_mt5 = FakeMT5()
+
+        with patch('check_tp_sl_hits.mt5', fake_mt5), \
+             patch('check_tp_sl_hits.get_symbol_info', return_value=SimpleNamespace(filling_mode=1)):
+            success = _close_live_order('EURUSD', 'Buy', '12345', None, verbose=False)
+
+        self.assertTrue(success)
+        self.assertEqual(len(fake_mt5.sent_requests), 1)
+        req = fake_mt5.sent_requests[0]
+        self.assertEqual(req['position'], 12345)
+        self.assertEqual(req['type'], fake_mt5.ORDER_TYPE_SELL)
+        self.assertGreater(req['volume'], 0.0)
+
 if __name__ == '__main__':
     unittest.main()
+

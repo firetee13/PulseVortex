@@ -43,10 +43,12 @@ from monitor.domain import Hit, Setup, TickFetchStats
 from monitor.config import db_path_str
 from monitor.db import (
     backfill_hit_columns_sqlite,
+    clear_order_sent_sqlite,
     ensure_hits_table_sqlite,
     ensure_tp_sl_setup_state_sqlite,
     load_recorded_ids_sqlite,
     load_setups_sqlite,
+    load_tp_sl_order_info_sqlite,
     load_tp_sl_setup_state_sqlite,
     persist_tp_sl_setup_state_sqlite,
     record_hit_sqlite,
@@ -56,6 +58,7 @@ from monitor.mt5_client import (
     get_server_offset_hours,
     get_symbol_info,
     init_mt5,
+    mt5,
     resolve_symbol,
     rates_range_utc,
     shutdown_mt5,
@@ -76,6 +79,189 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+DEMO_FOREX_SPREAD_POINTS = float(os.environ.get("TIMELAPSE_DEMO_FOREX_EXTRA_POINTS", "10"))
+ORDER_CLOSE_DEVIATION = int(os.environ.get("TIMELAPSE_ORDER_DEVIATION", "10"))
+ORDER_CLOSE_COMMENT = os.environ.get("TIMELAPSE_CLOSE_COMMENT", "timelapse:auto-close")
+_SYMBOL_POINT_CACHE: Dict[str, float] = {}
+_ACCOUNT_TRADE_MODE: Optional[int] = None
+
+
+def _symbol_point(symbol: str) -> Optional[float]:
+    """Return MT5 point size for symbol (cached per session)."""
+    key = symbol.upper()
+    cached = _SYMBOL_POINT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    info = get_symbol_info(symbol)
+    if info is None:
+        return None
+    try:
+        point = float(getattr(info, "point", 0.0) or 0.0)
+    except Exception:
+        point = None
+    if point is not None and point > 0.0:
+        _SYMBOL_POINT_CACHE[key] = point
+    return point
+
+
+def _account_trade_mode() -> Optional[int]:
+    """Return the MT5 account trade_mode value (0 demo, 2 real)."""
+    global _ACCOUNT_TRADE_MODE
+    if _ACCOUNT_TRADE_MODE is not None:
+        return _ACCOUNT_TRADE_MODE
+    if mt5 is None:
+        return None
+    try:
+        info = mt5.account_info()  # type: ignore[union-attr]
+    except Exception:
+        return None
+    if info is None:
+        return None
+    try:
+        mode = getattr(info, "trade_mode", None)
+        if mode is None:
+            return None
+        _ACCOUNT_TRADE_MODE = int(mode)
+        return _ACCOUNT_TRADE_MODE
+    except Exception:
+        return None
+
+
+def _is_demo_account() -> bool:
+    return _account_trade_mode() == 0
+
+
+def _augment_spread_points(symbol: str, spread_points: float) -> float:
+    """Pad spreads on demo forex accounts to account for near-zero quotes."""
+    try:
+        base = float(spread_points)
+    except Exception:
+        return spread_points
+    if DEMO_FOREX_SPREAD_POINTS <= 0:
+        return base
+    if not _is_demo_account():
+        return base
+    try:
+        category = (classify_symbol(symbol) or "").lower()
+    except Exception:
+        category = ""
+    if category != "forex":
+        return base
+    return base + DEMO_FOREX_SPREAD_POINTS
+
+
+def _close_live_order(
+    symbol: str,
+    direction: str,
+    ticket: object,
+    volume: Optional[float],
+    verbose: bool = False,
+) -> bool:
+    """Submit the opposite-side market order to close an existing MT5 position."""
+
+    if mt5 is None:
+        if verbose:
+            print("[ORDER CLOSE] MT5 module unavailable; cannot close live order.")
+        return False
+    try:
+        ticket_int = int(float(ticket))
+    except Exception:
+        if verbose:
+            print(f"[ORDER CLOSE] Invalid ticket '{ticket}' for {symbol}; skipping close.")
+        return False
+
+    direction_l = (direction or "").lower()
+    if direction_l == "buy":
+        close_type = getattr(mt5, "ORDER_TYPE_SELL", 1)
+        price_attr = "bid"
+    elif direction_l == "sell":
+        close_type = getattr(mt5, "ORDER_TYPE_BUY", 0)
+        price_attr = "ask"
+    else:
+        if verbose:
+            print(f"[ORDER CLOSE] Unknown direction '{direction}' for ticket {ticket_int}.")
+        return False
+
+    try:
+        tick = mt5.symbol_info_tick(symbol)  # type: ignore[union-attr]
+    except Exception:
+        tick = None
+    if tick is None:
+        if verbose:
+            print(f"[ORDER CLOSE] No tick data for {symbol}; cannot close ticket {ticket_int}.")
+        return False
+
+    try:
+        price = float(getattr(tick, price_attr, 0.0) or 0.0)
+    except Exception:
+        price = None
+    if price is None or price <= 0.0:
+        if verbose:
+            print(f"[ORDER CLOSE] Invalid price while closing {symbol} ticket {ticket_int}.")
+        return False
+
+    close_volume = volume
+    if close_volume is None or close_volume <= 0.0:
+        try:
+            positions = mt5.positions_get(ticket=ticket_int)  # type: ignore[union-attr]
+        except Exception:
+            positions = None
+        if positions:
+            try:
+                close_volume = float(getattr(positions[0], "volume", 0.0) or 0.0)
+            except Exception:
+                close_volume = None
+    if close_volume is None or close_volume <= 0.0:
+        if verbose:
+            print(f"[ORDER CLOSE] Missing volume for ticket {ticket_int}; cannot close.")
+        return False
+
+    request = {
+        "action": getattr(mt5, "TRADE_ACTION_DEAL", 1),
+        "symbol": symbol,
+        "volume": float(close_volume),
+        "type": close_type,
+        "price": price,
+        "deviation": ORDER_CLOSE_DEVIATION,
+        "position": ticket_int,
+        "type_time": getattr(mt5, "ORDER_TIME_GTC", 0),
+        "comment": ORDER_CLOSE_COMMENT,
+    }
+    info = get_symbol_info(symbol)
+    if info is not None:
+        try:
+            fill_mode = getattr(info, "filling_mode", None)
+            if isinstance(fill_mode, int) and fill_mode >= 0:
+                request["type_filling"] = fill_mode
+        except Exception:
+            pass
+
+    success_codes = {
+        getattr(mt5, "TRADE_RETCODE_DONE", 10009),
+        getattr(mt5, "TRADE_RETCODE_PLACED", 10008),
+    }
+    try:
+        result = mt5.order_send(request)  # type: ignore[union-attr]
+    except Exception as exc:
+        if verbose:
+            print(f"[ORDER CLOSE] Exception closing ticket {ticket_int}: {exc}")
+        return False
+    retcode = getattr(result, "retcode", None)
+    if retcode in success_codes:
+        if verbose:
+            dealt = getattr(result, "deal", None) or getattr(result, "order", None)
+            print(
+                f"[ORDER CLOSE] Closed ticket {ticket_int} ({symbol}) retcode {retcode}, deal {dealt}."
+            )
+        return True
+    if verbose:
+        comment = getattr(result, "comment", "") or ""
+        print(
+            f"[ORDER CLOSE] Failed to close ticket {ticket_int} ({symbol}); retcode {retcode} {comment}"
+        )
+    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -286,6 +472,13 @@ def _compute_spread_guard(symbol: str) -> float:
         spread = float(getattr(info, "spread", 0.0) or 0.0)
     except Exception:
         return 0.0
+    if point <= 0.0:
+        return 0.0
+    _SYMBOL_POINT_CACHE[symbol.upper()] = point
+    spread = _augment_spread_points(symbol, spread)
+    guard_points = max(spread * 1.5, 5.0)
+    return point * guard_points
+    return point * guard_points
     if point <= 0.0:
         return 0.0
     guard_points = max(spread * 1.5, 5.0)
@@ -629,6 +822,8 @@ def run_once(args: argparse.Namespace) -> None:
                 else:
                     last_checked_map[setup.id] = state_dt
 
+            order_info_map = load_tp_sl_order_info_sqlite(conn, [setup.id for setup in pending_setups])
+
             timeframe = _resolve_timeframe(getattr(args, "bar_timeframe", None))
             timeframe_secs = timeframe_seconds(timeframe)
             backtrack_minutes = max(0, int(getattr(args, "bar_backtrack", 2)))
@@ -723,6 +918,25 @@ def run_once(args: argparse.Namespace) -> None:
                                 f"fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms"
                             )
                         record_hit_sqlite(conn, setup, result.hit, args.dry_run, args.verbose)
+                        if not args.dry_run:
+                            order_meta = order_info_map.get(setup.id)
+                            ticket = order_meta.get("order_ticket") if order_meta else None
+                            volume = order_meta.get("order_volume") if order_meta else None
+                            if ticket:
+                                closed = _close_live_order(
+                                    sym_name,
+                                    setup.direction,
+                                    ticket,
+                                    volume,
+                                    verbose=args.verbose,
+                                )
+                                if closed:
+                                    clear_order_sent_sqlite(conn, setup.id)
+                                    order_info_map.pop(setup.id, None)
+                                elif args.verbose:
+                                    print(
+                                        f"[ORDER CLOSE] Will retry closing ticket {ticket} for setup {setup.id} later."
+                                    )
                         hits += 1
                         hit_symbols.append(setup.symbol)
                         continue
@@ -776,3 +990,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+

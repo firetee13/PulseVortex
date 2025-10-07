@@ -1149,6 +1149,7 @@ def _send_market_order(symbol: str, direction: str) -> Optional[Dict[str, object
                 "retcode": retcode,
                 "sent_at": sent_at,
                 "filling_mode": current_mode,
+                "volume": float(ORDER_VOLUME),
             }
         last_comment = getattr(result, "comment", "") or ""
         unsupported_fill = False
@@ -1195,6 +1196,7 @@ def _persist_order_events(events: List[Dict[str, object]]) -> None:
             as_of_db = str(event.get("as_of") or "")
             ticket = event.get("ticket")
             sent_at = event.get("sent_at")
+            volume = event.get("volume")
             if not symbol or not direction or not as_of_db:
                 continue
             setup_id = _lookup_setup_id(conn, symbol, direction, as_of_db)
@@ -1207,6 +1209,7 @@ def _persist_order_events(events: List[Dict[str, object]]) -> None:
                     ticket=ticket,
                     sent_at=sent_at if isinstance(sent_at, datetime) else None,
                     last_checked_fallback=sent_at if isinstance(sent_at, datetime) else None,
+                    volume=volume if isinstance(volume, (int, float)) else None,
                 )
             except Exception as exc:
                 print(f"[ORDER] Warning: failed to persist order state for setup {setup_id}: {exc}")
@@ -1271,6 +1274,7 @@ def _execute_live_orders(
                     "as_of": as_of_db,
                     "ticket": order_result.get("ticket"),
                     "sent_at": order_result.get("sent_at"),
+                    "volume": order_result.get("volume"),
                 }
             )
     return sent_orders

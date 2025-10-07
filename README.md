@@ -5,7 +5,7 @@ A comprehensive Python application suite for automated trade setup detection and
 Key Components:
 - **CLI Setup Analyzer** (`timelapse_setups.py`): Analyzes MT5 symbols to identify high-confidence trade setups based on multi-timeframe strength, ATR volatility, pivot S/R levels, and spread/volume filters
 - **PulseVortex GUI Monitor** (`monitor_gui.py`): Visual interface for real-time monitoring, database results viewing, SL proximity stats, and PnL analytics with interactive charts
-- **TP/SL Hit Checker** (`check_tp_sl_hits.py`): Monitors take-profit and stop-loss hits using MT5 ticks, with bar prefiltering and quiet-hour awareness
+- **TP/SL Hit Checker** (`check_tp_sl_hits.py`): Monitors take-profit and stop-loss hits using MT5 ticks, with bar prefiltering, quiet-hour awareness, and automatic position closes as soon as hits are recorded
 
 Supports automated setup detection, real-time TP/SL hit monitoring, database persistence, and advanced analytics including SL proximity optimization and ATR-normalized PnL visualization.
 
@@ -581,3 +581,4 @@ python check_tp_sl_hits.py --verbose --trace-pages
 ## License
 
 MIT License (see LICENSE file or add one). For educational/research use; verify setups manually. Trading involves risk; past performance ≠ future results.
+

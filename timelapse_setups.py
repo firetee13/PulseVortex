@@ -39,8 +39,10 @@ except Exception:
 
 
 from monitor.config import default_db_path
+from monitor.db import load_live_bin_filters_sqlite, persist_order_sent_sqlite
 from monitor import mt5_client
 from monitor.quiet_hours import is_quiet_time, UTC_PLUS_3
+from monitor.symbols import classify_symbol
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import json
@@ -99,10 +101,90 @@ def _symbol_digits(symbol: str, price: Optional[float]) -> int:
         return 5
 
 
+def _symbol_point(symbol: str) -> Optional[float]:
+    """Fetch the MT5 point size for a symbol with caching."""
+    key = symbol.upper()
+    if key in _SYMBOL_POINT_CACHE:
+        return _SYMBOL_POINT_CACHE[key]
+    if not _MT5_IMPORTED or not _mt5_ensure_init():
+        return None
+    try:
+        info = mt5.symbol_info(symbol)  # type: ignore[union-attr, reportUnknownMember]
+    except Exception:
+        info = None
+    point = None
+    if info is not None:
+        try:
+            val = getattr(info, "point", None)
+            if val is not None:
+                point = float(val)
+        except Exception:
+            point = None
+    if point is not None:
+        _SYMBOL_POINT_CACHE[key] = point
+    return point
+
+
+def _account_trade_mode() -> Optional[int]:
+    """Return the MT5 account trade_mode (0 demo, 2 real) with caching."""
+    global _ACCOUNT_TRADE_MODE
+    if _ACCOUNT_TRADE_MODE is not None:
+        return _ACCOUNT_TRADE_MODE
+    if not _MT5_IMPORTED or not _mt5_ensure_init():
+        return None
+    try:
+        info = mt5.account_info()  # type: ignore[union-attr, reportUnknownMember]
+    except Exception:
+        info = None
+    if info is None:
+        _ACCOUNT_TRADE_MODE = None
+        return _ACCOUNT_TRADE_MODE
+    try:
+        trade_mode = getattr(info, "trade_mode", None)
+        _ACCOUNT_TRADE_MODE = int(trade_mode) if trade_mode is not None else None
+    except Exception:
+        _ACCOUNT_TRADE_MODE = None
+    return _ACCOUNT_TRADE_MODE
+
+
+def _is_demo_account() -> bool:
+    """Return True if the MT5 account is a demo account."""
+    mode = _account_trade_mode()
+    if mode is None:
+        return False
+    # MetaTrader: 0 demo, 1 contest, 2 real
+    return mode == 0
+
+
+def _augment_spread_for_demo(symbol: str, spread: float) -> float:
+    """Pad demo-account forex spreads to account for unrealistic zero spreads."""
+    try:
+        base = float(spread)
+    except Exception:
+        return spread
+    if DEMO_FOREX_SPREAD_POINTS <= 0:
+        return base
+    if not _is_demo_account():
+        return base
+    try:
+        category = (classify_symbol(symbol) or "").lower()
+    except Exception:
+        category = ""
+    if category != "forex":
+        return base
+    point = _symbol_point(symbol)
+    if point is None or point <= 0:
+        return base
+    return base + (point * DEMO_FOREX_SPREAD_POINTS)
+
+
 HEADER_SYMBOL = "symbol"
 
 # Cache for canonicalized keys to speed up repeated lookups
 CANONICAL_KEYS: Dict[str, str] = {}
+_SYMBOL_POINT_CACHE: Dict[str, float] = {}
+_ACCOUNT_TRADE_MODE: Optional[int] = None
+_SYMBOL_FILLING_CACHE: Dict[str, Optional[int]] = {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -121,6 +203,12 @@ def parse_args() -> argparse.Namespace:
 PROXIMITY_BIN_BUCKET = 0.1
 # Multiplier for minimum SL/TP distance in spread units (default 10x; override via TIMELAPSE_SPREAD_MULT)
 SPREAD_MULTIPLIER = float(os.environ.get("TIMELAPSE_SPREAD_MULT", "10"))
+DEMO_FOREX_SPREAD_POINTS = float(os.environ.get("TIMELAPSE_DEMO_FOREX_EXTRA_POINTS", "10"))
+ORDER_VOLUME = float(os.environ.get("TIMELAPSE_ORDER_VOLUME", "0.1"))
+ORDER_DEVIATION = int(os.environ.get("TIMELAPSE_ORDER_DEVIATION", "10"))
+ORDER_RETRY_DELAY = float(os.environ.get("TIMELAPSE_ORDER_RETRY_SEC", "0.2"))
+ORDER_MAX_ATTEMPTS = int(os.environ.get("TIMELAPSE_ORDER_MAX_RETRIES", "0"))
+ORDER_COMMENT = os.environ.get("TIMELAPSE_ORDER_COMMENT", "timelapse:auto")
 
 
 def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET) -> Optional[str]:
@@ -138,6 +226,13 @@ def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_B
         return f"{start:.1f}-{end:.1f}"
     except Exception:
         return None
+
+
+def _format_as_of_for_db(value: object) -> str:
+    """Format `as_of` entries consistently for DB lookups."""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+    return str(value)
 
 
 # Fixed offset timezone for input interpretation (Europe/Berlin UTC+2)
@@ -848,6 +943,339 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
                 pass
 
 
+def _load_live_bin_filters() -> Optional[Dict[str, object]]:
+    """Load GUI-published live bin filters for symbol/category gating."""
+    if sqlite3 is None:
+        return None
+    db_path = str(default_db_path())
+    conn: Optional["sqlite3.Connection"] = None
+    try:
+        conn = _connect_sqlite(db_path, timeout=2.0)
+        data = load_live_bin_filters_sqlite(conn)
+    except Exception:
+        data = None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if not data:
+        return None
+    allowed_raw = data.get("allowed_bins")
+    allowed: Dict[str, set[str]] = {}
+    if isinstance(allowed_raw, dict):
+        for key, values in allowed_raw.items():
+            if not values:
+                continue
+            bucket = {str(v) for v in values if v is not None}
+            if bucket:
+                allowed[str(key).lower()] = bucket
+    return {
+        "min_edge": data.get("min_edge"),
+        "min_trades": data.get("min_trades"),
+        "allowed_bins": allowed,
+        "live_enabled": bool(data.get("live_enabled")),
+    }
+
+
+def _lookup_setup_id(
+    conn: "sqlite3.Connection",
+    symbol: str,
+    direction: str,
+    as_of_db: str,
+) -> Optional[int]:
+    """Resolve the setup id for a freshly inserted setup row."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id FROM timelapse_setups
+            WHERE symbol = ? AND direction = ? AND as_of = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (symbol, direction, as_of_db),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return int(row[0])
+        # Fallback: pick the most recent row for the symbol/direction pair
+        cur.execute(
+            """
+            SELECT id FROM timelapse_setups
+            WHERE symbol = ? AND direction = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (symbol, direction),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return int(row[0])
+    except Exception:
+        return None
+    return None
+
+
+def _candidate_filling_modes(symbol: str) -> List[Optional[int]]:
+    """Return candidate filling modes (including None for default) ordered by preference."""
+    sym_key = symbol.upper()
+    modes: List[Optional[int]] = []
+    cached = _SYMBOL_FILLING_CACHE.get(sym_key)
+    if cached is not None:
+        modes.append(cached)
+    if _mt5_ensure_init():
+        try:
+            info = mt5.symbol_info(symbol)  # type: ignore[union-attr, reportUnknownMember]
+        except Exception:
+            info = None
+        if info is not None:
+            try:
+                filling = getattr(info, "filling_mode", None)
+            except Exception:
+                filling = None
+            if isinstance(filling, int) and filling >= 0:
+                modes.append(filling)
+    # Append standard fallbacks (avoid duplicates)
+    for attr in ("ORDER_FILLING_RETURN", "ORDER_FILLING_IOC", "ORDER_FILLING_FOK", "ORDER_FILLING_BOC"):
+        try:
+            val = getattr(mt5, attr)  # type: ignore[union-attr]
+        except Exception:
+            continue
+        if isinstance(val, int) and val not in modes:
+            modes.append(val)
+    if None not in modes:
+        modes.append(None)
+    return modes
+
+
+def _send_market_order(symbol: str, direction: str) -> Optional[Dict[str, object]]:
+    """Send a market order to MT5 with retry behaviour for transient failures."""
+    if not _mt5_ensure_init():
+        print(f"[ORDER] MT5 not ready; cannot send order for {symbol}.")
+        return None
+    try:
+        mt5.symbol_select(symbol, True)  # type: ignore[union-attr, reportUnknownMember]
+    except Exception:
+        pass
+    order_type = getattr(mt5, "ORDER_TYPE_BUY", 0) if direction.lower() == "buy" else getattr(mt5, "ORDER_TYPE_SELL", 1)
+    action = getattr(mt5, "TRADE_ACTION_DEAL", 1)
+    time_type = getattr(mt5, "ORDER_TIME_GTC", 0)
+    fill_modes = _candidate_filling_modes(symbol)
+    recoverable_codes = {
+        getattr(mt5, "TRADE_RETCODE_REQUOTE", 10004),
+        getattr(mt5, "TRADE_RETCODE_PRICE_CHANGED", 10006),
+        getattr(mt5, "TRADE_RETCODE_REJECT", 10010),
+        getattr(mt5, "TRADE_RETCODE_TRADE_CONTEXT_BUSY", 10011),
+        getattr(mt5, "TRADE_RETCODE_OFFQUOTES", 10014),
+        getattr(mt5, "TRADE_RETCODE_TIMEOUT", 10015),
+    }
+    invalid_fill_codes = {
+        getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030),
+        getattr(mt5, "TRADE_RETCODE_INVALID_PARAMS", 10013),
+    }
+    success_codes = {
+        getattr(mt5, "TRADE_RETCODE_DONE", 10009),
+        getattr(mt5, "TRADE_RETCODE_PLACED", 10008),
+    }
+    attempts = 0
+    last_retcode = None
+    last_comment = ""
+    mode_index = 0
+    max_attempts = ORDER_MAX_ATTEMPTS if ORDER_MAX_ATTEMPTS > 0 else None
+    while True:
+        attempts += 1
+        try:
+            tick = mt5.symbol_info_tick(symbol)  # type: ignore[union-attr, reportUnknownMember]
+        except Exception:
+            tick = None
+        price = None
+        if tick is not None:
+            try:
+                price = float(getattr(tick, "ask" if direction.lower() == "buy" else "bid", 0.0) or 0.0)
+            except Exception:
+                price = None
+        if price is None or price <= 0:
+            time.sleep(ORDER_RETRY_DELAY)
+            continue
+        request = {
+            "action": action,
+            "symbol": symbol,
+            "volume": float(ORDER_VOLUME),
+            "type": order_type,
+            "price": float(price),
+            "deviation": ORDER_DEVIATION,
+            "comment": ORDER_COMMENT,
+        }
+        if time_type is not None:
+            request["type_time"] = time_type
+
+        current_mode: Optional[int] = None
+        if 0 <= mode_index < len(fill_modes):
+            current_mode = fill_modes[mode_index]
+        if current_mode is not None:
+            request["type_filling"] = current_mode
+        else:
+            request.pop("type_filling", None)
+        try:
+            result = mt5.order_send(request)  # type: ignore[union-attr, reportUnknownMember]
+        except Exception as exc:
+            last_comment = str(exc)
+            result = None
+        if result is None:
+            if max_attempts is not None and attempts >= max_attempts:
+                break
+            time.sleep(ORDER_RETRY_DELAY)
+            continue
+        retcode = getattr(result, "retcode", None)
+        last_retcode = retcode
+        if retcode in success_codes:
+            ticket = getattr(result, "order", 0) or getattr(result, "deal", 0)
+            sent_at = datetime.now(UTC)
+            try:
+                price_fmt = f"{price:.5f}"
+            except Exception:
+                price_fmt = str(price)
+            print(
+                f"[ORDER] Sent {direction.upper()} {symbol} volume {ORDER_VOLUME:.2f} @ {price_fmt} "
+                f"ticket {ticket} (retcode {retcode})"
+            )
+            sym_key = symbol.upper()
+            _SYMBOL_FILLING_CACHE[sym_key] = current_mode
+            return {
+                "ticket": str(ticket) if ticket else None,
+                "price": price,
+                "retcode": retcode,
+                "sent_at": sent_at,
+                "filling_mode": current_mode,
+            }
+        last_comment = getattr(result, "comment", "") or ""
+        unsupported_fill = False
+        if retcode in invalid_fill_codes:
+            unsupported_fill = True
+        else:
+            comment_lower = last_comment.lower()
+            if "filling" in comment_lower and ("unsupported" in comment_lower or "invalid" in comment_lower):
+                unsupported_fill = True
+        if unsupported_fill:
+            mode_index += 1
+            if mode_index >= len(fill_modes):
+                break
+            next_mode = fill_modes[mode_index] if mode_index < len(fill_modes) else None
+            try:
+                mode_repr = "default" if next_mode is None else str(next_mode)
+                print(f"[ORDER] Retrying {direction.upper()} {symbol} with filling mode {mode_repr}")
+            except Exception:
+                pass
+            # retry immediately with next mode without counting towards max attempts
+            attempts -= 1
+            continue
+        if retcode not in recoverable_codes:
+            break
+        if max_attempts is not None and attempts >= max_attempts:
+            break
+        time.sleep(ORDER_RETRY_DELAY)
+    detail = last_comment or f"retcode {last_retcode}"
+    print(f"[ORDER] Failed to send {direction.upper()} {symbol}: {detail}")
+    return None
+
+
+def _persist_order_events(events: List[Dict[str, object]]) -> None:
+    """Persist MT5 order metadata into tp_sl_setup_state once setup IDs are known."""
+    if not events or sqlite3 is None:
+        return
+    db_path = str(default_db_path())
+    conn: Optional["sqlite3.Connection"] = None
+    try:
+        conn = _connect_sqlite(db_path, timeout=3.0)
+        for event in events:
+            symbol = str(event.get("symbol") or "")
+            direction = str(event.get("direction") or "")
+            as_of_db = str(event.get("as_of") or "")
+            ticket = event.get("ticket")
+            sent_at = event.get("sent_at")
+            if not symbol or not direction or not as_of_db:
+                continue
+            setup_id = _lookup_setup_id(conn, symbol, direction, as_of_db)
+            if setup_id is None:
+                continue
+            try:
+                persist_order_sent_sqlite(
+                    conn,
+                    setup_id=setup_id,
+                    ticket=ticket,
+                    sent_at=sent_at if isinstance(sent_at, datetime) else None,
+                    last_checked_fallback=sent_at if isinstance(sent_at, datetime) else None,
+                )
+            except Exception as exc:
+                print(f"[ORDER] Warning: failed to persist order state for setup {setup_id}: {exc}")
+    except Exception as exc:
+        print(f"[ORDER] Warning: could not save order metadata: {exc}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _execute_live_orders(
+    results: List[Dict[str, object]],
+    debug: bool = False,
+) -> List[Dict[str, object]]:
+    """Scan analyzed setups and send market orders for qualifying bins."""
+    if not results:
+        return []
+    filters = _load_live_bin_filters()
+    if not filters:
+        if debug:
+            print("[ORDER] Skipping order send: live bin filters are unavailable.")
+        return []
+    if not filters.get("live_enabled"):
+        if debug:
+            print("[ORDER] Live trading disabled; orders will not be sent.")
+        return []
+    allowed_bins = filters.get("allowed_bins") or {}
+    if not allowed_bins:
+        if debug:
+            print("[ORDER] Skipping order send: no bins meet live profitability criteria.")
+        return []
+    sent_orders: List[Dict[str, object]] = []
+    for row in results:
+        symbol = str(row.get("symbol") or "")
+        direction = str(row.get("direction") or "")
+        if not symbol or not direction:
+            continue
+        prox = row.get("proximity_to_sl")
+        bin_label = _proximity_bin_label(prox) or ""
+        if not bin_label:
+            continue
+        category = classify_symbol(symbol) or "other"
+        cat_key = str(category).lower()
+        allowed_for_cat = allowed_bins.get(cat_key)
+        if not allowed_for_cat or bin_label not in allowed_for_cat:
+            if debug:
+                print(
+                    f"[ORDER] Skip {symbol} {direction}: bin '{bin_label}' for category '{cat_key}' "
+                    "not in profitable set."
+                )
+            continue
+        order_result = _send_market_order(symbol, direction)
+        if order_result:
+            as_of_db = _format_as_of_for_db(row.get("as_of"))
+            sent_orders.append(
+                {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "as_of": as_of_db,
+                    "ticket": order_result.get("ticket"),
+                    "sent_at": order_result.get("sent_at"),
+                }
+            )
+    return sent_orders
+
+
 
 
 def process_once(
@@ -895,6 +1323,9 @@ def process_once(
     # Apply top limit after filtering
     top_results = filtered[: top] if top else filtered
 
+    # Trigger live execution before DB mutations for minimal latency
+    order_events = _execute_live_orders(top_results, debug=debug)
+
     if not top_results and debug:
         print("No high-confidence setups based on the latest timelapse and filters.")
 
@@ -931,6 +1362,9 @@ def process_once(
     except Exception as e:
         # Keep non-fatal; just report the issue
         print(f"[DB] Skipped insert due to error: {e}")
+    else:
+        if order_events:
+            _persist_order_events(order_events)
 
 
 def watch_loop(
@@ -1151,7 +1585,8 @@ def analyze(
                     print(f"[DEBUG] Invalid bid/ask for spread calculation: sym={sym}, bid={bid}, ask={ask}")
                 continue
 
-            spread_abs = ask - bid
+            raw_spread = ask - bid
+            spread_abs = _augment_spread_for_demo(sym, raw_spread)
             # Calculate distance based on direction
             distance: Optional[float] = None
             if direction == "Buy":
@@ -1173,7 +1608,8 @@ def analyze(
                     print(f"[DEBUG] Invalid bid/ask for TP spread calculation: sym={sym}, bid={bid}, ask={ask}")
                 continue
 
-            spread_abs = ask - bid
+            raw_spread = ask - bid
+            spread_abs = _augment_spread_for_demo(sym, raw_spread)
             tp_distance: Optional[float] = None
             if direction == "Buy":
                 tp_distance = tp - bid

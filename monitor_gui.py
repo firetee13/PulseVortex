@@ -35,6 +35,7 @@ import shutil
 import math
 from typing import List, Sequence, Optional
 from monitor.config import db_path_str, default_db_path
+from monitor.db import load_live_bin_filters_sqlite, persist_live_bin_filters_sqlite
 from monitor.mt5_client import (
     resolve_symbol as _RESOLVE,
     get_server_offset_hours as _GET_OFFS,
@@ -239,6 +240,7 @@ class App(tk.Tk):
         self.var_db_name = tk.StringVar(value=str(default_db_path()))
         self.var_since_hours = tk.IntVar(value=168)
         self.var_auto = tk.BooleanVar(value=True)
+        self.var_live_trading_enabled = tk.BooleanVar(value=False)
         self.var_interval = tk.IntVar(value=60)
         self.var_symbol_filter = tk.StringVar(value="")
         # Proximity stats tab variables
@@ -256,6 +258,11 @@ class App(tk.Tk):
         # Load persisted settings (if any) before building controls
         try:
             self._load_settings()
+        except Exception:
+            pass
+        self._latest_live_bins: dict[str, set[str]] = {}
+        try:
+            self._hydrate_live_trading_switch()
         except Exception:
             pass
         # Persist on any change
@@ -458,6 +465,7 @@ class App(tk.Tk):
         add_labeled(row1, "Since(h):", ttk.Spinbox(row1, from_=1, to=24*365, textvariable=self.var_since_hours, width=6)).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(row1, text="Refresh", command=self._db_refresh).pack(side=tk.LEFT)
         ttk.Checkbutton(row1, text="Auto", variable=self.var_auto, command=self._db_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Checkbutton(row1, text="Live Trading", variable=self.var_live_trading_enabled, command=self._on_live_trading_toggle).pack(side=tk.LEFT, padx=(4, 10))
         add_labeled(row1, "Every(s):", ttk.Spinbox(row1, from_=5, to=3600, textvariable=self.var_interval, width=6)).pack(side=tk.LEFT)
         ttk.Button(row1, text="Restart", command=self._restart_monitors).pack(side=tk.RIGHT, padx=(10, 0))
 
@@ -2435,7 +2443,80 @@ class App(tk.Tk):
                 expectancy = success * avg_rrr - (1 - success)
                 if expectancy is not None and expectancy >= PNL_EXPECTANCY_MIN_EDGE:
                     bins_by_category.setdefault(category, set()).add(label)
+        self._sync_live_bin_filters(bins_by_category)
         return bins_by_category
+
+    def _hydrate_live_trading_switch(self) -> None:
+        """Load persisted live-trading toggle and latest bins from SQLite."""
+        try:
+            import sqlite3  # type: ignore
+        except Exception:
+            self.var_live_trading_enabled.set(False)
+            self._latest_live_bins = {}
+            return
+        try:
+            dbname = self.var_db_name.get().strip()
+        except Exception:
+            dbname = ""
+        try:
+            db_path = db_path_str(dbname)
+            conn = sqlite3.connect(db_path, timeout=3)
+            try:
+                data = load_live_bin_filters_sqlite(conn)
+            finally:
+                conn.close()
+        except Exception:
+            data = None
+        if not data:
+            self.var_live_trading_enabled.set(False)
+            self._latest_live_bins = {}
+            return
+        enabled = bool(data.get("live_enabled"))
+        self.var_live_trading_enabled.set(enabled)
+        allowed = data.get("allowed_bins") or {}
+        try:
+            self._latest_live_bins = {str(k): set(v) for k, v in allowed.items()}
+        except Exception:
+            self._latest_live_bins = {}
+
+    def _on_live_trading_toggle(self) -> None:
+        """Persist the live trading toggle without recomputing bins."""
+        self._sync_live_bin_filters(None)
+
+    def _sync_live_bin_filters(self, bins: Optional[dict[str, set[str]]]) -> None:
+        """Persist GUI-derived live bin filters and toggle state for CLI consumers."""
+        try:
+            import sqlite3  # type: ignore
+        except Exception:
+            return
+        try:
+            dbname = self.var_db_name.get().strip()
+        except Exception:
+            dbname = ""
+
+        if bins is not None:
+            try:
+                self._latest_live_bins = {str(k): set(v) for k, v in bins.items()}
+            except Exception:
+                self._latest_live_bins = {}
+        bins_payload = self._latest_live_bins or {}
+        enabled_flag = bool(self.var_live_trading_enabled.get())
+
+        try:
+            db_path = db_path_str(dbname)
+            conn = sqlite3.connect(db_path, timeout=3)
+            try:
+                persist_live_bin_filters_sqlite(
+                    conn,
+                    min_edge=PNL_EXPECTANCY_MIN_EDGE,
+                    min_trades=PNL_EXPECTANCY_MIN_COMPLETED,
+                    allowed_bins=bins_payload,
+                    live_trading_enabled=enabled_flag,
+                )
+            finally:
+                conn.close()
+        except Exception:
+            pass
 
     def _pnl_fetch_thread(self) -> None:
         """Fetch PnL-relevant rows from the SQLite DB in a background thread and compute ATR-normalized P/L."""

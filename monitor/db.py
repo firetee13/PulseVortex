@@ -1,12 +1,33 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .domain import Hit, Setup
 
 UTC = timezone.utc
+
+
+def _table_columns(conn, table_name: str) -> Dict[str, Tuple[int, Optional[str]]]:
+    """Return table columns keyed by name -> (cid, type)."""
+    cur = conn.cursor()
+    try:
+        cur.execute(f"PRAGMA table_info('{table_name}')")
+    except Exception:
+        return {}
+    meta = cur.fetchall() or []
+    columns: Dict[str, Tuple[int, Optional[str]]] = {}
+    for row in meta:
+        try:
+            cid = int(row[0])
+            name = str(row[1])
+            col_type = row[2] if len(row) > 2 else None
+        except Exception:
+            continue
+        columns[name] = (cid, col_type if isinstance(col_type, str) else None)
+    return columns
 
 
 def ensure_hits_table_sqlite(conn) -> None:
@@ -71,7 +92,7 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
 
 
 def ensure_tp_sl_setup_state_sqlite(conn) -> None:
-    """Ensure the checkpoint table used by TP/SL checks exists."""
+    """Ensure the checkpoint table used by TP/SL checks exists and carries order metadata columns."""
 
     with conn:
         cur = conn.cursor()
@@ -82,6 +103,125 @@ def ensure_tp_sl_setup_state_sqlite(conn) -> None:
                 last_checked_utc TEXT NOT NULL
             )
             """
+        )
+        columns = _table_columns(conn, "tp_sl_setup_state")
+        if "order_ticket" not in columns:
+            cur.execute("ALTER TABLE tp_sl_setup_state ADD COLUMN order_ticket TEXT")
+        if "order_sent_at" not in columns:
+            cur.execute("ALTER TABLE tp_sl_setup_state ADD COLUMN order_sent_at TEXT")
+
+
+def ensure_live_bin_filters_sqlite(conn) -> None:
+    """Ensure the live_bin_filters table exists for GUI-to-CLI filter coordination."""
+
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_bin_filters (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                min_edge REAL,
+                min_trades INTEGER,
+                updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                allowed_bins_json TEXT,
+                live_trading_enabled INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        columns = _table_columns(conn, "live_bin_filters")
+        if "allowed_bins_json" not in columns:
+            cur.execute("ALTER TABLE live_bin_filters ADD COLUMN allowed_bins_json TEXT")
+        if "live_trading_enabled" not in columns:
+            cur.execute("ALTER TABLE live_bin_filters ADD COLUMN live_trading_enabled INTEGER NOT NULL DEFAULT 0")
+        # Guarantee a single row placeholder so SELECTs can rely on it
+        cur.execute(
+            """
+            INSERT INTO live_bin_filters (id, min_edge, min_trades, updated_at, allowed_bins_json, live_trading_enabled)
+            VALUES (1, NULL, NULL, CURRENT_TIMESTAMP, NULL, 0)
+            ON CONFLICT(id) DO NOTHING
+            """
+        )
+
+
+def load_live_bin_filters_sqlite(conn) -> Optional[Dict[str, Optional[object]]]:
+    """Return the currently active live bin filters (min_edge, min_trades, updated_at)."""
+
+    ensure_live_bin_filters_sqlite(conn)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT min_edge, min_trades, updated_at, allowed_bins_json, live_trading_enabled FROM live_bin_filters WHERE id = 1"
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    min_edge, min_trades, updated_at, allowed_bins_json, live_enabled = row
+    updated_dt = _parse_utc_datetime(updated_at) if updated_at else None
+    allowed_bins: Dict[str, set[str]] | None = None
+    if allowed_bins_json:
+        try:
+            data = json.loads(allowed_bins_json)
+            if isinstance(data, dict):
+                allowed_bins = {}
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        allowed_bins[key] = {str(v) for v in value}
+        except Exception:
+            allowed_bins = None
+    return {
+        "min_edge": float(min_edge) if min_edge is not None else None,
+        "min_trades": int(min_trades) if min_trades is not None else None,
+        "updated_at": updated_dt,
+        "live_enabled": bool(live_enabled) if live_enabled is not None else False,
+        "allowed_bins": allowed_bins,
+    }
+
+
+def persist_live_bin_filters_sqlite(
+    conn,
+    min_edge: Optional[float],
+    min_trades: Optional[int],
+    allowed_bins: Optional[Dict[str, Iterable[str]]] = None,
+    live_trading_enabled: Optional[bool] = None,
+) -> None:
+    """Upsert the live bin filter thresholds used by GUI/CLI coordination."""
+
+    ensure_live_bin_filters_sqlite(conn)
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    bins_json: Optional[str]
+    if allowed_bins is not None:
+        try:
+            bins_json = json.dumps(
+                {str(k): sorted({str(v) for v in vals}) for k, vals in allowed_bins.items()},
+                sort_keys=True,
+            )
+        except Exception:
+            bins_json = None
+    else:
+        bins_json = None
+    enabled_val: Optional[int]
+    if live_trading_enabled is None:
+        enabled_val = None
+    else:
+        enabled_val = 1 if live_trading_enabled else 0
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE live_bin_filters
+               SET min_edge = ?,
+                   min_trades = ?,
+                   updated_at = ?,
+                   allowed_bins_json = COALESCE(?, allowed_bins_json),
+                   live_trading_enabled = COALESCE(?, live_trading_enabled)
+             WHERE id = 1
+            """,
+            (
+                float(min_edge) if min_edge is not None else None,
+                int(min_trades) if min_trades is not None else None,
+                now,
+                bins_json,
+                enabled_val,
+            ),
         )
 
 
@@ -135,6 +275,52 @@ def persist_tp_sl_setup_state_sqlite(conn, entries: Dict[int, datetime]) -> None
             ON CONFLICT(setup_id) DO UPDATE SET last_checked_utc = excluded.last_checked_utc
             """,
             records,
+        )
+
+
+def persist_order_sent_sqlite(
+    conn,
+    setup_id: int,
+    ticket: Optional[str],
+    sent_at: Optional[datetime] = None,
+    last_checked_fallback: Optional[datetime] = None,
+) -> None:
+    """Persist MT5 order metadata for a setup while keeping checkpoint semantics intact.
+
+    The table requires last_checked_utc to be non-null, so we fall back to the
+    supplied last_checked value (or the order send time when absent) when creating rows.
+    """
+
+    ensure_tp_sl_setup_state_sqlite(conn)
+    if not isinstance(setup_id, int):
+        try:
+            setup_id = int(setup_id)
+        except Exception:
+            raise ValueError("setup_id must be convertible to int")
+    sent_dt = sent_at or datetime.now(UTC)
+    if sent_dt.tzinfo is None:
+        sent_dt = sent_dt.replace(tzinfo=UTC)
+    else:
+        sent_dt = sent_dt.astimezone(UTC)
+    last_checked = last_checked_fallback or sent_dt
+    if last_checked.tzinfo is None:
+        last_checked = last_checked.replace(tzinfo=UTC)
+    else:
+        last_checked = last_checked.astimezone(UTC)
+    sent_str = sent_dt.strftime("%Y-%m-%d %H:%M:%S")
+    last_checked_str = last_checked.strftime("%Y-%m-%d %H:%M:%S")
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO tp_sl_setup_state (setup_id, last_checked_utc, order_ticket, order_sent_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(setup_id) DO UPDATE SET
+                order_ticket = excluded.order_ticket,
+                order_sent_at = excluded.order_sent_at,
+                last_checked_utc = COALESCE(tp_sl_setup_state.last_checked_utc, excluded.last_checked_utc)
+            """,
+            (setup_id, last_checked_str, ticket, sent_str),
         )
 
 

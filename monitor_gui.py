@@ -33,7 +33,7 @@ import argparse
 import tempfile
 import shutil
 import math
-from typing import List, Sequence
+from typing import List, Sequence, Optional
 from monitor.config import db_path_str, default_db_path
 from monitor.mt5_client import (
     resolve_symbol as _RESOLVE,
@@ -95,6 +95,8 @@ except Exception:
 UTC = timezone.utc
 DISPLAY_TZ = timezone(timedelta(hours=3))  # UTC+3 for chart display
 QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45-00:59 UTC+3; weekends for non-crypto).'
+PNL_EXPECTANCY_MIN_COMPLETED = 20
+PNL_EXPECTANCY_MIN_EDGE = 0.10
 
 
 class ProcController:
@@ -576,6 +578,8 @@ class App(tk.Tk):
         self._pnl_toolbar = None
         self._pnl_loading = False
         self.pnl_status = None
+        self._pnl_positive_bins: dict[str, set[str]] = {}
+        self._pnl_filter_counts: tuple[int, int] | None = None
         self.pnl_chart_frame = None
         # Normalized PnL chart state
         self._pnl_norm_fig = None
@@ -2352,6 +2356,87 @@ class App(tk.Tk):
         t = threading.Thread(target=self._pnl_fetch_thread, daemon=True)
         t.start()
 
+    def _positive_expectancy_bins(
+        self,
+        hours: int,
+        min_completed: int,
+    ) -> Optional[dict[str, set[str]]]:
+        """Compute positive expectancy proximity bins per symbol category."""
+        try:
+            min_required = max(1, int(min_completed))
+        except Exception:
+            min_required = 1
+        try:
+            dbname = self.var_db_name.get().strip()
+        except Exception:
+            dbname = ""
+        bins_by_category: dict[str, set[str]] = {}
+        try:
+            import sqlite3  # type: ignore
+            db_path = db_path_str(dbname)
+            conn = sqlite3.connect(db_path, timeout=3)
+            try:
+                cur = conn.cursor()
+                from datetime import timezone as _tz
+                threshold = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+                cur.execute(
+                    """
+                    SELECT s.symbol, COALESCE(s.proximity_bin, ''), s.rrr, h.hit
+                    FROM timelapse_setups s
+                    JOIN timelapse_hits h ON h.setup_id = s.id
+                    WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
+                      AND s.proximity_bin IS NOT NULL
+                      AND s.proximity_bin != ''
+                    """,
+                    (threshold,),
+                )
+                rows = cur.fetchall() or []
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            return None
+
+        aggregates: dict[str, dict[str, dict[str, float]]] = {}
+        for sym, bin_label, rrr_raw, hit in rows:
+            if not bin_label:
+                continue
+            category = self._classify_symbol(str(sym or "")) or "other"
+            cat_map = aggregates.setdefault(category, {})
+            bin_stats = cat_map.setdefault(
+                str(bin_label),
+                {'wins': 0.0, 'losses': 0.0, 'sum_rrr_wins': 0.0},
+            )
+            outcome = str(hit or '').upper()
+            if outcome == 'TP':
+                bin_stats['wins'] += 1
+                try:
+                    rrr_val = float(rrr_raw)
+                except Exception:
+                    rrr_val = None
+                if rrr_val is not None and rrr_val > 0:
+                    bin_stats['sum_rrr_wins'] += rrr_val
+            elif outcome == 'SL':
+                bin_stats['losses'] += 1
+
+        for category, bin_map in aggregates.items():
+            for label, stats in bin_map.items():
+                wins = float(stats.get('wins', 0.0))
+                losses = float(stats.get('losses', 0.0))
+                completed = wins + losses
+                if completed < max(3, min_required):
+                    continue
+                success = wins / completed if completed else None
+                avg_rrr = (stats['sum_rrr_wins'] / wins) if (wins and stats['sum_rrr_wins'] > 0) else None
+                if success is None or avg_rrr is None:
+                    continue
+                expectancy = success * avg_rrr - (1 - success)
+                if expectancy is not None and expectancy >= PNL_EXPECTANCY_MIN_EDGE:
+                    bins_by_category.setdefault(category, set()).add(label)
+        return bins_by_category
+
     def _pnl_fetch_thread(self) -> None:
         """Fetch PnL-relevant rows from the SQLite DB in a background thread and compute ATR-normalized P/L."""
         dbname = self.var_db_name.get().strip()
@@ -2374,7 +2459,8 @@ class App(tk.Tk):
                            COALESCE(h.entry_price, s.price) AS entry_price,
                            h.hit_price,
                            s.sl,
-                           s.direction
+                           s.direction,
+                           COALESCE(s.proximity_bin, '')
                     FROM timelapse_setups s
                     JOIN timelapse_hits h ON h.setup_id = s.id
                     WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
@@ -2382,8 +2468,8 @@ class App(tk.Tk):
                     """
                 )
                 cur.execute(sql, (thr,))
-                for (event_time, hit, symbol, entry_price, hit_price, sl, direction) in cur.fetchall() or []:
-                    rows.append((event_time, hit, symbol, entry_price, hit_price, sl, direction))
+                for (event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin) in cur.fetchall() or []:
+                    rows.append((event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin))
             finally:
                 try:
                     conn.close()
@@ -2391,6 +2477,33 @@ class App(tk.Tk):
                     pass
         except Exception as e:
             error = str(e)
+
+        positive_bins: Optional[dict[str, set[str]]] = None
+        bins_success = False
+        kept = 0
+        dropped = 0
+        try:
+            positive_bins = self._positive_expectancy_bins(hours, min_completed=PNL_EXPECTANCY_MIN_COMPLETED)
+            bins_success = positive_bins is not None
+        except Exception:
+            positive_bins = None
+            bins_success = False
+        if bins_success:
+            bin_map = positive_bins or {}
+            filtered_rows: list[tuple] = []
+            for (event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin) in rows:
+                category = self._classify_symbol(str(symbol or ""))
+                allowed = bin_map.get(category)
+                if not allowed or prox_bin not in allowed:
+                    dropped += 1
+                    continue
+                filtered_rows.append((event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin))
+            kept = len(filtered_rows)
+            dropped = len(rows) - kept
+            rows = filtered_rows
+        else:
+            kept = len(rows)
+            dropped = 0
 
         # Compute ATR per symbol (D1, period 14-ish) for normalized P/L,
         # while also preparing contract specs for 10k-notional scaling.
@@ -2475,7 +2588,7 @@ class App(tk.Tk):
                     spec_map = {}
 
             # Compute normalized returns using ATR
-            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction in rows:
+            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction, _prox_bin in rows:
                 if not hit:
                     continue
                 dt = None
@@ -2568,8 +2681,28 @@ class App(tk.Tk):
         not_avg = [c / (i + 1) for i, c in enumerate(not_cum)] if not_cum else []
 
         # Hand off to UI thread
-        self.after(0, self._pnl_update_ui, times_norm, norm_returns, cum_norm, avg_norm, symbols_norm,
-                   times_abs, symbols_abs, notional_returns, not_cum, not_avg, error)
+        filter_info = {
+            'positive_bins': positive_bins,
+            'kept': kept,
+            'dropped': dropped,
+            'filter_applied': bins_success,
+        }
+        self.after(
+            0,
+            self._pnl_update_ui,
+            times_norm,
+            norm_returns,
+            cum_norm,
+            avg_norm,
+            symbols_norm,
+            times_abs,
+            symbols_abs,
+            notional_returns,
+            not_cum,
+            not_avg,
+            filter_info,
+            error,
+        )
 
     def _pnl_update_ui(
         self,
@@ -2583,6 +2716,7 @@ class App(tk.Tk):
         notional_returns,
         not_cum,
         not_avg,
+        filter_info: dict[str, object],
         error: str | None,
     ) -> None:
         """UI-thread handler for ATR-normalized and 10k-notional PnL series.
@@ -2598,9 +2732,29 @@ class App(tk.Tk):
           - notional_returns: list[float] (per-trade PnL for 10k notional)
           - not_cum: list[float] (cumulative notional PnL)
           - not_avg: list[float] (average notional PnL per trade)
+          - filter_info: filtering metadata (positive bins, kept/dropped counts)
           - error: optional error message
         """
         self._pnl_loading = False
+        positive_bins = {}
+        kept = 0
+        dropped = 0
+        filter_applied = False
+        if isinstance(filter_info, dict):
+            positive_bins = filter_info.get('positive_bins') or {}
+            try:
+                kept = int(filter_info.get('kept', 0))
+            except Exception:
+                kept = 0
+            try:
+                dropped = int(filter_info.get('dropped', 0))
+            except Exception:
+                dropped = 0
+            filter_applied = bool(filter_info.get('filter_applied'))
+        if not isinstance(positive_bins, dict):
+            positive_bins = {}
+        self._pnl_positive_bins = {k: set(v) for k, v in positive_bins.items()}
+        self._pnl_filter_counts = (kept, dropped)
 
         if error:
             try:
@@ -2630,6 +2784,34 @@ class App(tk.Tk):
                         self.pnl_status.config(text=f"Normalized render error: {exc}")
                 except Exception:
                     pass
+            else:
+                if self.pnl_status is not None:
+                    try:
+                        kept_str = f"{kept} trades"
+                        if dropped:
+                            kept_str += f" (filtered out {dropped})"
+                        bins_bits = []
+                        for cat in sorted(self._pnl_positive_bins):
+                            labels = sorted(self._pnl_positive_bins[cat])
+                            if not labels:
+                                continue
+                            bins_bits.append(f"{cat}: {', '.join(labels)}")
+                        if not filter_applied:
+                            bins_text = "expectancy filter unavailable"
+                        else:
+                            if bins_bits:
+                                listing = "; ".join(bins_bits)
+                                bins_text = f"{listing} (edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R)"
+                            else:
+                                bins_text = (
+                                    f"no bins ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R "
+                                    f"with ≥ {PNL_EXPECTANCY_MIN_COMPLETED} trades"
+                                )
+                        self.pnl_status.config(
+                            text=f"Rendered PnL: {kept_str}; bins={bins_text}"
+                        )
+                    except Exception:
+                        pass
         else:
             if self._pnl_ax is not None:
                 try:
@@ -2640,7 +2822,27 @@ class App(tk.Tk):
                     pass
             try:
                 if self.pnl_status is not None:
-                    self.pnl_status.config(text="No normalized PnL trades available.")
+                    if filter_applied:
+                        bins_bits = []
+                        for cat in sorted(self._pnl_positive_bins):
+                            labels = sorted(self._pnl_positive_bins[cat])
+                            if not labels:
+                                continue
+                            bins_bits.append(f"{cat}: {', '.join(labels)}")
+                        if bins_bits:
+                            bins_text = "; ".join(bins_bits)
+                            msg = (
+                                f"No trades match expectancy filter "
+                                f"(bins={bins_text}, edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R)."
+                            )
+                        else:
+                            msg = (
+                                "No trades: no proximity bins meet "
+                                f"edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R and ≥ {PNL_EXPECTANCY_MIN_COMPLETED} trades."
+                            )
+                    else:
+                        msg = "No normalized PnL trades available."
+                    self.pnl_status.config(text=msg)
             except Exception:
                 pass
 

@@ -6,3 +6,4 @@
 MetaTrader5
 matplotlib
 numpy
+pytest

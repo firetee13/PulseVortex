@@ -2,7 +2,7 @@
 """
 PulseVortex GUI Launcher for:
   - timelapse_setups.py --watch
-  - realtime_check_tp_sl_hits.py
+  - check_tp_sl_hits.py --watch
 
 Provides Start/Stop buttons and a shared log output.
 
@@ -35,7 +35,11 @@ import shutil
 import math
 from typing import List, Sequence, Optional
 from monitor.config import db_path_str, default_db_path
-from monitor.db import load_live_bin_filters_sqlite, persist_live_bin_filters_sqlite
+from monitor.db import (
+    ensure_tp_sl_setup_state_sqlite,
+    load_live_bin_filters_sqlite,
+    persist_live_bin_filters_sqlite,
+)
 from monitor.mt5_client import (
     resolve_symbol as _RESOLVE,
     get_server_offset_hours as _GET_OFFS,
@@ -550,6 +554,9 @@ class App(tk.Tk):
         # Row tags for coloring
         self.db_tree.tag_configure('tp', background='#d8f3dc')  # greenish
         self.db_tree.tag_configure('sl', background='#f8d7da')  # reddish
+        self.db_tree.tag_configure('live_running', background='#e6d9ff')  # light purple for active live trades
+        self.db_tree.tag_configure('live_tp', background='#b6f2c1')  # brighter green for live TP
+        self.db_tree.tag_configure('live_sl', background='#f6b5c4')  # brighter red for live SL
 
         # Status bar
         bot = ttk.Frame(parent)
@@ -3362,6 +3369,10 @@ class App(tk.Tk):
             conn = sqlite3.connect(db_path, timeout=3)
             try:
                 cur = conn.cursor()
+                try:
+                    ensure_tp_sl_setup_state_sqlite(conn)
+                except Exception:
+                    pass
                 # If setups table does not exist, return empty
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
                 if cur.fetchone() is None:
@@ -3387,9 +3398,11 @@ class App(tk.Tk):
                         SELECT s.id, s.symbol, s.direction, s.inserted_at,
                                h.hit_time_utc3, h.hit_time, h.hit, h.hit_price,
                                s.tp, s.sl, COALESCE(h.entry_price, s.price) AS entry_price,
-                               s.proximity_to_sl, s.proximity_bin
+                               s.proximity_to_sl, s.proximity_bin,
+                               st.order_ticket, st.order_sent_at
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
+                        LEFT JOIN tp_sl_setup_state st ON st.setup_id = s.id
                         WHERE s.inserted_at >= ?
                         ORDER BY s.inserted_at DESC, s.symbol
                         """
@@ -3401,7 +3414,7 @@ class App(tk.Tk):
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
-                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin) = row
+                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin, order_ticket, order_sent_at) = row
 
                         # Apply symbol category filter
                         if symbol_category != "All":
@@ -3429,7 +3442,7 @@ class App(tk.Tk):
                         filtered_rows.append(row)
 
                     # Process filtered rows
-                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin) in filtered_rows:
+                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin, order_ticket, order_sent_at) in filtered_rows:
                         sym_s = str(sym) if sym is not None else ''
                         dir_s = str(direction) if direction is not None else ''
                         try:
@@ -3475,6 +3488,9 @@ class App(tk.Tk):
                             'hit_kind': hit_str if hit_str else None,
                             'hit_time_utc_str': (str(hit_time) if hit_time is not None else None),
                             'proximity_bin': prox_bin_s,
+                            'order_ticket': str(order_ticket) if order_ticket not in (None, "") else None,
+                            'order_sent_at': str(order_sent_at) if order_sent_at not in (None, "") else None,
+                            'has_live_order': order_ticket not in (None, ""),
                             'hit_price': (float(hit_price) if hit_price is not None else None),
                         })
             finally:
@@ -3507,14 +3523,25 @@ class App(tk.Tk):
         else:
             new_selected_iid = None
             for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s) in enumerate(rows_display):
-                tags = ()
-                if hit == 'TP':
-                    tags = ('tp',)
-                elif hit == 'SL':
-                    tags = ('sl',)
+                meta = rows_meta[idx] if idx < len(rows_meta) else {}
+                hit_kind = (hit or '').upper()
+                has_live_order = bool(meta.get('has_live_order'))
+                tags: tuple[str, ...] = ()
+                if has_live_order:
+                    if hit_kind == 'TP':
+                        tags = ('live_tp',)
+                    elif hit_kind == 'SL':
+                        tags = ('live_sl',)
+                    else:
+                        tags = ('live_running',)
+                else:
+                    if hit_kind == 'TP':
+                        tags = ('tp',)
+                    elif hit_kind == 'SL':
+                        tags = ('sl',)
                 iid = self.db_tree.insert('', tk.END, values=(sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s), tags=tags)
-                if idx < len(rows_meta):
-                    meta = rows_meta[idx]
+                if meta is not None:
+                    meta = dict(meta)
                     meta['iid'] = iid
                     self._db_row_meta[iid] = meta
 

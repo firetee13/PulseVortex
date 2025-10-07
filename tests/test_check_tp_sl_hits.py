@@ -4,7 +4,15 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from check_tp_sl_hits import RateBar, _bar_crosses_price, _evaluate_setup
+from check_tp_sl_hits import (
+    DEMO_FOREX_SPREAD_POINTS,
+    RateBar,
+    _augment_spread_points,
+    _bar_crosses_price,
+    _compute_spread_guard,
+    _evaluate_setup,
+    _SYMBOL_POINT_CACHE,
+)
 from monitor.domain import Setup, TickFetchStats
 
 
@@ -125,6 +133,26 @@ class EvaluateSetupQuietHoursTests(unittest.TestCase):
         self.assertEqual(result.windows, 0)
         self.assertIsNone(result.hit)
         self.assertEqual(result.last_checked_utc, now_utc)
+
+
+class DemoSpreadGuardTests(unittest.TestCase):
+
+    def tearDown(self) -> None:
+        _SYMBOL_POINT_CACHE.clear()
+
+    def test_augment_spread_points_demo_forex(self) -> None:
+        with patch('check_tp_sl_hits._is_demo_account', return_value=True), \
+             patch('check_tp_sl_hits.classify_symbol', return_value='forex'):
+            augmented = _augment_spread_points('EURUSD', 0.0)
+            self.assertEqual(augmented, DEMO_FOREX_SPREAD_POINTS)
+
+    def test_compute_spread_guard_inflates_for_demo(self) -> None:
+        with patch('check_tp_sl_hits._is_demo_account', return_value=True), \
+             patch('check_tp_sl_hits.classify_symbol', return_value='forex'), \
+             patch('check_tp_sl_hits.get_symbol_info', return_value=SimpleNamespace(point=0.0001, spread=0.0)):
+            guard = _compute_spread_guard('EURUSD')
+            expected_points = max((DEMO_FOREX_SPREAD_POINTS) * 1.5, 5.0)
+            self.assertAlmostEqual(guard, 0.0001 * expected_points)
 
 
 if __name__ == '__main__':

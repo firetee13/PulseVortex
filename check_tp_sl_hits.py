@@ -56,6 +56,7 @@ from monitor.mt5_client import (
     get_server_offset_hours,
     get_symbol_info,
     init_mt5,
+    mt5,
     resolve_symbol,
     rates_range_utc,
     shutdown_mt5,
@@ -76,6 +77,76 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _symbol_point(symbol: str) -> Optional[float]:
+    """Return MT5 point size for symbol (cached)."""
+    key = symbol.upper()
+    cached = _SYMBOL_POINT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    info = get_symbol_info(symbol)
+    if info is None:
+        return None
+    try:
+        point = float(getattr(info, "point", 0.0) or 0.0)
+    except Exception:
+        point = None
+    if point is not None and point > 0.0:
+        _SYMBOL_POINT_CACHE[key] = point
+    return point
+
+
+def _account_trade_mode() -> Optional[int]:
+    """Return MT5 account trade_mode (0 demo, 2 real)."""
+    global _ACCOUNT_TRADE_MODE
+    if _ACCOUNT_TRADE_MODE is not None:
+        return _ACCOUNT_TRADE_MODE
+    try:
+        if mt5 is None:
+            return None
+        info = mt5.account_info()  # type: ignore[union-attr]
+    except Exception:
+        return None
+    if info is None:
+        return None
+    try:
+        trade_mode = getattr(info, "trade_mode", None)
+        if trade_mode is None:
+            return None
+        _ACCOUNT_TRADE_MODE = int(trade_mode)
+        return _ACCOUNT_TRADE_MODE
+    except Exception:
+        return None
+
+
+def _is_demo_account() -> bool:
+    mode = _account_trade_mode()
+    return mode == 0
+
+
+def _augment_spread_points(symbol: str, spread_points: float) -> float:
+    """Pad spread (in points) for demo forex accounts to offset near-zero quotes."""
+    try:
+        base = float(spread_points)
+    except Exception:
+        return spread_points
+    if DEMO_FOREX_SPREAD_POINTS <= 0:
+        return base
+    if not _is_demo_account():
+        return base
+    try:
+        category = (classify_symbol(symbol) or "").lower()
+    except Exception:
+        category = ""
+    if category != "forex":
+        return base
+    return base + DEMO_FOREX_SPREAD_POINTS
+
+
+DEMO_FOREX_SPREAD_POINTS = float(os.environ.get("TIMELAPSE_DEMO_FOREX_EXTRA_POINTS", "10"))
+_SYMBOL_POINT_CACHE: Dict[str, float] = {}
+_ACCOUNT_TRADE_MODE: Optional[int] = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -288,6 +359,8 @@ def _compute_spread_guard(symbol: str) -> float:
         return 0.0
     if point <= 0.0:
         return 0.0
+    _SYMBOL_POINT_CACHE[symbol.upper()] = point
+    spread = _augment_spread_points(symbol, spread)
     guard_points = max(spread * 1.5, 5.0)
     return point * guard_points
 

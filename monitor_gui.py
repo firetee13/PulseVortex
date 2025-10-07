@@ -773,12 +773,12 @@ class App(tk.Tk):
         gs = fig.add_gridspec(2, 1, height_ratios=[1, 1.2], hspace=0.32)
         ax_bins = fig.add_subplot(gs[0])
         ax_symbols = fig.add_subplot(gs[1])
-        ax_bins.set_ylabel('TP hit rate (%)')
-        ax_bins.set_ylim(0, 100)
+        ax_bins.set_ylabel('Expectancy (R)')
+        ax_bins.set_ylim(-1.5, 2.5)
         ax_bins.grid(True, axis='y', linestyle='--', alpha=0.3)
         ax_symbols.set_xlabel('Average proximity to SL at entry')
-        ax_symbols.set_ylabel('TP hit rate (%)')
-        ax_symbols.set_ylim(0, 100)
+        ax_symbols.set_ylabel('Expectancy (R multiples)')
+        ax_symbols.set_ylim(-1.5, 2.5)
         ax_symbols.grid(True, linestyle='--', alpha=0.3)
         canvas = FigureCanvasTkAgg(fig, master=self.prox_chart_frame)
         canvas_widget = canvas.get_tk_widget()
@@ -1405,9 +1405,9 @@ class App(tk.Tk):
 
         ax_bins.clear()
         ax_symbols.clear()
-        ax_bins.set_ylabel('TP hit rate (%)')
-        ax_bins.set_ylim(0, 100)
+        ax_bins.set_ylabel('Expectancy (R)')
         ax_bins.grid(True, axis='y', linestyle='--', alpha=0.3)
+        ax_bins.set_ylim(-1.5, 1.5)
         ax_symbols.set_xlabel('Average proximity to SL at entry')
         ax_symbols.set_ylabel('Expectancy (R multiples)')
         ax_symbols.set_ylim(-1.5, 2.5)
@@ -1420,38 +1420,67 @@ class App(tk.Tk):
         if isinstance(sweet, dict):
             sweet_label = sweet.get('label')
 
+        global_expectancy = data.get('global_expectancy')
+
         if plot_bins:
             x_vals = list(range(len(plot_bins)))
             labels = [str(b.get('label')) for b in plot_bins]
-            rates = [float(b.get('success_rate') or 0.0) * 100 for b in plot_bins]
+            success_rates = [float(b.get('success_rate') or 0.0) for b in plot_bins]
             counts = [int(b.get('completed') or 0) for b in plot_bins]
-            expectancies = [b.get('expectancy') for b in plot_bins]
+            expectancies_raw = [b.get('expectancy') for b in plot_bins]
             avg_rrrs = [b.get('avg_rrr') for b in plot_bins]
             colors = ['#2ca02c' if b.get('label') == sweet_label else '#4c72b0' for b in plot_bins]
-            bars = ax_bins.bar(x_vals, rates, color=colors, alpha=0.85)
-            for xi, bar, rate, count, exp_val, avg_rrr in zip(x_vals, bars, rates, counts, expectancies, avg_rrrs):
-                ax_bins.text(bar.get_x() + bar.get_width() / 2, rate + 1.5,
-                             f"{rate:.0f}%\n({count})", ha='center', va='bottom', fontsize=8)
-                if exp_val is not None:
-                    text = f"{float(exp_val):+.2f}R"
-                    if avg_rrr is not None:
-                        text += f"\nRRR {float(avg_rrr):.2f}"
-                    ax_bins.text(bar.get_x() + bar.get_width() / 2, rate + 10,
-                                 text, ha='center', va='bottom', fontsize=8, color='#2f4b7c')
+            exp_values = []
+            for raw in expectancies_raw:
+                if isinstance(raw, (int, float)):
+                    exp_values.append(float(raw))
+                else:
+                    exp_values.append(0.0)
+            valid_exp = [float(raw) for raw in expectancies_raw if isinstance(raw, (int, float))]
+            if valid_exp:
+                min_val = min(valid_exp + [0.0])
+                max_val = max(valid_exp + [0.0])
+                padding = max(0.1, (max_val - min_val) * 0.15)
+                ax_bins.set_ylim(min_val - padding, max_val + padding)
+            else:
+                ax_bins.set_ylim(-1.5, 1.5)
+            ax_bins.axhline(0, color='#cccccc', linewidth=0.8)
+            bars = ax_bins.bar(x_vals, exp_values, color=colors, alpha=0.85)
+            span = ax_bins.get_ylim()[1] - ax_bins.get_ylim()[0]
+            offset = max(0.1, span * 0.05)
+            for xi, bar, sr, count, raw_exp, avg_rrr in zip(
+                    x_vals, bars, success_rates, counts, expectancies_raw, avg_rrrs):
+                center_x = bar.get_x() + bar.get_width() / 2
+                if isinstance(raw_exp, (int, float)):
+                    exp_text = f"{float(raw_exp):+.2f}R"
+                    exp_val = float(raw_exp)
+                else:
+                    exp_text = "n/a"
+                    exp_val = bar.get_height()
+                hit_text = None
+                if isinstance(sr, (int, float)):
+                    hit_text = f"{sr * 100:.0f}% ({count})"
+                elif count > 0:
+                    hit_text = f"({count})"
+                va = 'bottom' if exp_val >= 0 else 'top'
+                text_y = exp_val + (offset if exp_val >= 0 else -offset)
+                label_lines = [exp_text]
+                if hit_text:
+                    label_lines.append(hit_text)
+                if isinstance(avg_rrr, (int, float)):
+                    label_lines.append(f"RRR {float(avg_rrr):.2f}")
+                ax_bins.text(center_x, text_y, '\n'.join(label_lines),
+                             ha='center', va=va, fontsize=8, color='#2f4b7c')
             ax_bins.set_xticks(x_vals)
             ax_bins.set_xticklabels(labels, rotation=45, ha='right')
         else:
             ax_bins.text(0.5, 0.5, 'No completed hits in range yet.', ha='center', va='center',
                          transform=ax_bins.transAxes, fontsize=10)
 
-        global_rate = data.get('global_success_rate')
-        if isinstance(global_rate, (int, float)):
-            ax_bins.axhline(float(global_rate) * 100, color='#dd8452', linestyle='--', linewidth=1,
-                            label='Overall hit rate')
-            ax_bins.legend(loc='lower right')
-
-        global_expectancy = data.get('global_expectancy')
         if isinstance(global_expectancy, (int, float)):
+            ax_bins.axhline(float(global_expectancy), color='#dd8452', linestyle='--', linewidth=1,
+                            label='Overall expectancy')
+            ax_bins.legend(loc='upper left')
             ax_symbols.axhline(float(global_expectancy), color='#dd8452', linestyle='--', linewidth=1,
                                label='Overall expectancy')
 
@@ -4367,3 +4396,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

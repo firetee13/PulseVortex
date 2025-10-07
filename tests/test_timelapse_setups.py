@@ -944,6 +944,80 @@ class AnalyzeFunctionTests(unittest.TestCase):
         self.assertIsNotNone(prox)
         self.assertGreater(prox, 0.6)
 
+    def test_analyze_buy_proximity_uses_bid_leg(self):
+        now = datetime.now(UTC)
+        sym = 'BUYFX'
+        sl = 1.1980
+        tp = 1.2050
+        bid = 1.2000
+        ask = 1.2002
+
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Strength 4H'): 0.2,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): bid,
+            tls.canonicalize_key('Ask'): ask,
+            tls.canonicalize_key('Strength 1H'): 0.5,
+            tls.canonicalize_key('Strength 4H'): 0.6,
+            tls.canonicalize_key('Strength 1D'): 0.4,
+            tls.canonicalize_key('Strength 1W'): 0.3,
+            tls.canonicalize_key('D1 Close'): 1.2010,
+            tls.canonicalize_key('D1 High'): tp,
+            tls.canonicalize_key('D1 Low'): sl,
+            tls.canonicalize_key('S1 Level M5'): sl,
+            tls.canonicalize_key('R1 Level M5'): tp,
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(reasons)
+        prox = results[0].get('proximity_to_sl')
+        self.assertIsInstance(prox, float)
+        expected = (bid - sl) / (tp - sl)
+        self.assertAlmostEqual(prox, expected, places=6)
+
+    def test_analyze_sell_proximity_uses_ask_leg(self):
+        now = datetime.now(UTC)
+        sym = 'SELLFX'
+        sl = 1.3080
+        tp = 1.3005
+        bid = 1.3050
+        ask = 1.3052
+
+        first = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Strength 4H'): -0.2,
+        })
+        last = tls.Snapshot(ts=now, row={
+            tls.HEADER_SYMBOL: sym,
+            tls.canonicalize_key('Bid'): bid,
+            tls.canonicalize_key('Ask'): ask,
+            tls.canonicalize_key('Strength 1H'): -0.5,
+            tls.canonicalize_key('Strength 4H'): -0.6,
+            tls.canonicalize_key('Strength 1D'): -0.4,
+            tls.canonicalize_key('Strength 1W'): -0.3,
+            tls.canonicalize_key('D1 Close'): 1.3040,
+            tls.canonicalize_key('D1 High'): sl,
+            tls.canonicalize_key('D1 Low'): tp,
+            tls.canonicalize_key('S1 Level M5'): tp,
+            tls.canonicalize_key('R1 Level M5'): sl,
+            tls.canonicalize_key('Recent Tick'): 1,
+            tls.canonicalize_key('Last Tick UTC'): now.strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        series = {sym: [first, last]}
+        results, reasons = tls.analyze(series, min_rrr=1.0, as_of_ts=now, debug=False)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(reasons)
+        prox = results[0].get('proximity_to_sl')
+        self.assertIsInstance(prox, float)
+        expected = (sl - ask) / (sl - tp)
+        self.assertAlmostEqual(prox, expected, places=6)
+
     def test_analyze_tp_too_close_to_spread_buy(self):
         now = datetime.now(UTC)
         sym = 'TESTIDX'

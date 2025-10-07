@@ -1182,6 +1182,68 @@ def _send_market_order(symbol: str, direction: str) -> Optional[Dict[str, object
     return None
 
 
+
+def _ensure_setup_row(conn, event: Dict[str, object]) -> Optional[int]:
+    """Insert a minimal timelapse_setup row when gating skipped the original insert."""
+
+    if not isinstance(event, dict):
+        return None
+    row_data = event.get('row_data') if isinstance(event.get('row_data'), dict) else None
+    if row_data is None:
+        return None
+
+    symbol = event.get('symbol')
+    direction = event.get('direction')
+    as_of = event.get('as_of')
+    if not symbol or not direction or not as_of:
+        return None
+
+    def _to_float(val: object) -> Optional[float]:
+        try:
+            return float(val) if val is not None else None
+        except Exception:
+            return None
+
+    price = _to_float(row_data.get('price'))
+    sl = _to_float(row_data.get('sl'))
+    tp = _to_float(row_data.get('tp'))
+    rrr = _to_float(row_data.get('rrr'))
+    score = _to_float(row_data.get('score'))
+    proximity = _to_float(row_data.get('proximity_to_sl'))
+    prox_bin = row_data.get('proximity_bin') if isinstance(row_data.get('proximity_bin'), str) else None
+    detected_at = row_data.get('detected_at') if isinstance(row_data.get('detected_at'), str) else None
+    explain = row_data.get('explain') if isinstance(row_data.get('explain'), str) else None
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO timelapse_setups (
+                symbol, direction, price, sl, tp, rrr, score, explain, as_of, detected_at, proximity_to_sl, proximity_bin
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                symbol,
+                direction,
+                price,
+                sl,
+                tp,
+                rrr,
+                score,
+                explain,
+                as_of,
+                detected_at,
+                proximity,
+                prox_bin,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    except Exception:
+        return None
+
+
 def _persist_order_events(events: List[Dict[str, object]]) -> None:
     """Persist MT5 order metadata into tp_sl_setup_state once setup IDs are known."""
     if not events or sqlite3 is None:
@@ -1201,7 +1263,9 @@ def _persist_order_events(events: List[Dict[str, object]]) -> None:
                 continue
             setup_id = _lookup_setup_id(conn, symbol, direction, as_of_db)
             if setup_id is None:
-                continue
+                setup_id = _ensure_setup_row(conn, event)
+                if setup_id is None:
+                    continue
             try:
                 persist_order_sent_sqlite(
                     conn,
@@ -1267,6 +1331,17 @@ def _execute_live_orders(
         order_result = _send_market_order(symbol, direction)
         if order_result:
             as_of_db = _format_as_of_for_db(row.get("as_of"))
+            row_payload = {
+                "price": row.get("price"),
+                "sl": row.get("sl"),
+                "tp": row.get("tp"),
+                "rrr": row.get("rrr"),
+                "score": row.get("score"),
+                "detected_at": row.get("detected_at"),
+                "proximity_to_sl": row.get("proximity_to_sl"),
+                "proximity_bin": bin_label,
+                "explain": row.get("explain"),
+            }
             sent_orders.append(
                 {
                     "symbol": symbol,
@@ -1275,6 +1350,7 @@ def _execute_live_orders(
                     "ticket": order_result.get("ticket"),
                     "sent_at": order_result.get("sent_at"),
                     "volume": order_result.get("volume"),
+                    "row_data": row_payload,
                 }
             )
     return sent_orders
@@ -1538,11 +1614,15 @@ def analyze(
             if risk is not None and reward is not None and risk > 0 and reward > 0:
                 rrr = reward / risk
             if (tp is not None and sl is not None) and (tp - sl) != 0:
-                prox = (price - sl) / (tp - sl)
-                if prox <= 0.35:
+                # Use the bid leg for distance-to-stop so proximity reflects actual SL trigger side.
+                prox_price = bid if bid is not None else price
+                if prox_price is not None:
+                    prox = (prox_price - sl) / (tp - sl)
+                    prox = max(0.0, min(1.0, prox))
+                if prox is not None and prox <= 0.35:
                     prox_flag = "near_support"
                     prox_note = "near S1 support"
-                elif prox >= 0.65:
+                elif prox is not None and prox >= 0.65:
                     prox_flag = "near_resistance"
                     prox_late = True
                     prox_note = "near R1 resistance (late)"
@@ -1564,11 +1644,15 @@ def analyze(
             if risk is not None and reward is not None and risk > 0 and reward > 0:
                 rrr = reward / risk
             if (sl is not None and tp is not None) and (sl - tp) != 0:
-                prox = (sl - price) / (sl - tp)
-                if prox <= 0.35:
+                # Use the ask leg for distance-to-stop so proximity reflects actual SL trigger side.
+                prox_price = ask if ask is not None else price
+                if prox_price is not None:
+                    prox = (sl - prox_price) / (sl - tp)
+                    prox = max(0.0, min(1.0, prox))
+                if prox is not None and prox <= 0.35:
                     prox_flag = "near_resistance"
                     prox_note = "near R1 resistance"
-                elif prox >= 0.65:
+                elif prox is not None and prox >= 0.65:
                     prox_flag = "near_support"
                     prox_late = True
                     prox_note = "near S1 support (late)"

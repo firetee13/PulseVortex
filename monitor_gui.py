@@ -859,13 +859,8 @@ class App(tk.Tk):
             'since_hours': hours,
             'min_trades': min_trades,
         }
-        def _as_float(value: object) -> float | None:
-            try:
-                if value is None:
-                    return None
-                return float(value)
-            except Exception:
-                return None
+        rows: list[dict[str, object]] = []
+        max_prox = 0.0
 
         try:
             try:
@@ -873,9 +868,17 @@ class App(tk.Tk):
             except Exception as exc:
                 raise RuntimeError(f"sqlite3 not available: {exc}")
             db_path = db_path_str(dbname)
-            conn = sqlite3.connect(db_path, timeout=3)
+            conn = sqlite3.connect(db_path, timeout=12)
             try:
                 cur = conn.cursor()
+                try:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_setups_inserted_at ON timelapse_setups(inserted_at)")
+                except Exception:
+                    pass
+                try:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_hits_setup_id ON timelapse_hits(setup_id)")
+                except Exception:
+                    pass
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
                 if cur.fetchone() is None:
                     payload['rows'] = []
@@ -891,8 +894,7 @@ class App(tk.Tk):
                         """
                     )
                     cur.execute(sql, (thr,))
-                    raw_rows = cur.fetchall() or []
-                    rows: list[dict[str, object]] = []
+                    raw_rows = cur.fetchmany(100000) or []
                     max_prox = 0.0
                     for sym, prox_raw, rrr_raw, hit, hit_time in raw_rows:
                         sym_s = str(sym) if sym is not None else ''
@@ -929,8 +931,6 @@ class App(tk.Tk):
                             'rrr': rrr_val,
                             'outcome': outcome,
                         })
-                    payload['rows'] = rows
-                    payload['max_prox'] = max_prox
             finally:
                 try:
                     conn.close()
@@ -938,6 +938,10 @@ class App(tk.Tk):
                     pass
         except Exception as exc:
             payload['error'] = str(exc)
+
+        payload['rows'] = rows
+        payload['max_prox'] = max_prox
+        payload['category_filter_used'] = category_filter
 
         self.after(0, lambda: self._prox_apply_result(payload))
 
@@ -955,8 +959,33 @@ class App(tk.Tk):
         rows = payload.get('rows')
         if not isinstance(rows, list):
             rows = []
-        processed = self._prox_compute_stats(rows, payload)
-        self._prox_render(processed)
+        try:
+            processed = self._prox_compute_stats(rows, payload)
+        except Exception as exc:
+            if self.prox_status is not None:
+                try:
+                    self.prox_status.config(text=f"Error during compute: {exc}")
+                except Exception:
+                    pass
+            print(f"[prox_apply_result] compute error: {exc}", file=sys.stderr)
+            self._prox_schedule_next()
+            return
+        try:
+            self._prox_render(processed)
+        except Exception as exc:
+            if self.prox_status is not None:
+                try:
+                    self.prox_status.config(text=f"Error during render: {exc}")
+                except Exception:
+                    pass
+            print(f"[prox_apply_result] render error: {exc}", file=sys.stderr)
+            self._prox_schedule_next()
+            return
+        if self.prox_status is not None:
+            try:
+                self.prox_status.config(text="Proximity stats ready.")
+            except Exception:
+                pass
         self._prox_schedule_next()
 
     def _prox_compute_stats(self, rows: list[dict[str, object]], payload: dict[str, object]) -> dict[str, object]:
@@ -1160,7 +1189,11 @@ class App(tk.Tk):
             expectancy = b.get('expectancy')
             if not completed_b or completed_b < max(3, min_trades_int):
                 continue
-            if sweet_bin is None or (expectancy is not None and expectancy > sweet_bin['expectancy']):
+            prev_expectancy = None if sweet_bin is None else sweet_bin.get('expectancy')
+            if sweet_bin is None or (
+                expectancy is not None
+                and (prev_expectancy is None or expectancy > prev_expectancy)
+            ):
                 sweet_bin = {
                     'label': b['label'],
                     'success_rate': b.get('success_rate'),
@@ -1207,7 +1240,8 @@ class App(tk.Tk):
                 bin_stats['completed'] = completed_cat_bin
                 bin_stats['pending'] = pending_cat
                 if (completed_cat_bin >= max(3, min_trades_int)) and expectancy_cat_bin is not None:
-                    if best_bin is None or expectancy_cat_bin > best_bin['expectancy']:
+                    prev_best_expectancy = None if best_bin is None else best_bin.get('expectancy')
+                    if best_bin is None or prev_best_expectancy is None or expectancy_cat_bin > prev_best_expectancy:
                         best_bin = {
                             'category': cat,
                             'label': bin_label,

@@ -318,7 +318,7 @@ class App(tk.Tk):
         )
         self.hits = ProcController(
             name="hits",
-            cmd=[py, "-u", "check_tp_sl_hits.py", "--watch", "--interva", "1"],
+            cmd=[py, "-u", "check_tp_sl_hits.py", "--watch", "--interval", "1"],
             log_put=self._enqueue_log,
         )
 

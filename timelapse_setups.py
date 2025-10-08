@@ -1227,21 +1227,27 @@ def analyze(
         as_of_value = utc_naive(as_of_ts or last.ts)
 
         # Round SL/TP to the same precision as price for this symbol
-        digits = _symbol_digits(sym, price)
-        digits = max(
-            digits,
-            _infer_decimals_from_price(sl),
-            _infer_decimals_from_price(tp),
-        )
-        def _r(v: Optional[float]) -> Optional[float]:
+        symbol_digits = _symbol_digits(sym, price)
+
+        def _round_to(v: Optional[float], ndigits: int) -> Optional[float]:
             try:
-                return None if v is None else round(float(v), int(digits))
+                return None if v is None else round(float(v), int(max(0, min(10, ndigits))))
             except Exception:
                 return v
 
-        price_out = _r(price)
-        sl_out = _r(sl)
-        tp_out = _r(tp)
+        price_out = _round_to(price, symbol_digits)
+
+        precision_digits = symbol_digits
+        if price_out is not None:
+            inferred = _infer_decimals_from_price(price_out)
+            if 0 <= inferred <= 10:
+                precision_digits = inferred
+
+        sl_out = _round_to(sl, precision_digits)
+        tp_out = _round_to(tp, precision_digits)
+        score_out = _round_to(score, 1)
+        prox_out = _round_to(prox, 5)
+        rrr_out = _round_to(rrr, 5) if rrr is not None else None
 
         results.append(
             {
@@ -1250,10 +1256,10 @@ def analyze(
                 "price": price_out if price_out is not None else price,
                 "sl": sl_out if sl_out is not None else sl,
                 "tp": tp_out if tp_out is not None else tp,
-                "rrr": rrr,
-                "score": score,
+                "rrr": rrr_out,
+                "score": score_out if score_out is not None else score,
                 "as_of": as_of_value,
-                "proximity_to_sl": prox,
+                "proximity_to_sl": prox_out if prox_out is not None else prox,
                 # Meta for logging; not used for DB schema
                 "bid": bid,
                 "ask": ask,
@@ -1426,7 +1432,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     r.get("price"),
                     r.get("sl"),
                     r.get("tp"),
-                    r.get("rrr"),
+                    r.get("rrr"),  # Already rounded in the results dict
                     r.get("score"),
                     as_of_val,
                 ]

@@ -682,13 +682,6 @@ This project includes comprehensive GitHub Actions workflows for automated testi
 - **Performance Testing**: Benchmarking and memory usage monitoring
 - **Coverage Reporting**: Maintains >80% test coverage with detailed reports
 
-### 🚀 Continuous Deployment
-
-- **Automated Releases**: PyPI publishing on git tags
-- **Docker Images**: Multi-architecture container builds
-- **Documentation**: Auto-deployment to GitHub Pages
-- **Standalone Executables**: Cross-platform binary builds
-
 ### 🤖 Automation Features
 
 - **Dependency Updates**: Automated Dependabot PRs for dependencies
@@ -716,19 +709,6 @@ pytest --cov=monitor --cov-report=html
 - **Type Checking**: Full mypy compliance on core modules
 - **Security**: Bandit and safety scanning with zero high-severity issues
 - **Performance**: Automated benchmarking and regression detection
-
-### 🐳 Docker Support
-
-```bash
-# Build locally
-docker build -t pulsevortex/monitor .
-
-# Pull from Docker Hub
-docker pull pulsevortex/monitor:latest
-
-# Run with volume mount for data persistence
-docker run -v /path/to/data:/app/data pulsevortex/monitor
-```
 
 ## License
 

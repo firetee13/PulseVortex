@@ -424,7 +424,6 @@ graph TD
 
     %% Entry Points connections
     VBS -->|"Launches minimized"| MG
-    PYW -->|"Direct launch"| MG
     REQ -.->|"Dependency management"| Core
 
     %% MT5 data flows
@@ -447,7 +446,7 @@ graph TD
     %% Symbol classification flows
     SY -.->|"Symbol filtering & categorization<br/>Forex/Crypto/Indices"| TS
     SY -.->|"Category-based statistics<br/>Per-symbol analytics"| CH
-    SY -.->"|Per-symbol views & filtering<br/>Category-based PnL"| MG
+    SY -.->|"Per-symbol views & filtering<br/>Category-based PnL"| MG
 
     %% Configuration and data models
     CF -->|"Environment variables<br/>DB path resolution"| DB
@@ -472,7 +471,7 @@ graph TD
     classDef persist fill:#fce4ec,stroke:#880e4f,stroke-width:2px,color:#000
 
     class MT5 external
-    class VBS,PYW,REQ entry
+    class VBS,REQ entry
     class MC,DB,QH,SY,CF,DM core
     class TS,CH cli
     class MG gui

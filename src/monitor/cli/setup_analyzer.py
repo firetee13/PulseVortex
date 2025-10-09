@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import math
 import os
 import re
@@ -31,6 +32,8 @@ import types
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np  # required for ATR computations
 
 # DB backend: SQLite only
 try:
@@ -44,9 +47,6 @@ from monitor.core.config import default_db_path
 from monitor.core.quiet_hours import UTC_PLUS_3, is_quiet_time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-import json
-
-import numpy as np  # required for ATR computations
 
 # Optional MT5
 mt5 = getattr(mt5_client, "mt5", None)  # type: ignore
@@ -612,12 +612,12 @@ def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]
         if daily_rates is None or len(daily_rates) < 2:
             return None, None
         prev = daily_rates[-2]
-        h = float(prev["high"]) if isinstance(prev, dict) else float(prev[2])
-        l = float(prev["low"]) if isinstance(prev, dict) else float(prev[3])
-        c = float(prev["close"]) if isinstance(prev, dict) else float(prev[4])
-        p = (h + l + c) / 3.0
-        s1 = 2 * p - h
-        r1 = 2 * p - l
+        high_value = float(prev["high"]) if isinstance(prev, dict) else float(prev[2])
+        low_value = float(prev["low"]) if isinstance(prev, dict) else float(prev[3])
+        close_value = float(prev["close"]) if isinstance(prev, dict) else float(prev[4])
+        pivot = (high_value + low_value + close_value) / 3.0
+        s1 = 2 * pivot - high_value
+        r1 = 2 * pivot - low_value
         return s1, r1
     except Exception:
         return None, None
@@ -1096,7 +1096,6 @@ def analyze(
         ss1h = last.g("Strength 1H")
         ss4 = last.g("Strength 4H")
         ss1d = last.g("Strength 1D")
-        ss1w = last.g("Strength 1W")
         atr = last.g("ATR D1")
         atrp = last.g("ATR (%) D1")
         s1 = last.g("S1 Level M5")
@@ -1104,7 +1103,6 @@ def analyze(
         d1_close = last.g("D1 Close")
         d1h = last.g("D1 High")
         d1l = last.g("D1 Low")
-        spreadpct_row = normalize_spread_pct(last.g("Spread%"))
         bid = last.g("Bid")
         ask = last.g("Ask")
         # Pull auxiliary tick info for downstream reporting
@@ -1193,7 +1191,6 @@ def analyze(
         # S/R based SL/TP with D1 fallback; entry/RRR strictly computed from live Bid/Ask only
         # Initialize proximity flags
         prox_note = None
-        prox_flag = None
         prox_late = False
         if direction == "Buy":
             if s1 is None and r1 is None:
@@ -1216,10 +1213,8 @@ def analyze(
             if (tp is not None and sl is not None) and (tp - sl) != 0:
                 prox = (price - sl) / (tp - sl)
                 if prox <= 0.35:
-                    prox_flag = "near_support"
                     prox_note = "near S1 support"
                 elif prox >= 0.65:
-                    prox_flag = "near_resistance"
                     prox_late = True
                     prox_note = "near R1 resistance (late)"
         else:  # Sell
@@ -1242,10 +1237,8 @@ def analyze(
             if (sl is not None and tp is not None) and (sl - tp) != 0:
                 prox = (sl - price) / (sl - tp)
                 if prox <= 0.35:
-                    prox_flag = "near_resistance"
                     prox_note = "near R1 resistance"
                 elif prox >= 0.65:
-                    prox_flag = "near_support"
                     prox_late = True
                     prox_note = "near S1 support (late)"
         if rrr is None or rrr <= 0:

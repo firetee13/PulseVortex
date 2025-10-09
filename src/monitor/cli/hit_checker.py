@@ -682,11 +682,9 @@ def run_once(args: argparse.Namespace) -> None:
             hit_symbols: List[str] = []
 
             for base_symbol, grouped_setups in groups.items():
-                t_resolve_start = perf_counter()
                 if base_symbol not in resolve_cache:
                     resolve_cache[base_symbol] = resolve_symbol(base_symbol)
                 sym_name = resolve_cache[base_symbol]
-                t_resolve = perf_counter() - t_resolve_start
                 if sym_name is None:
                     print(
                         f"Symbol '{base_symbol}' not found; skipping {len(grouped_setups)} setup(s)."

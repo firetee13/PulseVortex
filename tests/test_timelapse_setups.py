@@ -1,13 +1,11 @@
 import os
-import shutil
 import sqlite3
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import monitor.cli.setup_analyzer as tls
 
@@ -363,7 +361,7 @@ class DatabaseFunctionsTests(unittest.TestCase):
 
     def test_close_db_connection(self):
         # Test database connection closing
-        conn = tls._get_db_connection()
+        tls._get_db_connection()
         tls._close_db_connection()
         self.assertIsNone(tls._DB_CONN)
 
@@ -676,7 +674,6 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_time_filter(self):
         # Test time-based filtering (low volume time window)
-        now = datetime.now(UTC)
         sym = "TESTIDX"
 
         # Create a snapshot inside the shared quiet window: 23:45 UTC+3 (20:45 UTC)

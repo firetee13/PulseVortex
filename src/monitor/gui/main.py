@@ -22,7 +22,6 @@ import json
 import math
 import os
 import queue
-import shutil
 import signal
 import subprocess
 import sys
@@ -33,7 +32,7 @@ import tkinter as tk
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from tkinter import ttk
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from monitor.core.config import db_path_str, default_db_path
 from monitor.core.mt5_client import get_server_offset_hours as _GET_OFFS
@@ -67,6 +66,16 @@ except Exception:
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _as_float(value: object | None) -> float | None:
+    """Safely coerce MT5 numeric fields to float."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -346,7 +355,6 @@ class App(tk.Tk):
         self.log_q: queue.Queue[tuple[str, str]] = queue.Queue()
         self.after(50, self._drain_log)
 
-        py = sys.executable or "python"
         self.timelapse = ProcController(
             name="timelapse",
             cmd=["monitor-setup", "--watch"],
@@ -2298,7 +2306,6 @@ class App(tk.Tk):
         now = datetime.now(timezone.utc)
 
         for symbol, stat in symbol_stats.items():
-            trades = int(stat["trades"])
             completed = int(stat["completed"])
             wins = int(stat["wins"])
 
@@ -4333,11 +4340,9 @@ class App(tk.Tk):
         if base_time is not None:
             times_plot = [base_time] + list(times_disp)
             cum_plot = [0.0] + list(cum_abs)
-            avg_plot = [0.0] + (list(avg_abs) if avg_abs else [0.0] * len(cum_abs))
         else:
             times_plot = list(times_disp)
             cum_plot = list(cum_abs)
-            avg_plot = list(avg_abs) if avg_abs else list(cum_abs)
 
         # Plot cumulative and avg as smooth curves, add breakeven line
         try:
@@ -5238,7 +5243,6 @@ class App(tk.Tk):
         closes: list[float] = []
         if not rates:
             return times, opens, highs, lows, closes
-        span = timedelta(seconds=max(1, timeframe_seconds))
         for rate in rates:
             start = self._rate_time(rate, offset_hours)
             if start is None:
@@ -5307,19 +5311,19 @@ class App(tk.Tk):
             return [], [], [], [], []
 
         minute_data: dict[datetime, list[float]] = defaultdict(list)
-        for tk in ticks_aggregate:
+        for tick_row in ticks_aggregate:
             try:
-                bid = float(getattr(tk, "bid"))
+                bid = float(getattr(tick_row, "bid"))
             except Exception:
                 try:
-                    bid = float(tk["bid"])
+                    bid = float(tick_row["bid"])
                 except Exception:
                     bid = None
             try:
-                ask = float(getattr(tk, "ask"))
+                ask = float(getattr(tick_row, "ask"))
             except Exception:
                 try:
-                    ask = float(tk["ask"])
+                    ask = float(tick_row["ask"])
                 except Exception:
                     ask = None
             if bid is None and ask is None:
@@ -5332,10 +5336,10 @@ class App(tk.Tk):
             if price is None:
                 continue
             try:
-                tms = getattr(tk, "time_msc")
+                tms = getattr(tick_row, "time_msc")
             except Exception:
                 try:
-                    tms = tk["time_msc"]
+                    tms = tick_row["time_msc"]
                 except Exception:
                     tms = None
             if tms:
@@ -5776,8 +5780,6 @@ class App(tk.Tk):
             right = max(right, end_disp)
             # Clamp right edge if hit occurs: include only 20 minutes after the hit time
             if hit_disp is not None:
-                # Find index of bar that starts at or before hit time
-                hit_idx = 0
                 # Directly clamp by time rather than index
                 right = min(right, hit_disp + timedelta(minutes=20))
             pad_x = timedelta(minutes=2)
@@ -6002,6 +6004,7 @@ class App(tk.Tk):
             subprocess.Popen(cmd, cwd=HERE)
         except Exception as e:
             # If fails, just restart the processes
+            print(f"[GUI] restart relaunch failed: {e}")
             self.after(1000, self._do_restart)
             return
         # Close this instance after a short delay

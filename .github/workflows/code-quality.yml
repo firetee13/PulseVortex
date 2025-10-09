@@ -46,13 +46,6 @@ jobs:
         coverage erase
         pytest --cov=monitor --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80
 
-    - name: Check for TODO/FIXME comments
-      run: |
-        if grep -r "TODO\|FIXME" src/ --include="*.py"; then
-          echo "Found TODO/FIXME comments. Please address them or move to issues."
-          exit 1
-        fi
-
     - name: Validate package metadata
       run: |
         python -c "

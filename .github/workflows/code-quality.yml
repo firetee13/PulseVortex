@@ -58,7 +58,7 @@ jobs:
         for field in required:
             assert field in data['project'], f'Missing required field: {field}'
 
-        print('✅ Package metadata is valid')
+        print('Package metadata is valid')
         "
 
   performance:

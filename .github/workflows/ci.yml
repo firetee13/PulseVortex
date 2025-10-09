@@ -48,7 +48,8 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest --cov=monitor --cov-report=xml --cov-report=html --cov-report=term-missing
+        coverage erase
+        pytest --cov=monitor --cov-config=pyproject.toml --cov-report=xml --cov-report=html --cov-report=term-missing
 
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.12'

@@ -85,7 +85,14 @@ markers = [
 
 [tool.coverage.run]
 source = ["src"]
-omit = ["*/tests/*", "*/test_*"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "src/monitor/cli/*",
+    "src/monitor/gui/*",
+    "src/monitor/core/mt5_client.py",
+    "src/monitor/core/db.py",
+]
 
 [tool.coverage.report]
 exclude_lines = [

@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
 
 UTC = timezone.utc
 
+
 def _coerce_price(value: object) -> Optional[float]:
     """Best-effort float conversion that ignores missing values."""
     if value is None:
@@ -24,7 +25,7 @@ def _coerce_price(value: object) -> Optional[float]:
         out = float(value)
     except Exception:
         return None
-    if out != out or out in (float('inf'), float('-inf')):
+    if out != out or out in (float("inf"), float("-inf")):
         return None
     return out
 
@@ -121,7 +122,9 @@ def _candidate_terminal_paths(user_hint: Optional[str]) -> List[Optional[str]]:
     if os.name == "nt":
         pf = os.environ.get("PROGRAMFILES") or r"C:\\Program Files"
         pfx = os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)"
-        roaming = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal")
+        roaming = os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal"
+        )
         patterns = [
             os.path.join(pf, "MetaTrader 5", "terminal64.exe"),
             os.path.join(pf, "MetaTrader 5 *", "terminal64.exe"),
@@ -164,7 +167,9 @@ def init_mt5(
         for cand in candidates:
             if verbose:
                 where = cand or "<auto>"
-                print(f"[mt5] initialize attempt {attempt} path={where} timeout={timeout}s portable={portable}")
+                print(
+                    f"[mt5] initialize attempt {attempt} path={where} timeout={timeout}s portable={portable}"
+                )
             ok = False
             try:
                 kwargs = {"timeout": timeout}
@@ -323,7 +328,9 @@ def ticks_paged(
 ) -> Tuple[List[object], TickFetchStats]:
     """Fetch ticks from start..end (server-local naive) using copy_ticks_from."""
     if mt5 is None:
-        return [], TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+        return [], TickFetchStats(
+            pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+        )
     t0 = perf_counter()
     all_ticks: List[object] = []
     cur = start_server_naive
@@ -336,23 +343,29 @@ def ticks_paged(
         fetch_s += call_dt
         n = 0 if chunk is None else len(chunk)
         if trace:
-            cur_str = cur.isoformat(sep=' ', timespec='seconds')
-            print(f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms")
+            cur_str = cur.isoformat(sep=" ", timespec="seconds")
+            print(
+                f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms"
+            )
         if chunk is None or n == 0:
             break
         all_ticks.extend(chunk)
         pages += 1
         last = chunk[-1]
         try:
-            tms = getattr(last, 'time_msc', None)
+            tms = getattr(last, "time_msc", None)
             if tms is None:
-                tms = int(last['time_msc']) if isinstance(last, dict) else last['time_msc']
+                tms = (
+                    int(last["time_msc"])
+                    if isinstance(last, dict)
+                    else last["time_msc"]
+                )
             next_ts = (int(tms) + 1) / 1000.0
         except Exception:
             try:
-                tse = getattr(last, 'time', None)
+                tse = getattr(last, "time", None)
                 if tse is None:
-                    tse = int(last['time']) if isinstance(last, dict) else last['time']
+                    tse = int(last["time"]) if isinstance(last, dict) else last["time"]
                 next_ts = int(tse) + 1
             except Exception:
                 break
@@ -360,7 +373,13 @@ def ticks_paged(
         if cur > end_server_naive:
             break
     elapsed = perf_counter() - t0
-    return all_ticks, TickFetchStats(pages=pages, total_ticks=len(all_ticks), elapsed_s=elapsed, fetch_s=fetch_s, early_stop=False)
+    return all_ticks, TickFetchStats(
+        pages=pages,
+        total_ticks=len(all_ticks),
+        elapsed_s=elapsed,
+        fetch_s=fetch_s,
+        early_stop=False,
+    )
 
 
 def ticks_range_all(
@@ -371,10 +390,14 @@ def ticks_range_all(
 ) -> Tuple[List[object], TickFetchStats]:
     """Fetch all ticks for [start, end] using copy_ticks_range."""
     if mt5 is None:
-        return [], TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+        return [], TickFetchStats(
+            pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+        )
     t0 = perf_counter()
     call_t0 = perf_counter()
-    ticks = mt5.copy_ticks_range(symbol, start_server_naive, end_server_naive, mt5.COPY_TICKS_ALL)
+    ticks = mt5.copy_ticks_range(
+        symbol, start_server_naive, end_server_naive, mt5.COPY_TICKS_ALL
+    )
     call_dt = perf_counter() - call_t0
     n = 0 if ticks is None else len(ticks)
     if trace:
@@ -382,7 +405,9 @@ def ticks_range_all(
     elapsed = perf_counter() - t0
     ticks_out = ticks if ticks is not None else []
     pages = 1 if n > 0 else 0
-    return ticks_out, TickFetchStats(pages=pages, total_ticks=n, elapsed_s=elapsed, fetch_s=call_dt, early_stop=False)
+    return ticks_out, TickFetchStats(
+        pages=pages, total_ticks=n, elapsed_s=elapsed, fetch_s=call_dt, early_stop=False
+    )
 
 
 def scan_ticks_paged_for_hit(
@@ -398,7 +423,9 @@ def scan_ticks_paged_for_hit(
 ) -> Tuple[Optional[Hit], TickFetchStats]:
     """Fetch ticks page-by-page and stop as soon as a hit is detected."""
     if mt5 is None:
-        return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False)
+        return None, TickFetchStats(
+            pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+        )
     pages = 0
     total_ticks = 0
     t0 = perf_counter()
@@ -411,8 +438,10 @@ def scan_ticks_paged_for_hit(
         fetch_s += call_dt
         n = 0 if chunk is None else len(chunk)
         if trace:
-            cur_str = cur.isoformat(sep=' ', timespec='seconds')
-            print(f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms")
+            cur_str = cur.isoformat(sep=" ", timespec="seconds")
+            print(
+                f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms"
+            )
         if chunk is None or n == 0:
             break
         pages += 1
@@ -420,18 +449,28 @@ def scan_ticks_paged_for_hit(
         hit = earliest_hit_from_ticks(chunk, direction, sl, tp, server_offset_hours)
         if hit is not None:
             elapsed = perf_counter() - t0
-            return hit, TickFetchStats(pages=pages, total_ticks=total_ticks, elapsed_s=elapsed, fetch_s=fetch_s, early_stop=True)
+            return hit, TickFetchStats(
+                pages=pages,
+                total_ticks=total_ticks,
+                elapsed_s=elapsed,
+                fetch_s=fetch_s,
+                early_stop=True,
+            )
         last = chunk[-1]
         try:
-            tms = getattr(last, 'time_msc', None)
+            tms = getattr(last, "time_msc", None)
             if tms is None:
-                tms = int(last['time_msc']) if isinstance(last, dict) else last['time_msc']
+                tms = (
+                    int(last["time_msc"])
+                    if isinstance(last, dict)
+                    else last["time_msc"]
+                )
             next_ts = (int(tms) + 1) / 1000.0
         except Exception:
             try:
-                tse = getattr(last, 'time', None)
+                tse = getattr(last, "time", None)
                 if tse is None:
-                    tse = int(last['time']) if isinstance(last, dict) else last['time']
+                    tse = int(last["time"]) if isinstance(last, dict) else last["time"]
                 next_ts = int(tse) + 1
             except Exception:
                 break
@@ -439,7 +478,13 @@ def scan_ticks_paged_for_hit(
         if cur > end_server_naive:
             break
     elapsed = perf_counter() - t0
-    return None, TickFetchStats(pages=pages, total_ticks=total_ticks, elapsed_s=elapsed, fetch_s=fetch_s, early_stop=False)
+    return None, TickFetchStats(
+        pages=pages,
+        total_ticks=total_ticks,
+        elapsed_s=elapsed,
+        fetch_s=fetch_s,
+        early_stop=False,
+    )
 
 
 def earliest_hit_from_ticks(
@@ -455,7 +500,7 @@ def earliest_hit_from_ticks(
         n = len(ticks)
     except Exception:
         try:
-            n = int(getattr(ticks, 'size', 0))
+            n = int(getattr(ticks, "size", 0))
         except Exception:
             n = 0
     if n == 0:
@@ -464,20 +509,20 @@ def earliest_hit_from_ticks(
     last_ask: Optional[float] = None
     for i in range(n):
         tk = ticks[i]
-        bid = getattr(tk, 'bid', None)
-        ask = getattr(tk, 'ask', None)
+        bid = getattr(tk, "bid", None)
+        ask = getattr(tk, "ask", None)
         if bid is None:
             try:
-                bid = tk['bid']  # type: ignore[index]
+                bid = tk["bid"]  # type: ignore[index]
             except Exception:
                 if isinstance(tk, dict):
-                    bid = tk.get('bid')
+                    bid = tk.get("bid")
         if ask is None:
             try:
-                ask = tk['ask']  # type: ignore[index]
+                ask = tk["ask"]  # type: ignore[index]
             except Exception:
                 if isinstance(tk, dict):
-                    ask = tk.get('ask')
+                    ask = tk.get("ask")
         bid_val = _coerce_price(bid)
         ask_val = _coerce_price(ask)
         if bid_val is not None:
@@ -490,24 +535,24 @@ def earliest_hit_from_ticks(
             ask_val = last_ask
         if bid_val is None and ask_val is None:
             continue
-        tms = getattr(tk, 'time_msc', None)
+        tms = getattr(tk, "time_msc", None)
         if tms is None:
             try:
-                tms = tk['time_msc']  # type: ignore[index]
+                tms = tk["time_msc"]  # type: ignore[index]
             except Exception:
                 if isinstance(tk, dict):
-                    tms = tk.get('time_msc')
+                    tms = tk.get("time_msc")
         dt_raw = None
         if tms is not None:
             dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
         else:
-            tse = getattr(tk, 'time', None)
+            tse = getattr(tk, "time", None)
             if tse is None:
                 try:
-                    tse = tk['time']  # type: ignore[index]
+                    tse = tk["time"]  # type: ignore[index]
                 except Exception:
                     if isinstance(tk, dict):
-                        tse = tk.get('time')
+                        tse = tk.get("time")
             if tse is None:
                 continue
             dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
@@ -515,18 +560,18 @@ def earliest_hit_from_ticks(
             continue
         dt_utc = dt_raw - timedelta(hours=server_offset_hours)
         lower_direction = direction.lower()
-        if lower_direction == 'buy':
+        if lower_direction == "buy":
             if bid_val is None:
                 continue
             if bid_val <= sl:
-                return Hit(kind='SL', time_utc=dt_utc, price=bid_val)
+                return Hit(kind="SL", time_utc=dt_utc, price=bid_val)
             if bid_val >= tp:
-                return Hit(kind='TP', time_utc=dt_utc, price=bid_val)
+                return Hit(kind="TP", time_utc=dt_utc, price=bid_val)
         else:
             if ask_val is None:
                 continue
             if ask_val >= sl:
-                return Hit(kind='SL', time_utc=dt_utc, price=ask_val)
+                return Hit(kind="SL", time_utc=dt_utc, price=ask_val)
             if ask_val <= tp:
-                return Hit(kind='TP', time_utc=dt_utc, price=ask_val)
+                return Hit(kind="TP", time_utc=dt_utc, price=ask_val)
     return None

@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 
 from monitor.core.quiet_hours import (
     UTC,
+    is_quiet_time,
     iter_active_utc_ranges,
     iter_quiet_utc_ranges,
-    is_quiet_time,
     next_quiet_transition,
 )
 
@@ -32,8 +32,14 @@ class QuietHoursTests(unittest.TestCase):
         end = datetime(2024, 5, 3, 0, 0, tzinfo=UTC)
         ranges = list(iter_quiet_utc_ranges(start, end))
         expected = [
-            (datetime(2024, 5, 1, 20, 45, tzinfo=UTC), datetime(2024, 5, 1, 21, 59, tzinfo=UTC)),
-            (datetime(2024, 5, 2, 20, 45, tzinfo=UTC), datetime(2024, 5, 2, 21, 59, tzinfo=UTC)),
+            (
+                datetime(2024, 5, 1, 20, 45, tzinfo=UTC),
+                datetime(2024, 5, 1, 21, 59, tzinfo=UTC),
+            ),
+            (
+                datetime(2024, 5, 2, 20, 45, tzinfo=UTC),
+                datetime(2024, 5, 2, 21, 59, tzinfo=UTC),
+            ),
         ]
         self.assertEqual(ranges, expected)
 
@@ -42,8 +48,14 @@ class QuietHoursTests(unittest.TestCase):
         end = datetime(2024, 5, 1, 23, 0, tzinfo=UTC)
         active = list(iter_active_utc_ranges(start, end))
         expected = [
-            (datetime(2024, 5, 1, 18, 0, tzinfo=UTC), datetime(2024, 5, 1, 20, 45, tzinfo=UTC)),
-            (datetime(2024, 5, 1, 21, 59, tzinfo=UTC), datetime(2024, 5, 1, 23, 0, tzinfo=UTC)),
+            (
+                datetime(2024, 5, 1, 18, 0, tzinfo=UTC),
+                datetime(2024, 5, 1, 20, 45, tzinfo=UTC),
+            ),
+            (
+                datetime(2024, 5, 1, 21, 59, tzinfo=UTC),
+                datetime(2024, 5, 1, 23, 0, tzinfo=UTC),
+            ),
         ]
         self.assertEqual(active, expected)
 
@@ -84,7 +96,10 @@ class QuietHoursTests(unittest.TestCase):
         ranges = list(iter_quiet_utc_ranges(start, end))
 
         expected = [
-            (datetime(2024, 5, 3, 20, 45, tzinfo=UTC), datetime(2024, 5, 5, 21, 59, tzinfo=UTC)),
+            (
+                datetime(2024, 5, 3, 20, 45, tzinfo=UTC),
+                datetime(2024, 5, 5, 21, 59, tzinfo=UTC),
+            ),
         ]
         self.assertEqual(ranges, expected)
 
@@ -111,9 +126,18 @@ class QuietHoursTests(unittest.TestCase):
         ranges = list(iter_quiet_utc_ranges(start, end, asset_kind="crypto"))
 
         expected = [
-            (datetime(2024, 5, 3, 20, 45, tzinfo=UTC), datetime(2024, 5, 3, 21, 59, tzinfo=UTC)),
-            (datetime(2024, 5, 4, 20, 45, tzinfo=UTC), datetime(2024, 5, 4, 21, 59, tzinfo=UTC)),
-            (datetime(2024, 5, 5, 20, 45, tzinfo=UTC), datetime(2024, 5, 5, 21, 59, tzinfo=UTC)),
+            (
+                datetime(2024, 5, 3, 20, 45, tzinfo=UTC),
+                datetime(2024, 5, 3, 21, 59, tzinfo=UTC),
+            ),
+            (
+                datetime(2024, 5, 4, 20, 45, tzinfo=UTC),
+                datetime(2024, 5, 4, 21, 59, tzinfo=UTC),
+            ),
+            (
+                datetime(2024, 5, 5, 20, 45, tzinfo=UTC),
+                datetime(2024, 5, 5, 21, 59, tzinfo=UTC),
+            ),
         ]
         self.assertEqual(ranges, expected)
 

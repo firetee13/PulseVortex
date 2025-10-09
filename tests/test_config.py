@@ -2,7 +2,12 @@
 import unittest
 from pathlib import Path
 
-from monitor.core.config import db_path_str, default_db_path, project_root, resolve_db_path
+from monitor.core.config import (
+    db_path_str,
+    default_db_path,
+    project_root,
+    resolve_db_path,
+)
 
 
 class ConfigHelpersTests(unittest.TestCase):

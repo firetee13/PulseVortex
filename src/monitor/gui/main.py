@@ -17,46 +17,48 @@ Notes:
 
 from __future__ import annotations
 
+import argparse
+import json
+import math
 import os
-import sys
-import subprocess
-import threading
 import queue
+import shutil
 import signal
+import subprocess
+import sys
+import tempfile
+import threading
 import time
+import tkinter as tk
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-import tkinter as tk
 from tkinter import ttk
-import json
-import argparse
-import tempfile
-import shutil
-import math
-from typing import List, Sequence, Optional
+from typing import List, Optional, Sequence
+
 from monitor.core.config import db_path_str, default_db_path
-from monitor.core.mt5_client import (
-    resolve_symbol as _RESOLVE,
-    get_server_offset_hours as _GET_OFFS,
-    to_server_naive as _TO_SERVER,
-    rates_range_utc as _RATES_RANGE,
-    timeframe_m1 as _TIMEFRAME_M1,
-    timeframe_seconds as _TIMEFRAME_SECONDS,
-)
+from monitor.core.mt5_client import get_server_offset_hours as _GET_OFFS
+from monitor.core.mt5_client import rates_range_utc as _RATES_RANGE
+from monitor.core.mt5_client import resolve_symbol as _RESOLVE
+from monitor.core.mt5_client import timeframe_m1 as _TIMEFRAME_M1
+from monitor.core.mt5_client import timeframe_seconds as _TIMEFRAME_SECONDS
+from monitor.core.mt5_client import to_server_naive as _TO_SERVER
 from monitor.core.quiet_hours import (
+    is_quiet_time,
     iter_active_utc_ranges,
     iter_quiet_utc_ranges,
-    is_quiet_time,
     next_quiet_transition,
 )
 from monitor.core.symbols import classify_symbol
 
 # Plotting
 try:
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-    from matplotlib.figure import Figure
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt  # noqa: F401
+    from matplotlib.backends.backend_tkagg import (
+        FigureCanvasTkAgg,
+        NavigationToolbar2Tk,
+    )
+    from matplotlib.figure import Figure
 except Exception:
     FigureCanvasTkAgg = None  # type: ignore
     NavigationToolbar2Tk = None  # type: ignore
@@ -66,6 +68,7 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+
 def parse_args() -> argparse.Namespace:
     """
     Parse command-line arguments for the monitor GUI.
@@ -74,27 +77,34 @@ def parse_args() -> argparse.Namespace:
         argparse.Namespace: Parsed arguments
     """
     parser = argparse.ArgumentParser(description="PulseVortex GUI")
-    parser.add_argument("--restore-timelapse-log",
-                       help="Path to timelapse log file to restore on startup")
-    parser.add_argument("--restore-hits-log",
-                       help="Path to hits log file to restore on startup")
+    parser.add_argument(
+        "--restore-timelapse-log",
+        help="Path to timelapse log file to restore on startup",
+    )
+    parser.add_argument(
+        "--restore-hits-log", help="Path to hits log file to restore on startup"
+    )
     return parser.parse_args()
+
 
 # MT5 imports (optional at module import; initialized lazily when needed)
 _MT5_IMPORTED = False
 try:
     import MetaTrader5 as mt5  # type: ignore
+
     _MT5_IMPORTED = True
 except Exception:
     mt5 = None  # type: ignore
     _MT5_IMPORTED = False
 
-# MT5 helper functions shared with CLI scripts
+    # MT5 helper functions shared with CLI scripts
     pass
 
 UTC = timezone.utc
 DISPLAY_TZ = timezone(timedelta(hours=3))  # UTC+3 for chart display
-QUIET_CHART_MESSAGE = 'Charts paused during quiet hours (23:45-00:59 UTC+3; weekends for non-crypto).'
+QUIET_CHART_MESSAGE = (
+    "Charts paused during quiet hours (23:45-00:59 UTC+3; weekends for non-crypto)."
+)
 PNL_EXPECTANCY_MIN_COMPLETED = 20
 PNL_EXPECTANCY_MIN_EDGE = 0.10
 
@@ -118,6 +128,7 @@ class ProcController:
         self._stop_evt.clear()
         try:
             from monitor.core.config import project_root
+
             self.proc = subprocess.Popen(
                 self.cmd,
                 cwd=str(project_root()),
@@ -125,7 +136,9 @@ class ProcController:
                 stderr=subprocess.STDOUT,
                 bufsize=1,
                 universal_newlines=True,
-                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0),
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
             )
         except Exception as e:
             self.log_put(self.name, f"Failed to start: {e}\n")
@@ -133,7 +146,9 @@ class ProcController:
             return
 
         self.log_put(self.name, f"Started: {' '.join(self.cmd)}\n")
-        self._reader_thread = threading.Thread(target=self._reader_loop, name=f"{self.name}-reader", daemon=True)
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, name=f"{self.name}-reader", daemon=True
+        )
         self._reader_thread.start()
 
     def _reader_loop(self) -> None:
@@ -157,49 +172,52 @@ class ProcController:
             self.log_put(self.name, f"Exited with code {code}.\n")
 
     def stop(self) -> None:
-            if not self.proc or self.proc.poll() is not None:
-                self.log_put(self.name, "Not running.\n")
-                return
-            self._stop_evt.set()
-            # Attempt graceful termination
+        if not self.proc or self.proc.poll() is not None:
+            self.log_put(self.name, "Not running.\n")
+            return
+        self._stop_evt.set()
+        # Attempt graceful termination
+        try:
+            if os.name == "nt":
+                # Best-effort graceful stop; child may not handle CTRL_BREAK, so terminate as fallback
+                try:
+                    self.proc.terminate()
+                except Exception:
+                    pass
+            else:
+                try:
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log_put(self.name, f"Stop error: {e}\n")
+        # Wait for process to exit
+        for _ in range(20):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        # If still alive, force kill
+        if self.proc.poll() is None:
             try:
-                if os.name == 'nt':
-                    # Best-effort graceful stop; child may not handle CTRL_BREAK, so terminate as fallback
-                    try:
-                        self.proc.terminate()
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
-                    except Exception:
-                        pass
-            except Exception as e:
-                self.log_put(self.name, f"Stop error: {e}\n")
-            # Wait for process to exit
-            for _ in range(20):
-                if self.proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-            # If still alive, force kill
-            if self.proc.poll() is None:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-            # Ensure reader thread ends cleanly
-            if self._reader_thread is not None:
-                try:
-                    self._reader_thread.join(timeout=0.5)
-                except Exception:
-                    pass
-                self._reader_thread = None
-            self.proc = None
+                self.proc.kill()
+            except Exception:
+                pass
+        # Ensure reader thread ends cleanly
+        if self._reader_thread is not None:
+            try:
+                self._reader_thread.join(timeout=0.5)
+            except Exception:
+                pass
+            self._reader_thread = None
+        self.proc = None
 
 
 class App(tk.Tk):
-    def __init__(self, restore_timelapse_log: str | None = None,
-                 restore_hits_log: str | None = None) -> None:
+    def __init__(
+        self,
+        restore_timelapse_log: str | None = None,
+        restore_hits_log: str | None = None,
+    ) -> None:
         super().__init__()
         self.title("PulseVortex")
         self.geometry("1000x600")
@@ -271,7 +289,9 @@ class App(tk.Tk):
         try:
             self.var_exclude_symbols.trace_add("write", self._on_exclude_changed)
             self.var_symbol_filter.trace_add("write", self._on_filter_changed)
-            self.var_prox_symbol_filter.trace_add("write", self._on_prox_setting_changed)
+            self.var_prox_symbol_filter.trace_add(
+                "write", self._on_prox_setting_changed
+            )
             self.var_prox_category.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_min_trades.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_since_hours.trace_add("write", self._on_prox_setting_changed)
@@ -357,7 +377,9 @@ class App(tk.Tk):
         # PulseVortex controls
         tl = ttk.LabelFrame(frm, text="PulseVortex Timelapse Setups --watch")
         tl.pack(side=tk.LEFT, padx=6, pady=4, fill=tk.Y, expand=True)
-        self.btn_tl_toggle = ttk.Button(tl, text="Start", command=self._toggle_timelapse)
+        self.btn_tl_toggle = ttk.Button(
+            tl, text="Start", command=self._toggle_timelapse
+        )
         self.btn_tl_toggle.pack(side=tk.TOP, padx=4, pady=6)
         # Exclude symbols input (comma-separated)
         ex_frame = ttk.Frame(tl)
@@ -374,7 +396,9 @@ class App(tk.Tk):
         # Misc
         misc = ttk.Frame(frm)
         misc.pack(side=tk.RIGHT)
-        ttk.Button(misc, text="Clear Log", command=self._clear_log).pack(side=tk.TOP, padx=4, pady=4)
+        ttk.Button(misc, text="Clear Log", command=self._clear_log).pack(
+            side=tk.TOP, padx=4, pady=4
+        )
 
     def _make_logs(self, parent) -> None:
         # Two side-by-side log panes
@@ -385,7 +409,9 @@ class App(tk.Tk):
         lf_tl = ttk.LabelFrame(paned, text="Timelapse Log")
         frm_tl = ttk.Frame(lf_tl)
         frm_tl.pack(fill=tk.BOTH, expand=True)
-        self.txt_tl = tk.Text(frm_tl, wrap=tk.NONE, state=tk.DISABLED, font=("Consolas", 10))
+        self.txt_tl = tk.Text(
+            frm_tl, wrap=tk.NONE, state=tk.DISABLED, font=("Consolas", 10)
+        )
         self.txt_tl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs_tl = ttk.Scrollbar(frm_tl, orient=tk.VERTICAL, command=self.txt_tl.yview)
         vs_tl.pack(side=tk.RIGHT, fill=tk.Y)
@@ -395,9 +421,13 @@ class App(tk.Tk):
         lf_hits = ttk.LabelFrame(paned, text="TP/SL Hits Log")
         frm_hits = ttk.Frame(lf_hits)
         frm_hits.pack(fill=tk.BOTH, expand=True)
-        self.txt_hits = tk.Text(frm_hits, wrap=tk.NONE, state=tk.DISABLED, font=("Consolas", 10))
+        self.txt_hits = tk.Text(
+            frm_hits, wrap=tk.NONE, state=tk.DISABLED, font=("Consolas", 10)
+        )
         self.txt_hits.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vs_hits = ttk.Scrollbar(frm_hits, orient=tk.VERTICAL, command=self.txt_hits.yview)
+        vs_hits = ttk.Scrollbar(
+            frm_hits, orient=tk.VERTICAL, command=self.txt_hits.yview
+        )
         vs_hits.pack(side=tk.RIGHT, fill=tk.Y)
         self.txt_hits.configure(yscrollcommand=vs_hits.set)
 
@@ -409,7 +439,7 @@ class App(tk.Tk):
         # Restore timelapse log
         if self.restore_timelapse_log and os.path.exists(self.restore_timelapse_log):
             try:
-                with open(self.restore_timelapse_log, 'r', encoding='utf-8') as f:
+                with open(self.restore_timelapse_log, "r", encoding="utf-8") as f:
                     content = f.read()
                     if content:
                         self._append_text(self.txt_tl, content)
@@ -419,7 +449,7 @@ class App(tk.Tk):
         # Restore hits log
         if self.restore_hits_log and os.path.exists(self.restore_hits_log):
             try:
-                with open(self.restore_hits_log, 'r', encoding='utf-8') as f:
+                with open(self.restore_hits_log, "r", encoding="utf-8") as f:
                     content = f.read()
                     if content:
                         self._append_text(self.txt_hits, content)
@@ -439,12 +469,14 @@ class App(tk.Tk):
 
         # Clean up in a separate thread to avoid blocking UI
         if files_to_clean:
+
             def cleanup():
                 for file_path in files_to_clean:
                     try:
                         os.remove(file_path)
                     except Exception:
                         pass
+
             threading.Thread(target=cleanup, daemon=True).start()
 
     # --- DB TAB ---
@@ -471,22 +503,58 @@ class App(tk.Tk):
 
         row1 = ttk.Frame(top)
         row1.pack(side=tk.TOP, fill=tk.X)
-        add_labeled(row1, "Since(h):", ttk.Spinbox(row1, from_=1, to=24*365, textvariable=self.var_since_hours, width=6)).pack(side=tk.LEFT, padx=(0, 10))
+        add_labeled(
+            row1,
+            "Since(h):",
+            ttk.Spinbox(
+                row1, from_=1, to=24 * 365, textvariable=self.var_since_hours, width=6
+            ),
+        ).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(row1, text="Refresh", command=self._db_refresh).pack(side=tk.LEFT)
-        ttk.Checkbutton(row1, text="Auto", variable=self.var_auto, command=self._db_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
-        add_labeled(row1, "Every(s):", ttk.Spinbox(row1, from_=5, to=3600, textvariable=self.var_interval, width=6)).pack(side=tk.LEFT)
-        ttk.Button(row1, text="Restart", command=self._restart_monitors).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Checkbutton(
+            row1, text="Auto", variable=self.var_auto, command=self._db_auto_toggle
+        ).pack(side=tk.LEFT, padx=(10, 4))
+        add_labeled(
+            row1,
+            "Every(s):",
+            ttk.Spinbox(
+                row1, from_=5, to=3600, textvariable=self.var_interval, width=6
+            ),
+        ).pack(side=tk.LEFT)
+        ttk.Button(row1, text="Restart", command=self._restart_monitors).pack(
+            side=tk.RIGHT, padx=(10, 0)
+        )
 
         # Add filter row
         row2 = ttk.Frame(top)
         row2.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
-        add_labeled(row2, "Category:", ttk.Combobox(row2, textvariable=self.var_symbol_category,
-                                                  values=["All", "Forex", "Crypto", "Indices"],
-                                                  state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
-        add_labeled(row2, "Status:", ttk.Combobox(row2, textvariable=self.var_hit_status,
-                                                 values=["All", "TP", "SL", "Running", "Hits"],
-                                                 state="readonly", width=10)).pack(side=tk.LEFT, padx=(0, 10))
-        add_labeled(row2, "Symbol:", ttk.Entry(row2, textvariable=self.var_symbol_filter, width=12)).pack(side=tk.LEFT)
+        add_labeled(
+            row2,
+            "Category:",
+            ttk.Combobox(
+                row2,
+                textvariable=self.var_symbol_category,
+                values=["All", "Forex", "Crypto", "Indices"],
+                state="readonly",
+                width=10,
+            ),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        add_labeled(
+            row2,
+            "Status:",
+            ttk.Combobox(
+                row2,
+                textvariable=self.var_hit_status,
+                values=["All", "TP", "SL", "Running", "Hits"],
+                state="readonly",
+                width=10,
+            ),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        add_labeled(
+            row2,
+            "Symbol:",
+            ttk.Entry(row2, textvariable=self.var_symbol_filter, width=12),
+        ).pack(side=tk.LEFT)
 
         # Tree (table)
         # Splitter: top table, bottom chart
@@ -495,8 +563,19 @@ class App(tk.Tk):
 
         # Top: table container
         mid = ttk.Frame(splitter)
-        cols = ("symbol", "direction", "entry_utc3", "hit_time_utc3", "hit", "tp", "sl", "entry_price", "proximity_to_sl", "proximity_bin")
-        self.db_tree = ttk.Treeview(mid, columns=cols, show='headings', height=12)
+        cols = (
+            "symbol",
+            "direction",
+            "entry_utc3",
+            "hit_time_utc3",
+            "hit",
+            "tp",
+            "sl",
+            "entry_price",
+            "proximity_to_sl",
+            "proximity_bin",
+        )
+        self.db_tree = ttk.Treeview(mid, columns=cols, show="headings", height=12)
         self.db_tree.heading("symbol", text="Symbol")
         self.db_tree.heading("direction", text="Direction")
         self.db_tree.heading("entry_utc3", text="Inserted UTC+3")
@@ -527,10 +606,12 @@ class App(tk.Tk):
 
         # Bottom: chart container
         chart_wrap = ttk.Frame(splitter)
-        self.chart_status = ttk.Label(chart_wrap, text="Select a row to render 1m chart (Inserted±) with SL/TP.")
+        self.chart_status = ttk.Label(
+            chart_wrap, text="Select a row to render 1m chart (Inserted±) with SL/TP."
+        )
         self.chart_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
         try:
-            self.chart_spinner = ttk.Progressbar(chart_wrap, mode='indeterminate')
+            self.chart_spinner = ttk.Progressbar(chart_wrap, mode="indeterminate")
         except Exception:
             self.chart_spinner = None
         self._chart_spinner_visible = False
@@ -551,13 +632,13 @@ class App(tk.Tk):
 
         # Bind selection handler
         try:
-            self.db_tree.bind('<<TreeviewSelect>>', self._on_db_row_selected)
+            self.db_tree.bind("<<TreeviewSelect>>", self._on_db_row_selected)
         except Exception:
             pass
 
         # Row tags for coloring
-        self.db_tree.tag_configure('tp', background='#d8f3dc')  # greenish
-        self.db_tree.tag_configure('sl', background='#f8d7da')  # reddish
+        self.db_tree.tag_configure("tp", background="#d8f3dc")  # greenish
+        self.db_tree.tag_configure("sl", background="#f8d7da")  # reddish
 
         # Status bar
         bot = ttk.Frame(parent)
@@ -565,7 +646,9 @@ class App(tk.Tk):
         self.db_status = ttk.Label(bot, text="Ready.")
         self.db_status.pack(side=tk.LEFT)
         # Delete button for selected row (works for all entries)
-        ttk.Button(bot, text="Delete Selected", command=self._db_delete_selected).pack(side=tk.RIGHT)
+        ttk.Button(bot, text="Delete Selected", command=self._db_delete_selected).pack(
+            side=tk.RIGHT
+        )
 
         self._db_loading = False
         self._db_auto_job: str | None = None
@@ -659,7 +742,9 @@ class App(tk.Tk):
             if FigureCanvasTkAgg is None or Figure is None:
                 try:
                     if self.pnl_status is not None:
-                        self.pnl_status.config(text="Matplotlib not available; cannot render PnL.")
+                        self.pnl_status.config(
+                            text="Matplotlib not available; cannot render PnL."
+                        )
                 except Exception:
                     pass
                 return
@@ -667,7 +752,7 @@ class App(tk.Tk):
                 self._init_pnl_chart_widgets()
             ax = self._pnl_ax
             ax.clear()
-            ax.grid(True, which='both', linestyle='--', alpha=0.3)
+            ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
             try:
                 times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
@@ -676,8 +761,21 @@ class App(tk.Tk):
 
             # Plot cumulative and avg
             try:
-                ax.plot(times_disp, cum, color='#1f77b4', linewidth=2, label='Cumulative PnL (sum of +RRR/-1)')
-                ax.plot(times_disp, avg, color='#ff7f0e', linewidth=1.5, linestyle='--', label='Avg PnL per trade')
+                ax.plot(
+                    times_disp,
+                    cum,
+                    color="#1f77b4",
+                    linewidth=2,
+                    label="Cumulative PnL (sum of +RRR/-1)",
+                )
+                ax.plot(
+                    times_disp,
+                    avg,
+                    color="#ff7f0e",
+                    linewidth=1.5,
+                    linestyle="--",
+                    label="Avg PnL per trade",
+                )
             except Exception:
                 pass
 
@@ -688,23 +786,29 @@ class App(tk.Tk):
                 losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
                 losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
                 if wins_x:
-                    ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='TP')
+                    ax.scatter(
+                        wins_x, wins_y, color="green", marker="^", s=40, label="TP"
+                    )
                 if losses_x:
-                    ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='SL')
+                    ax.scatter(
+                        losses_x, losses_y, color="red", marker="v", s=40, label="SL"
+                    )
             except Exception:
                 pass
 
             # Formatter
             try:
                 locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-                formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+                formatter = mdates.ConciseDateFormatter(
+                    locator, tz=DISPLAY_TZ, show_offset=False
+                )
                 ax.xaxis.set_major_locator(locator)
                 ax.xaxis.set_major_formatter(formatter)
             except Exception:
                 pass
 
             try:
-                ax.legend(loc='upper left')
+                ax.legend(loc="upper left")
             except Exception:
                 pass
             try:
@@ -715,7 +819,9 @@ class App(tk.Tk):
                 pass
             try:
                 if self.pnl_status is not None:
-                    self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
+                    self.pnl_status.config(
+                        text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}"
+                    )
             except Exception:
                 pass
 
@@ -726,36 +832,62 @@ class App(tk.Tk):
         row1 = ttk.Frame(top)
         row1.pack(side=tk.TOP, fill=tk.X)
         ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=1, to=24 * 365, textvariable=self.var_prox_since_hours,
-                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Spinbox(
+            row1, from_=1, to=24 * 365, textvariable=self.var_prox_since_hours, width=6
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(row1, text="Min trades:").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=1, to=500, textvariable=self.var_prox_min_trades,
-                    width=4).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Spinbox(
+            row1, from_=1, to=500, textvariable=self.var_prox_min_trades, width=4
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Button(row1, text="Refresh", command=self._prox_refresh).pack(side=tk.LEFT)
-        ttk.Checkbutton(row1, text="Auto", variable=self.var_prox_auto,
-                        command=self._prox_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Checkbutton(
+            row1,
+            text="Auto",
+            variable=self.var_prox_auto,
+            command=self._prox_auto_toggle,
+        ).pack(side=tk.LEFT, padx=(10, 4))
         ttk.Label(row1, text="Every(s):").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=15, to=3600, textvariable=self.var_prox_interval,
-                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Spinbox(
+            row1, from_=15, to=3600, textvariable=self.var_prox_interval, width=6
+        ).pack(side=tk.LEFT, padx=(4, 10))
 
         row2 = ttk.Frame(top)
         row2.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
         ttk.Label(row2, text="Category:").pack(side=tk.LEFT)
-        ttk.Combobox(row2, textvariable=self.var_prox_category,
-                     values=["All", "Forex", "Crypto", "Indices"],
-                     state="readonly", width=10).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Combobox(
+            row2,
+            textvariable=self.var_prox_category,
+            values=["All", "Forex", "Crypto", "Indices"],
+            state="readonly",
+            width=10,
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(row2, text="Symbol:").pack(side=tk.LEFT)
-        ttk.Entry(row2, textvariable=self.var_prox_symbol_filter, width=14).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Entry(row2, textvariable=self.var_prox_symbol_filter, width=14).pack(
+            side=tk.LEFT, padx=(4, 10)
+        )
 
         chart_wrap = ttk.Frame(parent)
         chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        self.prox_status = ttk.Label(chart_wrap, text="Proximity stats pending refresh…")
+        self.prox_status = ttk.Label(
+            chart_wrap, text="Proximity stats pending refresh…"
+        )
         self.prox_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 4))
 
         table_frame = ttk.Frame(chart_wrap)
         table_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 6))
-        cols = ("category", "bin", "completed", "total", "pending", "tp_pct", "avg_rrr", "expectancy")
-        self.prox_table = ttk.Treeview(table_frame, columns=cols, show='headings', height=5)
+        cols = (
+            "category",
+            "bin",
+            "completed",
+            "total",
+            "pending",
+            "tp_pct",
+            "avg_rrr",
+            "expectancy",
+        )
+        self.prox_table = ttk.Treeview(
+            table_frame, columns=cols, show="headings", height=5
+        )
         headings = {
             "category": "Type",
             "bin": "Sweet Spot Bin",
@@ -776,7 +908,9 @@ class App(tk.Tk):
         self.prox_table.column("tp_pct", width=70, anchor=tk.E)
         self.prox_table.column("avg_rrr", width=80, anchor=tk.E)
         self.prox_table.column("expectancy", width=90, anchor=tk.E)
-        vs_table = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.prox_table.yview)
+        vs_table = ttk.Scrollbar(
+            table_frame, orient=tk.VERTICAL, command=self.prox_table.yview
+        )
         self.prox_table.configure(yscrollcommand=vs_table.set)
         self.prox_table.pack(side=tk.LEFT, fill=tk.X, expand=True)
         vs_table.pack(side=tk.RIGHT, fill=tk.Y)
@@ -786,7 +920,9 @@ class App(tk.Tk):
 
         if FigureCanvasTkAgg is None or Figure is None:
             try:
-                self.prox_status.config(text="Matplotlib not available; charts disabled.")
+                self.prox_status.config(
+                    text="Matplotlib not available; charts disabled."
+                )
             except Exception:
                 pass
 
@@ -804,18 +940,20 @@ class App(tk.Tk):
         gs = fig.add_gridspec(2, 1, height_ratios=[1, 1.2], hspace=0.32)
         ax_bins = fig.add_subplot(gs[0])
         ax_symbols = fig.add_subplot(gs[1])
-        ax_bins.set_ylabel('Expectancy (R)')
+        ax_bins.set_ylabel("Expectancy (R)")
         ax_bins.set_ylim(-1.5, 2.5)
-        ax_bins.grid(True, axis='y', linestyle='--', alpha=0.3)
-        ax_symbols.set_xlabel('Average proximity to SL at entry')
-        ax_symbols.set_ylabel('Expectancy (R multiples)')
+        ax_bins.grid(True, axis="y", linestyle="--", alpha=0.3)
+        ax_symbols.set_xlabel("Average proximity to SL at entry")
+        ax_symbols.set_ylabel("Expectancy (R multiples)")
         ax_symbols.set_ylim(-1.5, 2.5)
-        ax_symbols.grid(True, linestyle='--', alpha=0.3)
+        ax_symbols.grid(True, linestyle="--", alpha=0.3)
         canvas = FigureCanvasTkAgg(fig, master=self.prox_chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.prox_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.prox_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
         except Exception:
@@ -887,9 +1025,9 @@ class App(tk.Tk):
         category_filter = self.var_prox_category.get()
 
         payload: dict[str, object] = {
-            'error': None,
-            'since_hours': hours,
-            'min_trades': min_trades,
+            "error": None,
+            "since_hours": hours,
+            "min_trades": min_trades,
         }
         rows: list[dict[str, object]] = []
         max_prox = 0.0
@@ -904,32 +1042,38 @@ class App(tk.Tk):
             try:
                 cur = conn.cursor()
                 try:
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_setups_inserted_at ON timelapse_setups(inserted_at)")
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_setups_inserted_at ON timelapse_setups(inserted_at)"
+                    )
                 except Exception:
                     pass
                 try:
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_hits_setup_id ON timelapse_hits(setup_id)")
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_hits_setup_id ON timelapse_hits(setup_id)"
+                    )
                 except Exception:
                     pass
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'"
+                )
                 if cur.fetchone() is None:
-                    payload['rows'] = []
+                    payload["rows"] = []
                 else:
-                    thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
-                    sql = (
-                        """
+                    thr = (
+                        datetime.now(timezone.utc) - timedelta(hours=hours)
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+                    sql = """
                         SELECT s.symbol, s.proximity_to_sl, s.rrr, h.hit, h.hit_time
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
                         WHERE s.inserted_at >= ?
                         ORDER BY s.inserted_at DESC
                         """
-                    )
                     cur.execute(sql, (thr,))
                     raw_rows = cur.fetchmany(100000) or []
                     max_prox = 0.0
                     for sym, prox_raw, rrr_raw, hit, hit_time in raw_rows:
-                        sym_s = str(sym) if sym is not None else ''
+                        sym_s = str(sym) if sym is not None else ""
                         if symbol_filter and symbol_filter.upper() not in sym_s.upper():
                             continue
                         category = self._classify_symbol(sym_s).title()
@@ -948,38 +1092,40 @@ class App(tk.Tk):
                             except Exception:
                                 rrr_val = None
                         max_prox = max(max_prox, prox_val)
-                        hit_str = (hit or '')
+                        hit_str = hit or ""
                         outcome = None
                         if isinstance(hit_str, str):
                             u = hit_str.upper()
-                            if u == 'TP':
-                                outcome = 'win'
-                            elif u == 'SL':
-                                outcome = 'loss'
-                        rows.append({
-                            'symbol': sym_s,
-                            'category': category,
-                            'proximity': prox_val,
-                            'rrr': rrr_val,
-                            'outcome': outcome,
-                        })
+                            if u == "TP":
+                                outcome = "win"
+                            elif u == "SL":
+                                outcome = "loss"
+                        rows.append(
+                            {
+                                "symbol": sym_s,
+                                "category": category,
+                                "proximity": prox_val,
+                                "rrr": rrr_val,
+                                "outcome": outcome,
+                            }
+                        )
             finally:
                 try:
                     conn.close()
                 except Exception:
                     pass
         except Exception as exc:
-            payload['error'] = str(exc)
+            payload["error"] = str(exc)
 
-        payload['rows'] = rows
-        payload['max_prox'] = max_prox
-        payload['category_filter_used'] = category_filter
+        payload["rows"] = rows
+        payload["max_prox"] = max_prox
+        payload["category_filter_used"] = category_filter
 
         self.after(0, lambda: self._prox_apply_result(payload))
 
     def _prox_apply_result(self, payload: dict[str, object]) -> None:
         self._prox_loading = False
-        error = payload.get('error')
+        error = payload.get("error")
         if error:
             if self.prox_status is not None:
                 try:
@@ -988,7 +1134,7 @@ class App(tk.Tk):
                     pass
             self._prox_schedule_next()
             return
-        rows = payload.get('rows')
+        rows = payload.get("rows")
         if not isinstance(rows, list):
             rows = []
         try:
@@ -1020,16 +1166,24 @@ class App(tk.Tk):
                 pass
         self._prox_schedule_next()
 
-    def _prox_compute_stats(self, rows: list[dict[str, object]], payload: dict[str, object]) -> dict[str, object]:
-        hours = payload.get('since_hours', 0)
-        min_trades = payload.get('min_trades', 1)
+    def _prox_compute_stats(
+        self, rows: list[dict[str, object]], payload: dict[str, object]
+    ) -> dict[str, object]:
+        hours = payload.get("since_hours", 0)
+        min_trades = payload.get("min_trades", 1)
         try:
             min_trades_int = max(1, int(min_trades))
         except Exception:
             min_trades_int = 1
 
-        proximities = [float(r['proximity']) for r in rows if isinstance(r.get('proximity'), (int, float))]
-        max_prox = float(payload.get('max_prox') or (max(proximities) if proximities else 0.0))
+        proximities = [
+            float(r["proximity"])
+            for r in rows
+            if isinstance(r.get("proximity"), (int, float))
+        ]
+        max_prox = float(
+            payload.get("max_prox") or (max(proximities) if proximities else 0.0)
+        )
         bucket = 0.1
         if max_prox <= 0:
             upper = bucket
@@ -1044,31 +1198,35 @@ class App(tk.Tk):
             start = edges[idx]
             end = edges[idx + 1]
             label = f"{start:.1f}-{end:.1f}"
-            bins.append({
-                'start': start,
-                'end': end,
-                'label': label,
-                'midpoint': (start + end) / 2.0,
-                'count': 0,
-                'wins': 0,
-                'losses': 0,
-                'sum_rrr_wins': 0.0,
-            })
+            bins.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "label": label,
+                    "midpoint": (start + end) / 2.0,
+                    "count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "sum_rrr_wins": 0.0,
+                }
+            )
         if not bins:
-            bins.append({
-                'start': 0.0,
-                'end': bucket,
-                'label': f"0.0-{bucket:.1f}",
-                'midpoint': bucket / 2.0,
-                'count': 0,
-                'wins': 0,
-                'losses': 0,
-                'sum_rrr_wins': 0.0,
-            })
+            bins.append(
+                {
+                    "start": 0.0,
+                    "end": bucket,
+                    "label": f"0.0-{bucket:.1f}",
+                    "midpoint": bucket / 2.0,
+                    "count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "sum_rrr_wins": 0.0,
+                }
+            )
 
         def pick_bin(value: float) -> dict[str, object]:
             for i, b in enumerate(bins):
-                if value < b['end'] or i == len(bins) - 1:
+                if value < b["end"] or i == len(bins) - 1:
                     return b
             return bins[-1]
 
@@ -1079,229 +1237,287 @@ class App(tk.Tk):
         global_rrr_sum = 0.0
 
         for row in rows:
-            prox = row.get('proximity')
+            prox = row.get("proximity")
             if not isinstance(prox, (int, float)):
                 continue
-            outcome = row.get('outcome')
-            symbol = str(row.get('symbol') or '')
-            category = str(row.get('category') or 'Forex')
-            rrr_val = row.get('rrr')
+            outcome = row.get("outcome")
+            symbol = str(row.get("symbol") or "")
+            category = str(row.get("category") or "Forex")
+            rrr_val = row.get("rrr")
             rrr_float: float | None
             if isinstance(rrr_val, (int, float)):
                 rrr_float = float(rrr_val)
             else:
                 rrr_float = None
             bin_item = pick_bin(float(prox))
-            bin_item['count'] = int(bin_item.get('count', 0)) + 1
-            if outcome == 'win':
-                bin_item['wins'] = int(bin_item.get('wins', 0)) + 1
+            bin_item["count"] = int(bin_item.get("count", 0)) + 1
+            if outcome == "win":
+                bin_item["wins"] = int(bin_item.get("wins", 0)) + 1
                 wins_total += 1
-            elif outcome == 'loss':
-                bin_item['losses'] = int(bin_item.get('losses', 0)) + 1
+            elif outcome == "loss":
+                bin_item["losses"] = int(bin_item.get("losses", 0)) + 1
                 losses_total += 1
 
-            stat = symbol_stats.setdefault(symbol, {
-                'symbol': symbol,
-                'category': category,
-                'trades': 0,
-                'completed': 0,
-                'wins': 0,
-                'losses': 0,
-                'sum_prox': 0.0,
-                'sum_prox_completed': 0.0,
-                'sum_rrr_wins': 0.0,
-            })
-            stat['trades'] = int(stat['trades']) + 1
-            stat['sum_prox'] = float(stat['sum_prox']) + float(prox)
-            if outcome == 'win':
-                stat['completed'] = int(stat['completed']) + 1
-                stat['wins'] = int(stat['wins']) + 1
-                stat['sum_prox_completed'] = float(stat['sum_prox_completed']) + float(prox)
+            stat = symbol_stats.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "category": category,
+                    "trades": 0,
+                    "completed": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "sum_prox": 0.0,
+                    "sum_prox_completed": 0.0,
+                    "sum_rrr_wins": 0.0,
+                },
+            )
+            stat["trades"] = int(stat["trades"]) + 1
+            stat["sum_prox"] = float(stat["sum_prox"]) + float(prox)
+            if outcome == "win":
+                stat["completed"] = int(stat["completed"]) + 1
+                stat["wins"] = int(stat["wins"]) + 1
+                stat["sum_prox_completed"] = float(stat["sum_prox_completed"]) + float(
+                    prox
+                )
                 if rrr_float is not None:
-                    bin_item['sum_rrr_wins'] = float(bin_item.get('sum_rrr_wins', 0.0)) + rrr_float
-                    stat['sum_rrr_wins'] = float(stat.get('sum_rrr_wins', 0.0)) + rrr_float
+                    bin_item["sum_rrr_wins"] = (
+                        float(bin_item.get("sum_rrr_wins", 0.0)) + rrr_float
+                    )
+                    stat["sum_rrr_wins"] = (
+                        float(stat.get("sum_rrr_wins", 0.0)) + rrr_float
+                    )
                     global_rrr_sum += rrr_float
-            elif outcome == 'loss':
-                stat['completed'] = int(stat['completed']) + 1
-                stat['losses'] = int(stat['losses']) + 1
-                stat['sum_prox_completed'] = float(stat['sum_prox_completed']) + float(prox)
+            elif outcome == "loss":
+                stat["completed"] = int(stat["completed"]) + 1
+                stat["losses"] = int(stat["losses"]) + 1
+                stat["sum_prox_completed"] = float(stat["sum_prox_completed"]) + float(
+                    prox
+                )
 
             cat_bins = category_bins.setdefault(category, {})
-            bin_label = bin_item.get('label')
-            cat_entry = cat_bins.setdefault(bin_label, {
-                'label': bin_label,
-                'midpoint': bin_item.get('midpoint'),
-                'count': 0,
-                'wins': 0,
-                'losses': 0,
-                'sum_rrr_wins': 0.0,
-            })
-            cat_entry['count'] = int(cat_entry.get('count', 0)) + 1
-            if outcome == 'win':
-                cat_entry['wins'] = int(cat_entry.get('wins', 0)) + 1
+            bin_label = bin_item.get("label")
+            cat_entry = cat_bins.setdefault(
+                bin_label,
+                {
+                    "label": bin_label,
+                    "midpoint": bin_item.get("midpoint"),
+                    "count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "sum_rrr_wins": 0.0,
+                },
+            )
+            cat_entry["count"] = int(cat_entry.get("count", 0)) + 1
+            if outcome == "win":
+                cat_entry["wins"] = int(cat_entry.get("wins", 0)) + 1
                 if rrr_float is not None:
-                    cat_entry['sum_rrr_wins'] = float(cat_entry.get('sum_rrr_wins', 0.0)) + rrr_float
-            elif outcome == 'loss':
-                cat_entry['losses'] = int(cat_entry.get('losses', 0)) + 1
+                    cat_entry["sum_rrr_wins"] = (
+                        float(cat_entry.get("sum_rrr_wins", 0.0)) + rrr_float
+                    )
+            elif outcome == "loss":
+                cat_entry["losses"] = int(cat_entry.get("losses", 0)) + 1
 
         for b in bins:
-            wins_b = int(b.get('wins', 0))
-            losses_b = int(b.get('losses', 0))
+            wins_b = int(b.get("wins", 0))
+            losses_b = int(b.get("losses", 0))
             completed_b = wins_b + losses_b
-            b['completed'] = completed_b
-            total_b = int(b.get('count', 0))
-            b['pending'] = max(0, total_b - completed_b)
+            b["completed"] = completed_b
+            total_b = int(b.get("count", 0))
+            b["pending"] = max(0, total_b - completed_b)
             if completed_b:
-                b['success_rate'] = wins_b / completed_b
-                sum_rrr_wins = float(b.get('sum_rrr_wins', 0.0))
-                avg_rrr = (sum_rrr_wins / wins_b) if (wins_b and sum_rrr_wins > 0) else None
-                b['avg_rrr'] = avg_rrr
+                b["success_rate"] = wins_b / completed_b
+                sum_rrr_wins = float(b.get("sum_rrr_wins", 0.0))
+                avg_rrr = (
+                    (sum_rrr_wins / wins_b) if (wins_b and sum_rrr_wins > 0) else None
+                )
+                b["avg_rrr"] = avg_rrr
                 if avg_rrr is not None:
-                    success = b['success_rate']
-                    b['expectancy'] = success * avg_rrr - (1 - success)
+                    success = b["success_rate"]
+                    b["expectancy"] = success * avg_rrr - (1 - success)
                 else:
-                    b['expectancy'] = None
+                    b["expectancy"] = None
             else:
-                b['success_rate'] = None
-                b['avg_rrr'] = None
-                b['expectancy'] = None
+                b["success_rate"] = None
+                b["avg_rrr"] = None
+                b["expectancy"] = None
 
         symbol_entries: list[dict[str, object]] = []
         category_summary: dict[str, dict[str, float]] = {}
         for stat in symbol_stats.values():
-            trades = int(stat['trades'])
-            completed = int(stat['completed'])
-            wins_s = int(stat['wins'])
-            losses_s = int(stat['losses'])
-            avg_all = float(stat['sum_prox']) / trades if trades else 0.0
-            avg_completed = (float(stat['sum_prox_completed']) / completed) if completed else avg_all
+            trades = int(stat["trades"])
+            completed = int(stat["completed"])
+            wins_s = int(stat["wins"])
+            losses_s = int(stat["losses"])
+            avg_all = float(stat["sum_prox"]) / trades if trades else 0.0
+            avg_completed = (
+                (float(stat["sum_prox_completed"]) / completed)
+                if completed
+                else avg_all
+            )
             success = (wins_s / completed) if completed else None
-            sum_rrr_wins = float(stat.get('sum_rrr_wins', 0.0)) if wins_s else 0.0
-            avg_rrr_completed = (sum_rrr_wins / wins_s) if (wins_s and sum_rrr_wins > 0) else None
+            sum_rrr_wins = float(stat.get("sum_rrr_wins", 0.0)) if wins_s else 0.0
+            avg_rrr_completed = (
+                (sum_rrr_wins / wins_s) if (wins_s and sum_rrr_wins > 0) else None
+            )
             expectancy = None
             if success is not None and avg_rrr_completed is not None:
                 expectancy = success * avg_rrr_completed - (1 - success)
             entry = {
-                'symbol': stat['symbol'],
-                'category': stat['category'],
-                'trades': trades,
-                'completed': completed,
-                'wins': wins_s,
-                'losses': losses_s,
-                'avg_prox': avg_all,
-                'avg_prox_completed': avg_completed,
-                'success_rate': success,
-                'avg_rrr': avg_rrr_completed,
-                'expectancy': expectancy,
+                "symbol": stat["symbol"],
+                "category": stat["category"],
+                "trades": trades,
+                "completed": completed,
+                "wins": wins_s,
+                "losses": losses_s,
+                "avg_prox": avg_all,
+                "avg_prox_completed": avg_completed,
+                "success_rate": success,
+                "avg_rrr": avg_rrr_completed,
+                "expectancy": expectancy,
             }
             symbol_entries.append(entry)
             if completed:
-                cat_data = category_summary.setdefault(stat['category'], {'wins': 0, 'completed': 0, 'sum_rrr_wins': 0.0})
-                cat_data['wins'] += wins_s
-                cat_data['completed'] += completed
-                cat_data['sum_rrr_wins'] += sum_rrr_wins
+                cat_data = category_summary.setdefault(
+                    stat["category"], {"wins": 0, "completed": 0, "sum_rrr_wins": 0.0}
+                )
+                cat_data["wins"] += wins_s
+                cat_data["completed"] += completed
+                cat_data["sum_rrr_wins"] += sum_rrr_wins
 
         eligible_symbols = [
-            s for s in symbol_entries
-            if s.get('success_rate') is not None and s.get('expectancy') is not None and int(s.get('completed', 0)) >= min_trades_int
+            s
+            for s in symbol_entries
+            if s.get("success_rate") is not None
+            and s.get("expectancy") is not None
+            and int(s.get("completed", 0)) >= min_trades_int
         ]
-        eligible_symbols.sort(key=lambda s: (s.get('expectancy') or 0.0, s.get('success_rate') or 0.0, s.get('completed') or 0), reverse=True)
+        eligible_symbols.sort(
+            key=lambda s: (
+                s.get("expectancy") or 0.0,
+                s.get("success_rate") or 0.0,
+                s.get("completed") or 0,
+            ),
+            reverse=True,
+        )
         best_symbols = eligible_symbols[:3]
 
         global_completed = wins_total + losses_total
         global_rate = (wins_total / global_completed) if global_completed else None
-        global_avg_rrr = (global_rrr_sum / wins_total) if wins_total and global_rrr_sum > 0 else None
+        global_avg_rrr = (
+            (global_rrr_sum / wins_total) if wins_total and global_rrr_sum > 0 else None
+        )
         global_expectancy = None
         if global_rate is not None and global_avg_rrr is not None:
             global_expectancy = global_rate * global_avg_rrr - (1 - global_rate)
 
         sweet_bin = None
         for b in bins:
-            completed_b = b.get('completed', 0)
-            expectancy = b.get('expectancy')
+            completed_b = b.get("completed", 0)
+            expectancy = b.get("expectancy")
             if not completed_b or completed_b < max(3, min_trades_int):
                 continue
-            prev_expectancy = None if sweet_bin is None else sweet_bin.get('expectancy')
+            prev_expectancy = None if sweet_bin is None else sweet_bin.get("expectancy")
             if sweet_bin is None or (
                 expectancy is not None
                 and (prev_expectancy is None or expectancy > prev_expectancy)
             ):
                 sweet_bin = {
-                    'label': b['label'],
-                    'success_rate': b.get('success_rate'),
-                    'completed': completed_b,
-                    'avg_rrr': b.get('avg_rrr'),
-                    'expectancy': expectancy,
-                    'midpoint': b['midpoint'],
+                    "label": b["label"],
+                    "success_rate": b.get("success_rate"),
+                    "completed": completed_b,
+                    "avg_rrr": b.get("avg_rrr"),
+                    "expectancy": expectancy,
+                    "midpoint": b["midpoint"],
                 }
 
         category_sweet_spots: list[dict[str, object]] = []
         cat_summary_fmt = []
         for cat, data in category_summary.items():
-            completed_cat = data.get('completed', 0)
+            completed_cat = data.get("completed", 0)
             if completed_cat:
-                rate_cat = data.get('wins', 0) / completed_cat
-                wins_cat = data.get('wins', 0)
-                sum_rrr_cat = data.get('sum_rrr_wins', 0.0)
-                avg_rrr_cat = (sum_rrr_cat / wins_cat) if (wins_cat and sum_rrr_cat > 0) else None
+                rate_cat = data.get("wins", 0) / completed_cat
+                wins_cat = data.get("wins", 0)
+                sum_rrr_cat = data.get("sum_rrr_wins", 0.0)
+                avg_rrr_cat = (
+                    (sum_rrr_cat / wins_cat) if (wins_cat and sum_rrr_cat > 0) else None
+                )
                 expectancy_cat = None
                 if avg_rrr_cat is not None:
                     expectancy_cat = rate_cat * avg_rrr_cat - (1 - rate_cat)
-                cat_summary_fmt.append({'category': cat, 'success_rate': rate_cat, 'expectancy': expectancy_cat})
+                cat_summary_fmt.append(
+                    {
+                        "category": cat,
+                        "success_rate": rate_cat,
+                        "expectancy": expectancy_cat,
+                    }
+                )
 
             bins_map = category_bins.get(cat, {})
             best_bin = None
             for bin_label, bin_stats in bins_map.items():
-                wins_cat = int(bin_stats.get('wins', 0))
-                losses_cat = int(bin_stats.get('losses', 0))
-                total_cat = int(bin_stats.get('count', 0))
+                wins_cat = int(bin_stats.get("wins", 0))
+                losses_cat = int(bin_stats.get("losses", 0))
+                total_cat = int(bin_stats.get("count", 0))
                 completed_cat_bin = wins_cat + losses_cat
                 pending_cat = max(0, total_cat - completed_cat_bin)
-                success_cat = (wins_cat / completed_cat_bin) if completed_cat_bin else None
+                success_cat = (
+                    (wins_cat / completed_cat_bin) if completed_cat_bin else None
+                )
                 avg_rrr_cat_bin = None
                 if completed_cat_bin:
-                    sum_rrr_cat_bin = float(bin_stats.get('sum_rrr_wins', 0.0))
+                    sum_rrr_cat_bin = float(bin_stats.get("sum_rrr_wins", 0.0))
                     if wins_cat and sum_rrr_cat_bin > 0:
                         avg_rrr_cat_bin = sum_rrr_cat_bin / wins_cat
                 expectancy_cat_bin = None
                 if success_cat is not None and avg_rrr_cat_bin is not None:
-                    expectancy_cat_bin = success_cat * avg_rrr_cat_bin - (1 - success_cat)
-                bin_stats['success_rate'] = success_cat
-                bin_stats['avg_rrr'] = avg_rrr_cat_bin
-                bin_stats['expectancy'] = expectancy_cat_bin
-                bin_stats['completed'] = completed_cat_bin
-                bin_stats['pending'] = pending_cat
-                if (completed_cat_bin >= max(3, min_trades_int)) and expectancy_cat_bin is not None:
-                    prev_best_expectancy = None if best_bin is None else best_bin.get('expectancy')
-                    if best_bin is None or prev_best_expectancy is None or expectancy_cat_bin > prev_best_expectancy:
+                    expectancy_cat_bin = success_cat * avg_rrr_cat_bin - (
+                        1 - success_cat
+                    )
+                bin_stats["success_rate"] = success_cat
+                bin_stats["avg_rrr"] = avg_rrr_cat_bin
+                bin_stats["expectancy"] = expectancy_cat_bin
+                bin_stats["completed"] = completed_cat_bin
+                bin_stats["pending"] = pending_cat
+                if (
+                    completed_cat_bin >= max(3, min_trades_int)
+                ) and expectancy_cat_bin is not None:
+                    prev_best_expectancy = (
+                        None if best_bin is None else best_bin.get("expectancy")
+                    )
+                    if (
+                        best_bin is None
+                        or prev_best_expectancy is None
+                        or expectancy_cat_bin > prev_best_expectancy
+                    ):
                         best_bin = {
-                            'category': cat,
-                            'label': bin_label,
-                            'completed': completed_cat_bin,
-                            'total': total_cat,
-                            'pending': pending_cat,
-                            'success_rate': success_cat,
-                            'avg_rrr': avg_rrr_cat_bin,
-                            'expectancy': expectancy_cat_bin,
+                            "category": cat,
+                            "label": bin_label,
+                            "completed": completed_cat_bin,
+                            "total": total_cat,
+                            "pending": pending_cat,
+                            "success_rate": success_cat,
+                            "avg_rrr": avg_rrr_cat_bin,
+                            "expectancy": expectancy_cat_bin,
                         }
             if best_bin is not None:
                 category_sweet_spots.append(best_bin)
 
         result = {
-            'since_hours': hours,
-            'min_trades': min_trades_int,
-            'bin_stats': bins,
-            'symbol_stats': eligible_symbols,
-            'best_symbols': best_symbols,
-            'global_success_rate': global_rate,
-            'global_avg_rrr': global_avg_rrr,
-            'global_expectancy': global_expectancy,
-            'completed_trades': global_completed,
-            'pending_trades': max(0, len(rows) - global_completed),
-            'symbols_seen': len(symbol_stats),
-            'sweet_bin': sweet_bin,
-            'category_summary': cat_summary_fmt,
-            'category_sweet_spots': category_sweet_spots,
+            "since_hours": hours,
+            "min_trades": min_trades_int,
+            "bin_stats": bins,
+            "symbol_stats": eligible_symbols,
+            "best_symbols": best_symbols,
+            "global_success_rate": global_rate,
+            "global_avg_rrr": global_avg_rrr,
+            "global_expectancy": global_expectancy,
+            "completed_trades": global_completed,
+            "pending_trades": max(0, len(rows) - global_completed),
+            "symbols_seen": len(symbol_stats),
+            "sweet_bin": sweet_bin,
+            "category_summary": cat_summary_fmt,
+            "category_sweet_spots": category_sweet_spots,
         }
         return result
 
@@ -1310,41 +1526,46 @@ class App(tk.Tk):
             return
 
         status_parts: list[str] = []
-        completed = data.get('completed_trades') or 0
-        pending = data.get('pending_trades') or 0
-        symbols_seen = data.get('symbols_seen') or 0
-        since_hours = data.get('since_hours') or 0
-        status_parts.append(f"{completed} completed / {pending} open across {symbols_seen} symbols (last {since_hours}h)")
+        completed = data.get("completed_trades") or 0
+        pending = data.get("pending_trades") or 0
+        symbols_seen = data.get("symbols_seen") or 0
+        since_hours = data.get("since_hours") or 0
+        status_parts.append(
+            f"{completed} completed / {pending} open across {symbols_seen} symbols (last {since_hours}h)"
+        )
 
-        sweet = data.get('sweet_bin') or None
-        if sweet and isinstance(sweet, dict) and sweet.get('expectancy') is not None:
+        sweet = data.get("sweet_bin") or None
+        if sweet and isinstance(sweet, dict) and sweet.get("expectancy") is not None:
             pieces = []
             try:
-                sr = sweet.get('success_rate')
+                sr = sweet.get("success_rate")
                 if sr is not None:
                     pieces.append(f"{float(sr) * 100:.1f}% TP")
             except Exception:
                 pass
             try:
-                avg_rrr = sweet.get('avg_rrr')
+                avg_rrr = sweet.get("avg_rrr")
                 if avg_rrr is not None:
                     pieces.append(f"avg RRR {float(avg_rrr):.2f}")
             except Exception:
                 pass
             pieces.append(f"edge {float(sweet['expectancy']):+.2f}R")
             status_parts.append(
-                f"Sweet spot {sweet.get('label')} → " + ", ".join(pieces) + f" on {int(sweet['completed'])} trades")
+                f"Sweet spot {sweet.get('label')} → "
+                + ", ".join(pieces)
+                + f" on {int(sweet['completed'])} trades"
+            )
 
-        best_symbols = data.get('best_symbols') or []
+        best_symbols = data.get("best_symbols") or []
         if isinstance(best_symbols, list) and best_symbols:
             best_bits = []
             for entry in best_symbols:
                 try:
-                    sym = entry.get('symbol')
-                    rate = entry.get('success_rate')
-                    expectancy = entry.get('expectancy')
-                    avg_rrr = entry.get('avg_rrr')
-                    cnt = int(entry.get('completed') or 0)
+                    sym = entry.get("symbol")
+                    rate = entry.get("success_rate")
+                    expectancy = entry.get("expectancy")
+                    avg_rrr = entry.get("avg_rrr")
+                    cnt = int(entry.get("completed") or 0)
                     bit = f"{sym}"
                     if expectancy is not None:
                         bit += f" {float(expectancy):+.2f}R"
@@ -1361,14 +1582,14 @@ class App(tk.Tk):
             if best_bits:
                 status_parts.append("Leaders: " + ", ".join(best_bits))
 
-        cat_summary = data.get('category_summary') or []
+        cat_summary = data.get("category_summary") or []
         if isinstance(cat_summary, list) and cat_summary:
             cat_bits = []
             for entry in cat_summary:
                 try:
-                    cat = entry.get('category')
-                    rate = entry.get('success_rate')
-                    expectancy = entry.get('expectancy')
+                    cat = entry.get("category")
+                    rate = entry.get("success_rate")
+                    expectancy = entry.get("expectancy")
                     snippet = f"{cat}"
                     if expectancy is not None:
                         snippet += f" {float(expectancy):+.2f}R"
@@ -1380,8 +1601,8 @@ class App(tk.Tk):
             if cat_bits:
                 status_parts.append("By category: " + ", ".join(cat_bits))
 
-        global_expectancy = data.get('global_expectancy')
-        global_avg_rrr = data.get('global_avg_rrr')
+        global_expectancy = data.get("global_expectancy")
+        global_avg_rrr = data.get("global_avg_rrr")
         if isinstance(global_expectancy, (int, float)):
             extra = f"Global edge {float(global_expectancy):+.2f}R"
             if isinstance(global_avg_rrr, (int, float)):
@@ -1393,69 +1614,99 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        prox_table = getattr(self, 'prox_table', None)
+        prox_table = getattr(self, "prox_table", None)
         if prox_table is not None:
             try:
                 prox_table.delete(*prox_table.get_children())
             except Exception:
                 pass
             table_rows: list[tuple[str, str, int, int, int, str, str, str]] = []
-            sweet = data.get('sweet_bin')
-            if isinstance(sweet, dict) and sweet.get('expectancy') is not None:
-                completed_global = int(data.get('completed_trades') or 0)
-                pending_global = int(data.get('pending_trades') or 0)
+            sweet = data.get("sweet_bin")
+            if isinstance(sweet, dict) and sweet.get("expectancy") is not None:
+                completed_global = int(data.get("completed_trades") or 0)
+                pending_global = int(data.get("pending_trades") or 0)
                 total_global = completed_global + pending_global
-                sr = sweet.get('success_rate')
-                avg_rrr = sweet.get('avg_rrr')
-                expectancy = sweet.get('expectancy')
-                table_rows.append((
-                    'All',
-                    str(sweet.get('label') or ''),
-                    completed_global,
-                    total_global,
-                    pending_global,
-                    f"{float(sr) * 100:.1f}%" if isinstance(sr, (int, float)) else '–',
-                    f"{float(avg_rrr):.2f}" if isinstance(avg_rrr, (int, float)) else '–',
-                    f"{float(expectancy):+.2f}" if isinstance(expectancy, (int, float)) else '–',
-                ))
+                sr = sweet.get("success_rate")
+                avg_rrr = sweet.get("avg_rrr")
+                expectancy = sweet.get("expectancy")
+                table_rows.append(
+                    (
+                        "All",
+                        str(sweet.get("label") or ""),
+                        completed_global,
+                        total_global,
+                        pending_global,
+                        (
+                            f"{float(sr) * 100:.1f}%"
+                            if isinstance(sr, (int, float))
+                            else "–"
+                        ),
+                        (
+                            f"{float(avg_rrr):.2f}"
+                            if isinstance(avg_rrr, (int, float))
+                            else "–"
+                        ),
+                        (
+                            f"{float(expectancy):+.2f}"
+                            if isinstance(expectancy, (int, float))
+                            else "–"
+                        ),
+                    )
+                )
 
-            cat_spots = data.get('category_sweet_spots') or []
+            cat_spots = data.get("category_sweet_spots") or []
             if isinstance(cat_spots, list):
                 try:
                     cat_spots = sorted(
                         (spot for spot in cat_spots if isinstance(spot, dict)),
-                        key=lambda s: float(s.get('expectancy') or 0.0),
+                        key=lambda s: float(s.get("expectancy") or 0.0),
                         reverse=True,
                     )
                 except Exception:
                     pass
                 for spot in cat_spots:
                     try:
-                        category = spot.get('category', '')
-                        label = spot.get('label', '')
-                        completed = int(spot.get('completed') or 0)
-                        total = int(spot.get('total') or completed)
-                        pending = int(spot.get('pending') or max(0, total - completed))
-                        sr = spot.get('success_rate')
-                        avg_rrr = spot.get('avg_rrr')
-                        expectancy = spot.get('expectancy')
-                        table_rows.append((
-                            str(category or ''),
-                            str(label or ''),
-                            completed,
-                            total,
-                            pending,
-                            f"{float(sr) * 100:.1f}%" if isinstance(sr, (int, float)) else '–',
-                            f"{float(avg_rrr):.2f}" if isinstance(avg_rrr, (int, float)) else '–',
-                            f"{float(expectancy):+.2f}" if isinstance(expectancy, (int, float)) else '–',
-                        ))
+                        category = spot.get("category", "")
+                        label = spot.get("label", "")
+                        completed = int(spot.get("completed") or 0)
+                        total = int(spot.get("total") or completed)
+                        pending = int(spot.get("pending") or max(0, total - completed))
+                        sr = spot.get("success_rate")
+                        avg_rrr = spot.get("avg_rrr")
+                        expectancy = spot.get("expectancy")
+                        table_rows.append(
+                            (
+                                str(category or ""),
+                                str(label or ""),
+                                completed,
+                                total,
+                                pending,
+                                (
+                                    f"{float(sr) * 100:.1f}%"
+                                    if isinstance(sr, (int, float))
+                                    else "–"
+                                ),
+                                (
+                                    f"{float(avg_rrr):.2f}"
+                                    if isinstance(avg_rrr, (int, float))
+                                    else "–"
+                                ),
+                                (
+                                    f"{float(expectancy):+.2f}"
+                                    if isinstance(expectancy, (int, float))
+                                    else "–"
+                                ),
+                            )
+                        )
                     except Exception:
                         continue
             if not table_rows:
-                table_rows.append(('–', 'Not enough trades yet', 0, 0, 0, '–', '–', '–'))
+                table_rows.append(
+                    ("–", "Not enough trades yet", 0, 0, 0, "–", "–", "–")
+                )
             for row in table_rows:
                 try:
-                    prox_table.insert('', tk.END, values=row)
+                    prox_table.insert("", tk.END, values=row)
                 except Exception:
                     continue
 
@@ -1470,38 +1721,43 @@ class App(tk.Tk):
 
         ax_bins.clear()
         ax_symbols.clear()
-        ax_bins.set_ylabel('Expectancy (R)')
-        ax_bins.grid(True, axis='y', linestyle='--', alpha=0.3)
+        ax_bins.set_ylabel("Expectancy (R)")
+        ax_bins.grid(True, axis="y", linestyle="--", alpha=0.3)
         ax_bins.set_ylim(-1.5, 1.5)
-        ax_symbols.set_xlabel('Average proximity to SL at entry')
-        ax_symbols.set_ylabel('Expectancy (R multiples)')
+        ax_symbols.set_xlabel("Average proximity to SL at entry")
+        ax_symbols.set_ylabel("Expectancy (R multiples)")
         ax_symbols.set_ylim(-1.5, 2.5)
-        ax_symbols.grid(True, linestyle='--', alpha=0.3)
+        ax_symbols.grid(True, linestyle="--", alpha=0.3)
 
-        bin_stats = [b for b in (data.get('bin_stats') or []) if isinstance(b, dict)]
-        plot_bins = [b for b in bin_stats if (b.get('completed') or 0) > 0]
+        bin_stats = [b for b in (data.get("bin_stats") or []) if isinstance(b, dict)]
+        plot_bins = [b for b in bin_stats if (b.get("completed") or 0) > 0]
         sweet_label = None
-        sweet = data.get('sweet_bin')
+        sweet = data.get("sweet_bin")
         if isinstance(sweet, dict):
-            sweet_label = sweet.get('label')
+            sweet_label = sweet.get("label")
 
-        global_expectancy = data.get('global_expectancy')
+        global_expectancy = data.get("global_expectancy")
 
         if plot_bins:
             x_vals = list(range(len(plot_bins)))
-            labels = [str(b.get('label')) for b in plot_bins]
-            success_rates = [float(b.get('success_rate') or 0.0) for b in plot_bins]
-            counts = [int(b.get('completed') or 0) for b in plot_bins]
-            expectancies_raw = [b.get('expectancy') for b in plot_bins]
-            avg_rrrs = [b.get('avg_rrr') for b in plot_bins]
-            colors = ['#2ca02c' if b.get('label') == sweet_label else '#4c72b0' for b in plot_bins]
+            labels = [str(b.get("label")) for b in plot_bins]
+            success_rates = [float(b.get("success_rate") or 0.0) for b in plot_bins]
+            counts = [int(b.get("completed") or 0) for b in plot_bins]
+            expectancies_raw = [b.get("expectancy") for b in plot_bins]
+            avg_rrrs = [b.get("avg_rrr") for b in plot_bins]
+            colors = [
+                "#2ca02c" if b.get("label") == sweet_label else "#4c72b0"
+                for b in plot_bins
+            ]
             exp_values = []
             for raw in expectancies_raw:
                 if isinstance(raw, (int, float)):
                     exp_values.append(float(raw))
                 else:
                     exp_values.append(0.0)
-            valid_exp = [float(raw) for raw in expectancies_raw if isinstance(raw, (int, float))]
+            valid_exp = [
+                float(raw) for raw in expectancies_raw if isinstance(raw, (int, float))
+            ]
             if valid_exp:
                 min_val = min(valid_exp + [0.0])
                 max_val = max(valid_exp + [0.0])
@@ -1509,12 +1765,13 @@ class App(tk.Tk):
                 ax_bins.set_ylim(min_val - padding, max_val + padding)
             else:
                 ax_bins.set_ylim(-1.5, 1.5)
-            ax_bins.axhline(0, color='#cccccc', linewidth=0.8)
+            ax_bins.axhline(0, color="#cccccc", linewidth=0.8)
             bars = ax_bins.bar(x_vals, exp_values, color=colors, alpha=0.85)
             span = ax_bins.get_ylim()[1] - ax_bins.get_ylim()[0]
             offset = max(0.1, span * 0.05)
             for xi, bar, sr, count, raw_exp, avg_rrr in zip(
-                    x_vals, bars, success_rates, counts, expectancies_raw, avg_rrrs):
+                x_vals, bars, success_rates, counts, expectancies_raw, avg_rrrs
+            ):
                 center_x = bar.get_x() + bar.get_width() / 2
                 if isinstance(raw_exp, (int, float)):
                     exp_text = f"{float(raw_exp):+.2f}R"
@@ -1527,84 +1784,138 @@ class App(tk.Tk):
                     hit_text = f"{sr * 100:.0f}% ({count})"
                 elif count > 0:
                     hit_text = f"({count})"
-                va = 'bottom' if exp_val >= 0 else 'top'
+                va = "bottom" if exp_val >= 0 else "top"
                 text_y = exp_val + (offset if exp_val >= 0 else -offset)
                 label_lines = [exp_text]
                 if hit_text:
                     label_lines.append(hit_text)
                 if isinstance(avg_rrr, (int, float)):
                     label_lines.append(f"RRR {float(avg_rrr):.2f}")
-                ax_bins.text(center_x, text_y, '\n'.join(label_lines),
-                             ha='center', va=va, fontsize=8, color='#2f4b7c')
+                ax_bins.text(
+                    center_x,
+                    text_y,
+                    "\n".join(label_lines),
+                    ha="center",
+                    va=va,
+                    fontsize=8,
+                    color="#2f4b7c",
+                )
             ax_bins.set_xticks(x_vals)
-            ax_bins.set_xticklabels(labels, rotation=45, ha='right')
+            ax_bins.set_xticklabels(labels, rotation=45, ha="right")
         else:
-            ax_bins.text(0.5, 0.5, 'No completed hits in range yet.', ha='center', va='center',
-                         transform=ax_bins.transAxes, fontsize=10)
+            ax_bins.text(
+                0.5,
+                0.5,
+                "No completed hits in range yet.",
+                ha="center",
+                va="center",
+                transform=ax_bins.transAxes,
+                fontsize=10,
+            )
 
         if isinstance(global_expectancy, (int, float)):
-            ax_bins.axhline(float(global_expectancy), color='#dd8452', linestyle='--', linewidth=1,
-                            label='Overall expectancy')
-            ax_bins.legend(loc='upper left')
-            ax_symbols.axhline(float(global_expectancy), color='#dd8452', linestyle='--', linewidth=1,
-                               label='Overall expectancy')
+            ax_bins.axhline(
+                float(global_expectancy),
+                color="#dd8452",
+                linestyle="--",
+                linewidth=1,
+                label="Overall expectancy",
+            )
+            ax_bins.legend(loc="upper left")
+            ax_symbols.axhline(
+                float(global_expectancy),
+                color="#dd8452",
+                linestyle="--",
+                linewidth=1,
+                label="Overall expectancy",
+            )
 
-        symbol_stats = [s for s in (data.get('symbol_stats') or []) if isinstance(s, dict)]
+        symbol_stats = [
+            s for s in (data.get("symbol_stats") or []) if isinstance(s, dict)
+        ]
         if symbol_stats:
             cat_colors = {
-                'Forex': '#1f77b4',
-                'Crypto': '#ff7f0e',
-                'Indices': '#2ca02c',
+                "Forex": "#1f77b4",
+                "Crypto": "#ff7f0e",
+                "Indices": "#2ca02c",
             }
             used_labels: set[str] = set()
             max_avg = 0.0
             min_exp = None
             max_exp = None
             for entry in symbol_stats:
-                avg = float(entry.get('avg_prox_completed') or entry.get('avg_prox') or 0.0)
-                expectancy = entry.get('expectancy')
+                avg = float(
+                    entry.get("avg_prox_completed") or entry.get("avg_prox") or 0.0
+                )
+                expectancy = entry.get("expectancy")
                 if expectancy is None:
                     continue
-                success = entry.get('success_rate')
-                completed = int(entry.get('completed') or 0)
-                cat = str(entry.get('category') or 'Forex')
-                color = cat_colors.get(cat, '#7f7f7f')
+                success = entry.get("success_rate")
+                completed = int(entry.get("completed") or 0)
+                cat = str(entry.get("category") or "Forex")
+                color = cat_colors.get(cat, "#7f7f7f")
                 label = cat if cat not in used_labels else None
                 used_labels.add(cat)
                 size = max(50, min(260, 50 + completed * 18))
-                edge_color = '#2ca02c' if expectancy > 0 else '#d62728'
-                ax_symbols.scatter(avg, expectancy, s=size, color=color, alpha=0.78,
-                                   edgecolors=edge_color, linewidths=1.0, label=label)
-                if entry in (data.get('best_symbols') or []):
-                    label_text = entry.get('symbol')
+                edge_color = "#2ca02c" if expectancy > 0 else "#d62728"
+                ax_symbols.scatter(
+                    avg,
+                    expectancy,
+                    s=size,
+                    color=color,
+                    alpha=0.78,
+                    edgecolors=edge_color,
+                    linewidths=1.0,
+                    label=label,
+                )
+                if entry in (data.get("best_symbols") or []):
+                    label_text = entry.get("symbol")
                     if success is not None:
                         label_text += f" {float(success) * 100:.0f}%"
-                    ax_symbols.annotate(label_text, xy=(avg, expectancy), xytext=(0, 6),
-                                        textcoords='offset points', ha='center', fontsize=9)
+                    ax_symbols.annotate(
+                        label_text,
+                        xy=(avg, expectancy),
+                        xytext=(0, 6),
+                        textcoords="offset points",
+                        ha="center",
+                        fontsize=9,
+                    )
                 max_avg = max(max_avg, avg)
                 if min_exp is None or expectancy < min_exp:
                     min_exp = expectancy
                 if max_exp is None or expectancy > max_exp:
                     max_exp = expectancy
             if used_labels:
-                ax_symbols.legend(loc='lower right', title='Category')
+                ax_symbols.legend(loc="lower right", title="Category")
             ax_symbols.set_xlim(0, max(1.05, max_avg * 1.15))
             if min_exp is not None and max_exp is not None:
                 span = max_exp - min_exp
                 pad = max(0.2, span * 0.15)
                 ax_symbols.set_ylim(min_exp - pad, max_exp + pad)
         else:
-            ax_symbols.text(0.5, 0.5, f"Need ≥ {data.get('min_trades', 1)} completed trades per symbol",
-                            ha='center', va='center', transform=ax_symbols.transAxes, fontsize=10)
+            ax_symbols.text(
+                0.5,
+                0.5,
+                f"Need ≥ {data.get('min_trades', 1)} completed trades per symbol",
+                ha="center",
+                va="center",
+                transform=ax_symbols.transAxes,
+                fontsize=10,
+            )
             ax_symbols.set_xlim(0, 1.0)
             ax_symbols.set_ylim(-1.0, 1.0)
             if isinstance(global_expectancy, (int, float)):
-                ax_symbols.legend(loc='lower right')
+                ax_symbols.legend(loc="lower right")
 
-        sweet = data.get('sweet_bin')
-        if isinstance(sweet, dict) and sweet.get('midpoint') is not None:
+        sweet = data.get("sweet_bin")
+        if isinstance(sweet, dict) and sweet.get("midpoint") is not None:
             try:
-                ax_symbols.axvline(float(sweet['midpoint']), color='#2ca02c', linestyle=':', linewidth=1)
+                ax_symbols.axvline(
+                    float(sweet["midpoint"]),
+                    color="#2ca02c",
+                    linestyle=":",
+                    linewidth=1,
+                )
             except Exception:
                 pass
 
@@ -1624,17 +1935,21 @@ class App(tk.Tk):
         row1 = ttk.Frame(top)
         row1.pack(side=tk.TOP, fill=tk.X)
         ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=1, to=24 * 365, textvariable=self.var_top_since_hours,
-                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Spinbox(
+            row1, from_=1, to=24 * 365, textvariable=self.var_top_since_hours, width=6
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(row1, text="Min trades:").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=1, to=500, textvariable=self.var_top_min_trades,
-                    width=4).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Spinbox(
+            row1, from_=1, to=500, textvariable=self.var_top_min_trades, width=4
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Button(row1, text="Refresh", command=self._top_refresh).pack(side=tk.LEFT)
-        ttk.Checkbutton(row1, text="Auto", variable=self.var_top_auto,
-                        command=self._top_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Checkbutton(
+            row1, text="Auto", variable=self.var_top_auto, command=self._top_auto_toggle
+        ).pack(side=tk.LEFT, padx=(10, 4))
         ttk.Label(row1, text="Every(s):").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=15, to=3600, textvariable=self.var_top_interval,
-                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Spinbox(
+            row1, from_=15, to=3600, textvariable=self.var_top_interval, width=6
+        ).pack(side=tk.LEFT, padx=(4, 10))
 
         chart_wrap = ttk.Frame(parent)
         chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -1643,8 +1958,18 @@ class App(tk.Tk):
 
         table_frame = ttk.Frame(chart_wrap)
         table_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 6))
-        cols = ("rank", "symbol", "trades", "win_rate", "expectancy", "avg_rrr", "score")
-        self.top_table = ttk.Treeview(table_frame, columns=cols, show='headings', height=10)
+        cols = (
+            "rank",
+            "symbol",
+            "trades",
+            "win_rate",
+            "expectancy",
+            "avg_rrr",
+            "score",
+        )
+        self.top_table = ttk.Treeview(
+            table_frame, columns=cols, show="headings", height=10
+        )
         headings = {
             "rank": "Rank",
             "symbol": "Symbol",
@@ -1663,7 +1988,9 @@ class App(tk.Tk):
         self.top_table.column("expectancy", width=80, anchor=tk.E)
         self.top_table.column("avg_rrr", width=80, anchor=tk.E)
         self.top_table.column("score", width=60, anchor=tk.E)
-        vs_table = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.top_table.yview)
+        vs_table = ttk.Scrollbar(
+            table_frame, orient=tk.VERTICAL, command=self.top_table.yview
+        )
         self.top_table.configure(yscrollcommand=vs_table.set)
         self.top_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs_table.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1673,7 +2000,9 @@ class App(tk.Tk):
 
         if FigureCanvasTkAgg is None or Figure is None:
             try:
-                self.top_status.config(text="Matplotlib not available; charts disabled.")
+                self.top_status.config(
+                    text="Matplotlib not available; charts disabled."
+                )
             except Exception:
                 pass
 
@@ -1736,9 +2065,9 @@ class App(tk.Tk):
         min_trades = max(1, int(self.var_top_min_trades.get()))
 
         payload: dict[str, object] = {
-            'error': None,
-            'since_hours': hours,
-            'min_trades': min_trades,
+            "error": None,
+            "since_hours": hours,
+            "min_trades": min_trades,
         }
         rows: list[dict[str, object]] = []
 
@@ -1752,31 +2081,48 @@ class App(tk.Tk):
             try:
                 cur = conn.cursor()
                 try:
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_setups_inserted_at ON timelapse_setups(inserted_at)")
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_setups_inserted_at ON timelapse_setups(inserted_at)"
+                    )
                 except Exception:
                     pass
                 try:
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_hits_setup_id ON timelapse_hits(setup_id)")
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_hits_setup_id ON timelapse_hits(setup_id)"
+                    )
                 except Exception:
                     pass
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'"
+                )
                 if cur.fetchone() is None:
-                    payload['rows'] = []
+                    payload["rows"] = []
                 else:
-                    thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
-                    sql = (
-                        """
+                    thr = (
+                        datetime.now(timezone.utc) - timedelta(hours=hours)
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+                    sql = """
                         SELECT s.symbol, s.proximity_to_sl, s.rrr, s.inserted_at, h.hit, h.hit_time, h.entry_price, h.hit_price, h.sl, s.direction
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
                         WHERE s.inserted_at >= ?
                         ORDER BY s.inserted_at DESC
                         """
-                    )
                     cur.execute(sql, (thr,))
                     raw_rows = cur.fetchmany(100000) or []
-                    for symbol, prox_raw, rrr_raw, inserted_at, hit, hit_time, entry_price, hit_price, sl_val, direction in raw_rows:
-                        symbol_s = str(symbol) if symbol is not None else ''
+                    for (
+                        symbol,
+                        prox_raw,
+                        rrr_raw,
+                        inserted_at,
+                        hit,
+                        hit_time,
+                        entry_price,
+                        hit_price,
+                        sl_val,
+                        direction,
+                    ) in raw_rows:
+                        symbol_s = str(symbol) if symbol is not None else ""
                         if prox_raw is None:
                             continue
                         try:
@@ -1789,54 +2135,61 @@ class App(tk.Tk):
                                 rrr_val = float(rrr_raw)
                             except Exception:
                                 rrr_val = None
-                        hit_str = (hit or '')
+                        hit_str = hit or ""
                         outcome = None
                         if isinstance(hit_str, str):
                             u = hit_str.upper()
-                            if u == 'TP':
-                                outcome = 'win'
-                            elif u == 'SL':
-                                outcome = 'loss'
+                            if u == "TP":
+                                outcome = "win"
+                            elif u == "SL":
+                                outcome = "loss"
 
                         # Calculate trade R multiple
                         trade_r = None
-                        if outcome in ['win', 'loss'] and entry_price and hit_price and sl_val:
+                        if (
+                            outcome in ["win", "loss"]
+                            and entry_price
+                            and hit_price
+                            and sl_val
+                        ):
                             try:
                                 ep = float(entry_price)
                                 hp = float(hit_price)
                                 slp = float(sl_val)
-                                dir_s = (str(direction) or '').lower()
-                                profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
-                                risk = (ep - slp) if dir_s == 'buy' else (slp - ep)
+                                dir_s = (str(direction) or "").lower()
+                                profit = (hp - ep) if dir_s == "buy" else (ep - hp)
+                                risk = (ep - slp) if dir_s == "buy" else (slp - ep)
                                 if risk > 0:
                                     trade_r = profit / risk
                             except Exception:
                                 pass
 
-                        rows.append({
-                            'symbol': symbol_s,
-                            'proximity': prox_val,
-                            'rrr': rrr_val,
-                            'outcome': outcome,
-                            'trade_r': trade_r,
-                            'inserted_at': inserted_at,
-                            'hit_time': hit_time,
-                        })
+                        rows.append(
+                            {
+                                "symbol": symbol_s,
+                                "proximity": prox_val,
+                                "rrr": rrr_val,
+                                "outcome": outcome,
+                                "trade_r": trade_r,
+                                "inserted_at": inserted_at,
+                                "hit_time": hit_time,
+                            }
+                        )
             finally:
                 try:
                     conn.close()
                 except Exception:
                     pass
         except Exception as exc:
-            payload['error'] = str(exc)
+            payload["error"] = str(exc)
 
-        payload['rows'] = rows
+        payload["rows"] = rows
 
         self.after(0, lambda: self._top_apply_result(payload))
 
     def _top_apply_result(self, payload: dict[str, object]) -> None:
         self._top_loading = False
-        error = payload.get('error')
+        error = payload.get("error")
         if error:
             if self.top_status is not None:
                 try:
@@ -1846,7 +2199,7 @@ class App(tk.Tk):
             self._top_schedule_next()
             return
 
-        rows = payload.get('rows')
+        rows = payload.get("rows")
         if not isinstance(rows, list):
             rows = []
 
@@ -1881,9 +2234,11 @@ class App(tk.Tk):
                 pass
         self._top_schedule_next()
 
-    def _top_compute_stats(self, rows: list[dict[str, object]], payload: dict[str, object]) -> dict[str, object]:
-        hours = payload.get('since_hours', 0)
-        min_trades = payload.get('min_trades', 1)
+    def _top_compute_stats(
+        self, rows: list[dict[str, object]], payload: dict[str, object]
+    ) -> dict[str, object]:
+        hours = payload.get("since_hours", 0)
+        min_trades = payload.get("min_trades", 1)
         try:
             min_trades_int = max(1, int(min_trades))
         except Exception:
@@ -1892,57 +2247,60 @@ class App(tk.Tk):
         symbol_stats: dict[str, dict[str, object]] = {}
 
         for row in rows:
-            symbol = str(row.get('symbol') or '')
-            outcome = row.get('outcome')
-            rrr_val = row.get('rrr')
-            trade_r = row.get('trade_r')
-            inserted_at = row.get('inserted_at')
-            hit_time = row.get('hit_time')
+            symbol = str(row.get("symbol") or "")
+            outcome = row.get("outcome")
+            rrr_val = row.get("rrr")
+            trade_r = row.get("trade_r")
+            inserted_at = row.get("inserted_at")
+            hit_time = row.get("hit_time")
 
             # Use hit_time for completed trades, inserted_at for pending trades
             event_time = hit_time if hit_time else inserted_at
 
-            stat = symbol_stats.setdefault(symbol, {
-                'symbol': symbol,
-                'trades': 0,
-                'completed': 0,
-                'wins': 0,
-                'losses': 0,
-                'sum_rrr_wins': 0.0,
-                'sum_trade_r': 0.0,
-                'recent_trades': [],  # For recency weighting
-            })
+            stat = symbol_stats.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "trades": 0,
+                    "completed": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "sum_rrr_wins": 0.0,
+                    "sum_trade_r": 0.0,
+                    "recent_trades": [],  # For recency weighting
+                },
+            )
 
-            stat['trades'] = int(stat['trades']) + 1
+            stat["trades"] = int(stat["trades"]) + 1
 
             # Add to recent trades for recency calculation
             if event_time:
-                stat['recent_trades'].append({
-                    'time': event_time,
-                    'outcome': outcome,
-                    'trade_r': trade_r
-                })
+                stat["recent_trades"].append(
+                    {"time": event_time, "outcome": outcome, "trade_r": trade_r}
+                )
 
-            if outcome in ['win', 'loss']:
-                stat['completed'] = int(stat['completed']) + 1
-                if outcome == 'win':
-                    stat['wins'] = int(stat['wins']) + 1
+            if outcome in ["win", "loss"]:
+                stat["completed"] = int(stat["completed"]) + 1
+                if outcome == "win":
+                    stat["wins"] = int(stat["wins"]) + 1
                     if rrr_val is not None:
-                        stat['sum_rrr_wins'] = float(stat.get('sum_rrr_wins', 0.0)) + rrr_val
+                        stat["sum_rrr_wins"] = (
+                            float(stat.get("sum_rrr_wins", 0.0)) + rrr_val
+                        )
                 else:
-                    stat['losses'] = int(stat['losses']) + 1
+                    stat["losses"] = int(stat["losses"]) + 1
 
                 if trade_r is not None:
-                    stat['sum_trade_r'] = float(stat.get('sum_trade_r', 0.0)) + trade_r
+                    stat["sum_trade_r"] = float(stat.get("sum_trade_r", 0.0)) + trade_r
 
         # Calculate metrics and scores for each symbol
         results = []
         now = datetime.now(timezone.utc)
 
         for symbol, stat in symbol_stats.items():
-            trades = int(stat['trades'])
-            completed = int(stat['completed'])
-            wins = int(stat['wins'])
+            trades = int(stat["trades"])
+            completed = int(stat["completed"])
+            wins = int(stat["wins"])
 
             if completed < min_trades_int:
                 continue
@@ -1951,29 +2309,37 @@ class App(tk.Tk):
             win_rate = wins / completed if completed > 0 else 0.0
 
             # Expectancy (30% weight) - average R multiple per trade
-            avg_trade_r = float(stat.get('sum_trade_r', 0.0)) / completed if completed > 0 else 0.0
+            avg_trade_r = (
+                float(stat.get("sum_trade_r", 0.0)) / completed
+                if completed > 0
+                else 0.0
+            )
 
             # Skip symbols with negative expectancy (losing symbols)
             if avg_trade_r <= 0:
                 continue
 
             # Average RRR (15% weight)
-            avg_rrr = float(stat.get('sum_rrr_wins', 0.0)) / wins if wins > 0 else 0.0
+            avg_rrr = float(stat.get("sum_rrr_wins", 0.0)) / wins if wins > 0 else 0.0
 
             # Trade Frequency Factor (10% weight) - more trades = more reliable
-            frequency_factor = min(1.0, completed / 50.0)  # Normalize to max at 50 trades
+            frequency_factor = min(
+                1.0, completed / 50.0
+            )  # Normalize to max at 50 trades
 
             # Recency Factor (5% weight) - recent performance weighted higher
             recency_factor = 0.0
-            recent_trades = stat.get('recent_trades', [])
+            recent_trades = stat.get("recent_trades", [])
             if recent_trades:
                 recent_weight = 0.0
                 recent_score = 0.0
                 for trade in recent_trades:
                     try:
-                        trade_time = trade['time']
+                        trade_time = trade["time"]
                         if isinstance(trade_time, str):
-                            trade_dt = datetime.fromisoformat(trade_time.replace('Z', '+00:00'))
+                            trade_dt = datetime.fromisoformat(
+                                trade_time.replace("Z", "+00:00")
+                            )
                         else:
                             trade_dt = trade_time
 
@@ -1983,7 +2349,7 @@ class App(tk.Tk):
                             recent_weight += weight
 
                             # Score recent performance (wins=1, losses=0)
-                            recent_score += weight if trade['outcome'] == 'win' else 0
+                            recent_score += weight if trade["outcome"] == "win" else 0
                     except Exception:
                         continue
 
@@ -1991,38 +2357,46 @@ class App(tk.Tk):
                     recency_factor = recent_score / recent_weight
 
             # Calculate weighted score
-            score = (win_rate * 0.4) + (avg_trade_r * 0.3) + (avg_rrr * 0.15) + (frequency_factor * 0.1) + (recency_factor * 0.05)
+            score = (
+                (win_rate * 0.4)
+                + (avg_trade_r * 0.3)
+                + (avg_rrr * 0.15)
+                + (frequency_factor * 0.1)
+                + (recency_factor * 0.05)
+            )
 
-            results.append({
-                'symbol': symbol,
-                'trades': completed,
-                'win_rate': win_rate,
-                'expectancy': avg_trade_r,
-                'avg_rrr': avg_rrr,
-                'score': score,
-                'frequency_factor': frequency_factor,
-                'recency_factor': recency_factor,
-            })
+            results.append(
+                {
+                    "symbol": symbol,
+                    "trades": completed,
+                    "win_rate": win_rate,
+                    "expectancy": avg_trade_r,
+                    "avg_rrr": avg_rrr,
+                    "score": score,
+                    "frequency_factor": frequency_factor,
+                    "recency_factor": recency_factor,
+                }
+            )
 
         # Sort by score and take top 10
-        results.sort(key=lambda x: x['score'], reverse=True)
+        results.sort(key=lambda x: x["score"], reverse=True)
         top_results = results[:10]
 
         return {
-            'top_performers': top_results,
-            'total_symbols': len(symbol_stats),
-            'since_hours': hours,
-            'min_trades': min_trades_int,
+            "top_performers": top_results,
+            "total_symbols": len(symbol_stats),
+            "since_hours": hours,
+            "min_trades": min_trades_int,
         }
 
     def _top_render(self, data: dict[str, object]) -> None:
         if self.top_status is None:
             return
 
-        top_performers = data.get('top_performers', [])
-        total_symbols = data.get('total_symbols', 0)
-        since_hours = data.get('since_hours', 0)
-        min_trades = data.get('min_trades', 1)
+        top_performers = data.get("top_performers", [])
+        total_symbols = data.get("total_symbols", 0)
+        since_hours = data.get("since_hours", 0)
+        min_trades = data.get("min_trades", 1)
 
         # Update status
         try:
@@ -2032,7 +2406,7 @@ class App(tk.Tk):
             pass
 
         # Update table
-        top_table = getattr(self, 'top_table', None)
+        top_table = getattr(self, "top_table", None)
         if top_table is not None:
             try:
                 top_table.delete(*top_table.get_children())
@@ -2041,12 +2415,12 @@ class App(tk.Tk):
 
             for i, performer in enumerate(top_performers, 1):
                 try:
-                    symbol = performer.get('symbol', '')
-                    trades = performer.get('trades', 0)
-                    win_rate = performer.get('win_rate', 0.0)
-                    expectancy = performer.get('expectancy', 0.0)
-                    avg_rrr = performer.get('avg_rrr', 0.0)
-                    score = performer.get('score', 0.0)
+                    symbol = performer.get("symbol", "")
+                    trades = performer.get("trades", 0)
+                    win_rate = performer.get("win_rate", 0.0)
+                    expectancy = performer.get("expectancy", 0.0)
+                    avg_rrr = performer.get("avg_rrr", 0.0)
+                    score = performer.get("score", 0.0)
 
                     row = (
                         i,
@@ -2057,7 +2431,7 @@ class App(tk.Tk):
                         f"{avg_rrr:.2f}",
                         f"{score:.3f}",
                     )
-                    top_table.insert('', tk.END, values=row)
+                    top_table.insert("", tk.END, values=row)
                 except Exception:
                     continue
 
@@ -2079,43 +2453,56 @@ class App(tk.Tk):
         ax = self._top_ax
         ax.clear()
 
-        top_performers = data.get('top_performers', [])
+        top_performers = data.get("top_performers", [])
         if not top_performers:
-            ax.text(0.5, 0.5, 'No data available', ha='center', va='center',
-                   transform=ax.transAxes, fontsize=12)
+            ax.text(
+                0.5,
+                0.5,
+                "No data available",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=12,
+            )
             if self._top_canvas is not None:
                 self._top_canvas.draw_idle()
             return
 
         # Prepare data for chart
-        symbols = [p.get('symbol', '') for p in top_performers]
-        scores = [p.get('score', 0.0) for p in top_performers]
-        win_rates = [p.get('win_rate', 0.0) for p in top_performers]
+        symbols = [p.get("symbol", "") for p in top_performers]
+        scores = [p.get("score", 0.0) for p in top_performers]
+        win_rates = [p.get("win_rate", 0.0) for p in top_performers]
 
         # Create horizontal bar chart
         y_pos = range(len(symbols))
-        bars = ax.barh(y_pos, scores, color='#2ca02c', alpha=0.7)
+        bars = ax.barh(y_pos, scores, color="#2ca02c", alpha=0.7)
 
         # Color bars based on win rate
         for i, (bar, win_rate) in enumerate(zip(bars, win_rates)):
             if win_rate >= 0.7:
-                bar.set_color('#2ca02c')  # Green for high win rate
+                bar.set_color("#2ca02c")  # Green for high win rate
             elif win_rate >= 0.5:
-                bar.set_color('#ff7f0e')  # Orange for medium win rate
+                bar.set_color("#ff7f0e")  # Orange for medium win rate
             else:
-                bar.set_color('#d62728')  # Red for low win rate
+                bar.set_color("#d62728")  # Red for low win rate
 
         ax.set_yticks(y_pos)
         ax.set_yticklabels(symbols)
-        ax.set_xlabel('Performance Score')
-        ax.set_title('Top 10 Performing Symbols')
-        ax.grid(True, axis='x', linestyle='--', alpha=0.3)
+        ax.set_xlabel("Performance Score")
+        ax.set_title("Top 10 Performing Symbols")
+        ax.grid(True, axis="x", linestyle="--", alpha=0.3)
 
         # Add score labels on bars
         for i, (bar, score) in enumerate(zip(bars, scores)):
             width = bar.get_width()
-            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2,
-                   f'{score:.3f}', ha='left', va='center', fontsize=9)
+            ax.text(
+                width + 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{score:.3f}",
+                ha="left",
+                va="center",
+                fontsize=9,
+            )
 
         ax.set_xlim(0, max(scores) * 1.15 if scores else 1.0)
 
@@ -2148,7 +2535,9 @@ class App(tk.Tk):
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.top_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.top_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._top_toolbar = toolbar
@@ -2167,23 +2556,31 @@ class App(tk.Tk):
         row1 = ttk.Frame(top)
         row1.pack(side=tk.TOP, fill=tk.X)
         ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
-        ttk.Spinbox(row1, from_=1, to=24*365, textvariable=self.var_since_hours, width=6).pack(side=tk.LEFT, padx=6)
+        ttk.Spinbox(
+            row1, from_=1, to=24 * 365, textvariable=self.var_since_hours, width=6
+        ).pack(side=tk.LEFT, padx=6)
         ttk.Button(row1, text="Refresh", command=self._pnl_refresh).pack(side=tk.LEFT)
 
         chart_wrap = ttk.Frame(parent)
 
         # 10k-notional PnL split into three charts
-        self.pnl_fx_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (10k - Forex).")
+        self.pnl_fx_status = ttk.Label(
+            chart_wrap, text="Press 'Refresh' to load PnL (10k - Forex)."
+        )
         self.pnl_fx_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
         self.pnl_fx_chart_frame = ttk.Frame(chart_wrap)
         self.pnl_fx_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.pnl_crypto_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (10k - Crypto).")
+        self.pnl_crypto_status = ttk.Label(
+            chart_wrap, text="Press 'Refresh' to load PnL (10k - Crypto)."
+        )
         self.pnl_crypto_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(8, 0))
         self.pnl_crypto_chart_frame = ttk.Frame(chart_wrap)
         self.pnl_crypto_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.pnl_indices_status = ttk.Label(chart_wrap, text="Press 'Refresh' to load PnL (10k - Indices).")
+        self.pnl_indices_status = ttk.Label(
+            chart_wrap, text="Press 'Refresh' to load PnL (10k - Indices)."
+        )
         self.pnl_indices_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(8, 0))
         self.pnl_indices_chart_frame = ttk.Frame(chart_wrap)
         self.pnl_indices_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -2250,11 +2647,15 @@ class App(tk.Tk):
         )
         self.pnl_norm_bin_combo.pack(side=tk.LEFT, padx=6)
         try:
-            self.pnl_norm_bin_combo.bind("<<ComboboxSelected>>", self._on_pnl_norm_bin_change)
+            self.pnl_norm_bin_combo.bind(
+                "<<ComboboxSelected>>", self._on_pnl_norm_bin_change
+            )
         except Exception:
             pass
 
-        ttk.Button(controls, text="Refresh", command=self._pnl_norm_refresh).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(controls, text="Refresh", command=self._pnl_norm_refresh).pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
 
         self.pnl_norm_status = ttk.Label(controls, text="Ready", anchor=tk.W)
         self.pnl_norm_status.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(12, 0))
@@ -2280,14 +2681,16 @@ class App(tk.Tk):
                 pass
         fig = Figure(figsize=(6, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('Normalized PnL')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Value')
+        ax.set_title("Normalized PnL")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Value")
         canvas = FigureCanvasTkAgg(fig, master=self.pnl_norm_chart_frame)
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.pnl_norm_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.pnl_norm_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._pnl_norm_toolbar = toolbar
@@ -2326,18 +2729,20 @@ class App(tk.Tk):
     def _pnl_norm_fetch_thread(self) -> None:
         dbname = self.var_db_name.get().strip()
         hours = max(1, int(self.var_pnl_norm_since_hours.get()))
-        payload: dict[str, object] = {'error': None}
+        payload: dict[str, object] = {"error": None}
         rows: list[tuple] = []
         bins: set[str] = set()
         try:
             import sqlite3  # type: ignore
+
             db_path = db_path_str(dbname)
             conn = sqlite3.connect(db_path, timeout=3)
             try:
                 cur = conn.cursor()
-                thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
-                sql = (
-                    """
+                thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                sql = """
                     SELECT COALESCE(h.hit_time, s.inserted_at) as event_time,
                            h.hit,
                            s.symbol,
@@ -2351,7 +2756,6 @@ class App(tk.Tk):
                     WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
                     ORDER BY COALESCE(h.hit_time, s.inserted_at) ASC
                     """
-                )
                 cur.execute(sql, (thr,))
                 rows = cur.fetchall() or []
                 for row in rows:
@@ -2365,7 +2769,7 @@ class App(tk.Tk):
                 except Exception:
                     pass
         except Exception as exc:
-            payload['error'] = str(exc)
+            payload["error"] = str(exc)
 
         times: list[datetime] = []
         symbols: list[str] = []
@@ -2375,7 +2779,7 @@ class App(tk.Tk):
         returns_notional: list[float] = []
         bin_labels: list[str] = []
 
-        if not payload.get('error') and rows:
+        if not payload.get("error") and rows:
             atr_map: dict[str, float | None] = {}
             spec_map: dict[str, dict[str, float]] = {}
             if _MT5_IMPORTED and mt5 is not None:
@@ -2400,30 +2804,30 @@ class App(tk.Tk):
                                 info = None
                             if info is not None:
                                 try:
-                                    tv = getattr(info, 'trade_tick_value', None)
+                                    tv = getattr(info, "trade_tick_value", None)
                                     if tv in (None, 0.0):
-                                        tv = getattr(info, 'tick_value', None)
+                                        tv = getattr(info, "tick_value", None)
                                     tick_value = float(tv) if tv is not None else 0.0
                                 except Exception:
                                     tick_value = 0.0
                                 try:
-                                    tsz = getattr(info, 'trade_tick_size', None)
+                                    tsz = getattr(info, "trade_tick_size", None)
                                     if tsz in (None, 0.0):
-                                        tsz = getattr(info, 'tick_size', None)
+                                        tsz = getattr(info, "tick_size", None)
                                     tick_size = float(tsz) if tsz is not None else 0.0
                                 except Exception:
                                     tick_size = 0.0
                                 try:
-                                    cs = getattr(info, 'trade_contract_size', None)
+                                    cs = getattr(info, "trade_contract_size", None)
                                     if cs in (None, 0.0):
-                                        cs = getattr(info, 'contract_size', None)
+                                        cs = getattr(info, "contract_size", None)
                                     contract_size = float(cs) if cs is not None else 0.0
                                 except Exception:
                                     contract_size = 0.0
                                 spec_map[sym] = {
-                                    'tick_value': float(tick_value),
-                                    'tick_size': float(tick_size),
-                                    'contract_size': float(contract_size),
+                                    "tick_value": float(tick_value),
+                                    "tick_size": float(tick_size),
+                                    "contract_size": float(contract_size),
                                 }
                             # Compute ATR (Wilder-like) for normalization context
                             tf = getattr(mt5, "TIMEFRAME_D1", 0)
@@ -2433,14 +2837,14 @@ class App(tk.Tk):
                             vals = []
                             for b in rates[-15:]:
                                 try:
-                                    high = float(b['high'])
-                                    low = float(b['low'])
-                                    close = float(b['close'])
+                                    high = float(b["high"])
+                                    low = float(b["low"])
+                                    close = float(b["close"])
                                 except Exception:
                                     try:
-                                        high = float(getattr(b, 'high', 0.0))
-                                        low = float(getattr(b, 'low', 0.0))
-                                        close = float(getattr(b, 'close', 0.0))
+                                        high = float(getattr(b, "high", 0.0))
+                                        low = float(getattr(b, "low", 0.0))
+                                        close = float(getattr(b, "close", 0.0))
                                     except Exception:
                                         high = low = close = 0.0
                                 vals.append((high, low, close))
@@ -2463,7 +2867,16 @@ class App(tk.Tk):
             sqrt_252 = math.sqrt(252.0)
             sqrt_365 = math.sqrt(365.0)
 
-            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction, prox_bin in rows:
+            for (
+                event_time,
+                hit,
+                symbol,
+                entry_price,
+                hit_price,
+                sl_val,
+                direction,
+                prox_bin,
+            ) in rows:
                 if not hit:
                     continue
                 dt: datetime | None = None
@@ -2472,7 +2885,9 @@ class App(tk.Tk):
                         dt = datetime.fromisoformat(event_time)
                     except Exception:
                         try:
-                            dt = datetime.strptime(event_time.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                            dt = datetime.strptime(
+                                event_time.split(".")[0], "%Y-%m-%d %H:%M:%S"
+                            )
                         except Exception:
                             dt = None
                 elif isinstance(event_time, datetime):
@@ -2500,9 +2915,9 @@ class App(tk.Tk):
                 if ep is None or hp is None or slp is None:
                     continue
 
-                dir_s = (str(direction) or '').lower()
-                profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
-                risk = (ep - slp) if dir_s == 'buy' else (slp - ep)
+                dir_s = (str(direction) or "").lower()
+                profit = (hp - ep) if dir_s == "buy" else (ep - hp)
+                risk = (ep - slp) if dir_s == "buy" else (slp - ep)
                 if risk is None or risk <= 0:
                     continue
 
@@ -2511,18 +2926,18 @@ class App(tk.Tk):
 
                 # notional 10k using contract specs when available
                 notional_profit = None
-                spec = spec_map.get(symbol) if 'spec_map' in locals() else None
+                spec = spec_map.get(symbol) if "spec_map" in locals() else None
                 if spec and ep not in (None, 0.0):
                     try:
-                        tick_value = float(spec.get('tick_value', 0.0))
+                        tick_value = float(spec.get("tick_value", 0.0))
                     except Exception:
                         tick_value = 0.0
                     try:
-                        tick_size = float(spec.get('tick_size', 0.0))
+                        tick_size = float(spec.get("tick_size", 0.0))
                     except Exception:
                         tick_size = 0.0
                     try:
-                        contract_size = float(spec.get('contract_size', 0.0))
+                        contract_size = float(spec.get("contract_size", 0.0))
                     except Exception:
                         contract_size = 0.0
                     # Volume sized so that notional ~ 10k of quote for linear instruments
@@ -2551,7 +2966,7 @@ class App(tk.Tk):
                 if atr_val is not None and atr_val > 0 and ep not in (None, 0.0):
                     try:
                         asset_kind = self._classify_symbol(symbol)
-                        sqrt_factor = sqrt_365 if asset_kind == 'crypto' else sqrt_252
+                        sqrt_factor = sqrt_365 if asset_kind == "crypto" else sqrt_252
                         annual_vol = (atr_val / ep) * sqrt_factor
                         if annual_vol > 0:
                             vol_target_return = raw_return * (target_vol / annual_vol)
@@ -2583,14 +2998,22 @@ class App(tk.Tk):
                 out.append(total)
             return out
 
-        payload['times'] = times
-        payload['symbols'] = symbols
+        payload["times"] = times
+        payload["symbols"] = symbols
         # Split series by category
         categories = {
-            'overall': list(range(len(times))),
-            'forex': [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'forex'],
-            'crypto': [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'crypto'],
-            'indices': [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'indices'],
+            "overall": list(range(len(times))),
+            "forex": [
+                i for i, s in enumerate(symbols) if self._classify_symbol(s) == "forex"
+            ],
+            "crypto": [
+                i for i, s in enumerate(symbols) if self._classify_symbol(s) == "crypto"
+            ],
+            "indices": [
+                i
+                for i, s in enumerate(symbols)
+                if self._classify_symbol(s) == "indices"
+            ],
         }
 
         def _select(idx_list: list[int], seq: list[float]) -> list[float]:
@@ -2607,27 +3030,29 @@ class App(tk.Tk):
         for cat, idxs in categories.items():
             times_map[cat] = _select_times(idxs, times)
             cat_series = {
-                'risk_units': _select(idxs, returns_risk),
-                'log_equity': _select(idxs, returns_log),
-                'vol_target': _select(idxs, returns_vol_target),
-                'notional': _select(idxs, returns_notional),
+                "risk_units": _select(idxs, returns_risk),
+                "log_equity": _select(idxs, returns_log),
+                "vol_target": _select(idxs, returns_vol_target),
+                "notional": _select(idxs, returns_notional),
             }
             series[cat] = cat_series
-            cumulative[cat] = {key: _cumulative(vals) for key, vals in cat_series.items()}
+            cumulative[cat] = {
+                key: _cumulative(vals) for key, vals in cat_series.items()
+            }
             bin_map[cat] = _select(idxs, bin_labels)
 
-        payload['times'] = times_map
-        payload['series'] = series
-        payload['cumulative'] = cumulative
-        payload['bins'] = sorted(bins, key=lambda x: (1, x)) if bins else []
-        payload['bin_map'] = bin_map
+        payload["times"] = times_map
+        payload["series"] = series
+        payload["cumulative"] = cumulative
+        payload["bins"] = sorted(bins, key=lambda x: (1, x)) if bins else []
+        payload["bin_map"] = bin_map
 
         self.after(0, self._pnl_norm_update_ui, payload)
 
     def _pnl_norm_update_ui(self, payload: dict[str, object]) -> None:
         self._pnl_norm_loading = False
 
-        error = payload.get('error') if isinstance(payload, dict) else None
+        error = payload.get("error") if isinstance(payload, dict) else None
         if error:
             try:
                 if self.pnl_norm_status is not None:
@@ -2647,21 +3072,21 @@ class App(tk.Tk):
 
         self._pnl_norm_data = payload
         # Update bin list in UI
-        items = payload.get('bins') if isinstance(payload, dict) else None
+        items = payload.get("bins") if isinstance(payload, dict) else None
         if isinstance(items, list):
-            values = ['All'] + items if items else ['All']
+            values = ["All"] + items if items else ["All"]
             try:
                 self.pnl_norm_bin_combo.configure(values=values)
             except Exception:
                 pass
             if self.var_pnl_norm_bin.get() not in values:
-                self.var_pnl_norm_bin.set('All')
+                self.var_pnl_norm_bin.set("All")
         else:
             try:
-                self.pnl_norm_bin_combo.configure(values=('All',))
+                self.pnl_norm_bin_combo.configure(values=("All",))
             except Exception:
                 pass
-            self.var_pnl_norm_bin.set('All')
+            self.var_pnl_norm_bin.set("All")
         self._pnl_norm_render()
 
     def _pnl_norm_render(self) -> None:
@@ -2675,26 +3100,38 @@ class App(tk.Tk):
             return
 
         ax.clear()
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
         mode = self.var_pnl_norm_mode.get()
         category = self.var_pnl_norm_category.get()
-        times_map = data.get('times', {}) if isinstance(data, dict) else {}
-        series_map = data.get('series', {}) if isinstance(data, dict) else {}
-        cumulative_map = data.get('cumulative', {}) if isinstance(data, dict) else {}
+        times_map = data.get("times", {}) if isinstance(data, dict) else {}
+        series_map = data.get("series", {}) if isinstance(data, dict) else {}
+        cumulative_map = data.get("cumulative", {}) if isinstance(data, dict) else {}
 
         times = times_map.get(category) if isinstance(times_map, dict) else None
         cat_series = series_map.get(category) if isinstance(series_map, dict) else None
-        cat_cumulative = cumulative_map.get(category) if isinstance(cumulative_map, dict) else None
-        cat_bins = data.get('bin_map', {}).get(category) if isinstance(data, dict) else None
+        cat_cumulative = (
+            cumulative_map.get(category) if isinstance(cumulative_map, dict) else None
+        )
+        cat_bins = (
+            data.get("bin_map", {}).get(category) if isinstance(data, dict) else None
+        )
 
         values = cat_cumulative.get(mode) if isinstance(cat_cumulative, dict) else None
         raw_values = cat_series.get(mode) if isinstance(cat_series, dict) else None
 
         # Apply bin filter if requested
         selected_bin = self.var_pnl_norm_bin.get()
-        if selected_bin and selected_bin != 'All' and times and raw_values is not None and cat_bins is not None:
-            filtered_idx = [i for i, label in enumerate(cat_bins) if label == selected_bin]
+        if (
+            selected_bin
+            and selected_bin != "All"
+            and times
+            and raw_values is not None
+            and cat_bins is not None
+        ):
+            filtered_idx = [
+                i for i, label in enumerate(cat_bins) if label == selected_bin
+            ]
             times = [times[i] for i in filtered_idx]
             raw_values = [raw_values[i] for i in filtered_idx]
             # Recompute cumulative series from filtered raw returns to avoid inheriting
@@ -2714,7 +3151,14 @@ class App(tk.Tk):
             values = []
 
         if not times or not values:
-            ax.text(0.5, 0.5, 'No trades available.', ha='center', va='center', transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                "No trades available.",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
             try:
                 if self.pnl_norm_status is not None:
                     self.pnl_norm_status.config(text="No trades in range.")
@@ -2738,14 +3182,14 @@ class App(tk.Tk):
             times_disp = [t + timedelta(hours=3) for t in times]
 
         labels = {
-            'risk_units': 'Cumulative R',
-            'log_equity': 'Cumulative log return (1% risk)',
-            'vol_target': 'Vol-target cumulative return',
-            'notional': 'Cumulative PnL (10k notionals)',
+            "risk_units": "Cumulative R",
+            "log_equity": "Cumulative log return (1% risk)",
+            "vol_target": "Vol-target cumulative return",
+            "notional": "Cumulative PnL (10k notionals)",
         }
-        ax.plot(times_disp, values, color='#1f77b4', label=labels.get(mode, mode))
-        ax.axhline(0.0, color='#888888', linestyle='--', linewidth=1)
-        ax.set_ylabel(labels.get(mode, 'Value'))
+        ax.plot(times_disp, values, color="#1f77b4", label=labels.get(mode, mode))
+        ax.axhline(0.0, color="#888888", linestyle="--", linewidth=1)
+        ax.set_ylabel(labels.get(mode, "Value"))
 
         try:
             last_val = values[-1]
@@ -2753,23 +3197,25 @@ class App(tk.Tk):
                 f"{last_val:+.2f}",
                 xy=(times_disp[-1], last_val),
                 xytext=(10, 10),
-                textcoords='offset points',
-                arrowprops=dict(arrowstyle='->', color='#1f77b4'),
-                color='#1f77b4',
+                textcoords="offset points",
+                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
+                color="#1f77b4",
             )
         except Exception:
             pass
 
         try:
             locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            formatter = mdates.ConciseDateFormatter(
+                locator, tz=DISPLAY_TZ, show_offset=False
+            )
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(formatter)
         except Exception:
             pass
 
         try:
-            ax.legend(loc='upper left')
+            ax.legend(loc="upper left")
         except Exception:
             pass
 
@@ -2795,22 +3241,28 @@ class App(tk.Tk):
         # Destroy previous widgets if present
         if self.pnl_chart_frame is None:
             return
-        for w in (self.pnl_chart_frame.winfo_children() if self.pnl_chart_frame is not None else []):
+        for w in (
+            self.pnl_chart_frame.winfo_children()
+            if self.pnl_chart_frame is not None
+            else []
+        ):
             try:
                 w.destroy()
             except Exception:
                 pass
         fig = Figure(figsize=(6, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('PnL (normalized wins/losses)')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Normalized PnL')
+        ax.set_title("PnL (normalized wins/losses)")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Normalized PnL")
         canvas = FigureCanvasTkAgg(fig, master=self.pnl_chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.pnl_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.pnl_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._pnl_toolbar = toolbar
@@ -2824,28 +3276,35 @@ class App(tk.Tk):
         """Initialize Matplotlib widgets for the 10k-notional PnL chart."""
         if FigureCanvasTkAgg is None or Figure is None:
             return
+
     def _init_fx_chart_widgets(self) -> None:
         """Initialize Matplotlib widgets for the 10k-notional Forex PnL chart."""
         if FigureCanvasTkAgg is None or Figure is None:
             return
         if self.pnl_fx_chart_frame is None:
             return
-        for w in (self.pnl_fx_chart_frame.winfo_children() if self.pnl_fx_chart_frame is not None else []):
+        for w in (
+            self.pnl_fx_chart_frame.winfo_children()
+            if self.pnl_fx_chart_frame is not None
+            else []
+        ):
             try:
                 w.destroy()
             except Exception:
                 pass
         fig = Figure(figsize=(6, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('PnL (10k - Forex)')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Profit (quote currency)')
+        ax.set_title("PnL (10k - Forex)")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Profit (quote currency)")
         canvas = FigureCanvasTkAgg(fig, master=self.pnl_fx_chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.pnl_fx_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.pnl_fx_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._fx_toolbar = toolbar
@@ -2861,22 +3320,28 @@ class App(tk.Tk):
             return
         if self.pnl_crypto_chart_frame is None:
             return
-        for w in (self.pnl_crypto_chart_frame.winfo_children() if self.pnl_crypto_chart_frame is not None else []):
+        for w in (
+            self.pnl_crypto_chart_frame.winfo_children()
+            if self.pnl_crypto_chart_frame is not None
+            else []
+        ):
             try:
                 w.destroy()
             except Exception:
                 pass
         fig = Figure(figsize=(6, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('PnL (10k - Crypto)')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Profit (quote currency)')
+        ax.set_title("PnL (10k - Crypto)")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Profit (quote currency)")
         canvas = FigureCanvasTkAgg(fig, master=self.pnl_crypto_chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.pnl_crypto_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.pnl_crypto_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._crypto_toolbar = toolbar
@@ -2892,22 +3357,28 @@ class App(tk.Tk):
             return
         if self.pnl_indices_chart_frame is None:
             return
-        for w in (self.pnl_indices_chart_frame.winfo_children() if self.pnl_indices_chart_frame is not None else []):
+        for w in (
+            self.pnl_indices_chart_frame.winfo_children()
+            if self.pnl_indices_chart_frame is not None
+            else []
+        ):
             try:
                 w.destroy()
             except Exception:
                 pass
         fig = Figure(figsize=(6, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('PnL (10k - Indices)')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Profit (quote currency)')
+        ax.set_title("PnL (10k - Indices)")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Profit (quote currency)")
         canvas = FigureCanvasTkAgg(fig, master=self.pnl_indices_chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.pnl_indices_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.pnl_indices_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._indices_toolbar = toolbar
@@ -2918,22 +3389,28 @@ class App(tk.Tk):
         self._indices_canvas = canvas
         if self.pnl2_chart_frame is None:
             return
-        for w in (self.pnl2_chart_frame.winfo_children() if self.pnl2_chart_frame is not None else []):
+        for w in (
+            self.pnl2_chart_frame.winfo_children()
+            if self.pnl2_chart_frame is not None
+            else []
+        ):
             try:
                 w.destroy()
             except Exception:
                 pass
         fig = Figure(figsize=(6, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('PnL (10k notional)')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Profit (quote currency)')
+        ax.set_title("PnL (10k notional)")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Profit (quote currency)")
         canvas = FigureCanvasTkAgg(fig, master=self.pnl2_chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         try:
-            toolbar = NavigationToolbar2Tk(canvas, self.pnl2_chart_frame, pack_toolbar=False)
+            toolbar = NavigationToolbar2Tk(
+                canvas, self.pnl2_chart_frame, pack_toolbar=False
+            )
             toolbar.update()
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             self._pnl2_toolbar = toolbar
@@ -2977,12 +3454,16 @@ class App(tk.Tk):
         bins_by_category: dict[str, set[str]] = {}
         try:
             import sqlite3  # type: ignore
+
             db_path = db_path_str(dbname)
             conn = sqlite3.connect(db_path, timeout=3)
             try:
                 cur = conn.cursor()
                 from datetime import timezone as _tz
-                threshold = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+
+                threshold = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 cur.execute(
                     """
                     SELECT s.symbol, COALESCE(s.proximity_bin, ''), s.rrr, h.hit
@@ -3011,29 +3492,33 @@ class App(tk.Tk):
             cat_map = aggregates.setdefault(category, {})
             bin_stats = cat_map.setdefault(
                 str(bin_label),
-                {'wins': 0.0, 'losses': 0.0, 'sum_rrr_wins': 0.0},
+                {"wins": 0.0, "losses": 0.0, "sum_rrr_wins": 0.0},
             )
-            outcome = str(hit or '').upper()
-            if outcome == 'TP':
-                bin_stats['wins'] += 1
+            outcome = str(hit or "").upper()
+            if outcome == "TP":
+                bin_stats["wins"] += 1
                 try:
                     rrr_val = float(rrr_raw)
                 except Exception:
                     rrr_val = None
                 if rrr_val is not None and rrr_val > 0:
-                    bin_stats['sum_rrr_wins'] += rrr_val
-            elif outcome == 'SL':
-                bin_stats['losses'] += 1
+                    bin_stats["sum_rrr_wins"] += rrr_val
+            elif outcome == "SL":
+                bin_stats["losses"] += 1
 
         for category, bin_map in aggregates.items():
             for label, stats in bin_map.items():
-                wins = float(stats.get('wins', 0.0))
-                losses = float(stats.get('losses', 0.0))
+                wins = float(stats.get("wins", 0.0))
+                losses = float(stats.get("losses", 0.0))
                 completed = wins + losses
                 if completed < max(3, min_required):
                     continue
                 success = wins / completed if completed else None
-                avg_rrr = (stats['sum_rrr_wins'] / wins) if (wins and stats['sum_rrr_wins'] > 0) else None
+                avg_rrr = (
+                    (stats["sum_rrr_wins"] / wins)
+                    if (wins and stats["sum_rrr_wins"] > 0)
+                    else None
+                )
                 if success is None or avg_rrr is None:
                     continue
                 expectancy = success * avg_rrr - (1 - success)
@@ -3049,14 +3534,17 @@ class App(tk.Tk):
         error: str | None = None
         try:
             import sqlite3  # type: ignore
+
             db_path = db_path_str(dbname)
             conn = sqlite3.connect(db_path, timeout=3)
             try:
                 cur = conn.cursor()
                 from datetime import timezone as _tz
-                thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
-                sql = (
-                    """
+
+                thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                sql = """
                     SELECT COALESCE(h.hit_time, s.inserted_at) as event_time,
                            h.hit,
                            s.symbol,
@@ -3070,10 +3558,31 @@ class App(tk.Tk):
                     WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
                     ORDER BY COALESCE(h.hit_time, s.inserted_at) ASC
                     """
-                )
                 cur.execute(sql, (thr,))
-                for (event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin) in cur.fetchall() or []:
-                    rows.append((event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin))
+                for (
+                    event_time,
+                    hit,
+                    symbol,
+                    entry_price,
+                    hit_price,
+                    sl,
+                    direction,
+                    prox_bin,
+                ) in (
+                    cur.fetchall() or []
+                ):
+                    rows.append(
+                        (
+                            event_time,
+                            hit,
+                            symbol,
+                            entry_price,
+                            hit_price,
+                            sl,
+                            direction,
+                            prox_bin,
+                        )
+                    )
             finally:
                 try:
                     conn.close()
@@ -3087,7 +3596,9 @@ class App(tk.Tk):
         kept = 0
         dropped = 0
         try:
-            positive_bins = self._positive_expectancy_bins(hours, min_completed=PNL_EXPECTANCY_MIN_COMPLETED)
+            positive_bins = self._positive_expectancy_bins(
+                hours, min_completed=PNL_EXPECTANCY_MIN_COMPLETED
+            )
             bins_success = positive_bins is not None
         except Exception:
             positive_bins = None
@@ -3095,13 +3606,33 @@ class App(tk.Tk):
         if bins_success:
             bin_map = positive_bins or {}
             filtered_rows: list[tuple] = []
-            for (event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin) in rows:
+            for (
+                event_time,
+                hit,
+                symbol,
+                entry_price,
+                hit_price,
+                sl,
+                direction,
+                prox_bin,
+            ) in rows:
                 category = self._classify_symbol(str(symbol or ""))
                 allowed = bin_map.get(category)
                 if not allowed or prox_bin not in allowed:
                     dropped += 1
                     continue
-                filtered_rows.append((event_time, hit, symbol, entry_price, hit_price, sl, direction, prox_bin))
+                filtered_rows.append(
+                    (
+                        event_time,
+                        hit,
+                        symbol,
+                        entry_price,
+                        hit_price,
+                        sl,
+                        direction,
+                        prox_bin,
+                    )
+                )
             kept = len(filtered_rows)
             dropped = len(rows) - kept
             rows = filtered_rows
@@ -3139,19 +3670,31 @@ class App(tk.Tk):
                                 except Exception:
                                     info = None
                                 if info is not None:
-                                    tick_value = _as_float(getattr(info, 'trade_tick_value', None))
+                                    tick_value = _as_float(
+                                        getattr(info, "trade_tick_value", None)
+                                    )
                                     if tick_value is None or tick_value == 0.0:
-                                        tick_value = _as_float(getattr(info, 'tick_value', None))
-                                    tick_size = _as_float(getattr(info, 'trade_tick_size', None))
+                                        tick_value = _as_float(
+                                            getattr(info, "tick_value", None)
+                                        )
+                                    tick_size = _as_float(
+                                        getattr(info, "trade_tick_size", None)
+                                    )
                                     if tick_size is None or tick_size == 0.0:
-                                        tick_size = _as_float(getattr(info, 'tick_size', None))
-                                    contract_size = _as_float(getattr(info, 'trade_contract_size', None))
+                                        tick_size = _as_float(
+                                            getattr(info, "tick_size", None)
+                                        )
+                                    contract_size = _as_float(
+                                        getattr(info, "trade_contract_size", None)
+                                    )
                                     if contract_size is None or contract_size == 0.0:
-                                        contract_size = _as_float(getattr(info, 'contract_size', None))
+                                        contract_size = _as_float(
+                                            getattr(info, "contract_size", None)
+                                        )
                                     spec_map[sym] = {
-                                        'tick_value': float(tick_value or 0.0),
-                                        'tick_size': float(tick_size or 0.0),
-                                        'contract_size': float(contract_size or 0.0),
+                                        "tick_value": float(tick_value or 0.0),
+                                        "tick_size": float(tick_size or 0.0),
+                                        "contract_size": float(contract_size or 0.0),
                                     }
                                 tf = getattr(mt5, "TIMEFRAME_D1", 0)
                                 rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
@@ -3161,14 +3704,14 @@ class App(tk.Tk):
                                 vals = []
                                 for b in rates[-15:]:
                                     try:
-                                        high = float(b['high'])
-                                        low = float(b['low'])
-                                        close = float(b['close'])
+                                        high = float(b["high"])
+                                        low = float(b["low"])
+                                        close = float(b["close"])
                                     except Exception:
                                         try:
-                                            high = float(getattr(b, 'high', 0.0))
-                                            low = float(getattr(b, 'low', 0.0))
-                                            close = float(getattr(b, 'close', 0.0))
+                                            high = float(getattr(b, "high", 0.0))
+                                            low = float(getattr(b, "low", 0.0))
+                                            close = float(getattr(b, "close", 0.0))
                                         except Exception:
                                             high = low = close = 0.0
                                     vals.append((high, low, close))
@@ -3181,7 +3724,9 @@ class App(tk.Tk):
                                         tr3 = abs(prev_close - l)
                                         trs.append(max(tr1, tr2, tr3))
                                         prev_close = c
-                                    atr_map[sym] = (sum(trs) / len(trs)) if trs else None
+                                    atr_map[sym] = (
+                                        (sum(trs) / len(trs)) if trs else None
+                                    )
                                 else:
                                     atr_map[sym] = None
                             except Exception:
@@ -3192,7 +3737,16 @@ class App(tk.Tk):
                     spec_map = {}
 
             # Compute normalized returns using ATR
-            for event_time, hit, symbol, entry_price, hit_price, sl_val, direction, _prox_bin in rows:
+            for (
+                event_time,
+                hit,
+                symbol,
+                entry_price,
+                hit_price,
+                sl_val,
+                direction,
+                _prox_bin,
+            ) in rows:
                 if not hit:
                     continue
                 dt = None
@@ -3201,7 +3755,9 @@ class App(tk.Tk):
                         dt = datetime.fromisoformat(event_time)
                     except Exception:
                         try:
-                            dt = datetime.strptime(event_time.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                            dt = datetime.strptime(
+                                event_time.split(".")[0], "%Y-%m-%d %H:%M:%S"
+                            )
                         except Exception:
                             dt = None
                 elif isinstance(event_time, datetime):
@@ -3227,8 +3783,8 @@ class App(tk.Tk):
                     slp = None
                 if ep is None or hp is None or slp is None:
                     continue
-                dir_s = (str(direction) or '').lower()
-                profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
+                dir_s = (str(direction) or "").lower()
+                profit = (hp - ep) if dir_s == "buy" else (ep - hp)
                 atr = atr_map.get(symbol)
                 norm: float | None = None
                 if atr is not None and atr != 0:
@@ -3236,9 +3792,9 @@ class App(tk.Tk):
                 notional_profit: float | None = None
                 spec = spec_map.get(symbol)
                 if spec and ep not in (None, 0.0):
-                    tick_value = float(spec.get('tick_value', 0.0))
-                    tick_size = float(spec.get('tick_size', 0.0))
-                    contract_size = float(spec.get('contract_size', 0.0))
+                    tick_value = float(spec.get("tick_value", 0.0))
+                    tick_size = float(spec.get("tick_size", 0.0))
+                    contract_size = float(spec.get("contract_size", 0.0))
                     try:
                         volume = 0.0
                         if contract_size > 0.0 and ep not in (None, 0.0):
@@ -3286,10 +3842,10 @@ class App(tk.Tk):
 
         # Hand off to UI thread
         filter_info = {
-            'positive_bins': positive_bins,
-            'kept': kept,
-            'dropped': dropped,
-            'filter_applied': bins_success,
+            "positive_bins": positive_bins,
+            "kept": kept,
+            "dropped": dropped,
+            "filter_applied": bins_success,
         }
         self.after(
             0,
@@ -3345,16 +3901,16 @@ class App(tk.Tk):
         dropped = 0
         filter_applied = False
         if isinstance(filter_info, dict):
-            positive_bins = filter_info.get('positive_bins') or {}
+            positive_bins = filter_info.get("positive_bins") or {}
             try:
-                kept = int(filter_info.get('kept', 0))
+                kept = int(filter_info.get("kept", 0))
             except Exception:
                 kept = 0
             try:
-                dropped = int(filter_info.get('dropped', 0))
+                dropped = int(filter_info.get("dropped", 0))
             except Exception:
                 dropped = 0
-            filter_applied = bool(filter_info.get('filter_applied'))
+            filter_applied = bool(filter_info.get("filter_applied"))
         if not isinstance(positive_bins, dict):
             positive_bins = {}
         self._pnl_positive_bins = {k: set(v) for k, v in positive_bins.items()}
@@ -3381,7 +3937,9 @@ class App(tk.Tk):
         # Render normalized PnL chart if data is available; otherwise clear it.
         if times_norm and norm_returns:
             try:
-                self._pnl_render_draw(times_norm, norm_returns, cum_norm, avg_norm, symbols_norm)
+                self._pnl_render_draw(
+                    times_norm, norm_returns, cum_norm, avg_norm, symbols_norm
+                )
             except Exception as exc:
                 try:
                     if self.pnl_status is not None:
@@ -3453,17 +4011,37 @@ class App(tk.Tk):
         if not times_abs or not notional_returns:
             try:
                 if self.pnl_fx_status is not None:
-                    self.pnl_fx_status.config(text="No 10k-notional hits in the requested time range.")
+                    self.pnl_fx_status.config(
+                        text="No 10k-notional hits in the requested time range."
+                    )
                 if self.pnl_crypto_status is not None:
-                    self.pnl_crypto_status.config(text="No 10k-notional hits in the requested time range.")
+                    self.pnl_crypto_status.config(
+                        text="No 10k-notional hits in the requested time range."
+                    )
                 if self.pnl_indices_status is not None:
-                    self.pnl_indices_status.config(text="No 10k-notional hits in the requested time range.")
+                    self.pnl_indices_status.config(
+                        text="No 10k-notional hits in the requested time range."
+                    )
             except Exception:
                 pass
             # Clear charts if available
-            for ax, fig, canvas in ((getattr(self, '_fx_ax', None), getattr(self, '_fx_fig', None), getattr(self, '_fx_canvas', None)),
-                                    (getattr(self, '_crypto_ax', None), getattr(self, '_crypto_fig', None), getattr(self, '_crypto_canvas', None)),
-                                    (getattr(self, '_indices_ax', None), getattr(self, '_indices_fig', None), getattr(self, '_indices_canvas', None))):
+            for ax, fig, canvas in (
+                (
+                    getattr(self, "_fx_ax", None),
+                    getattr(self, "_fx_fig", None),
+                    getattr(self, "_fx_canvas", None),
+                ),
+                (
+                    getattr(self, "_crypto_ax", None),
+                    getattr(self, "_crypto_fig", None),
+                    getattr(self, "_crypto_canvas", None),
+                ),
+                (
+                    getattr(self, "_indices_ax", None),
+                    getattr(self, "_indices_fig", None),
+                    getattr(self, "_indices_canvas", None),
+                ),
+            ):
                 if ax is not None:
                     try:
                         ax.clear()
@@ -3485,9 +4063,15 @@ class App(tk.Tk):
         def _sel(idxs, seq):
             return [seq[i] for i in idxs]
 
-        idx_fx = [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'forex']
-        idx_crypto = [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'crypto']
-        idx_indices = [i for i, s in enumerate(symbols) if self._classify_symbol(s) == 'indices']
+        idx_fx = [
+            i for i, s in enumerate(symbols) if self._classify_symbol(s) == "forex"
+        ]
+        idx_crypto = [
+            i for i, s in enumerate(symbols) if self._classify_symbol(s) == "crypto"
+        ]
+        idx_indices = [
+            i for i, s in enumerate(symbols) if self._classify_symbol(s) == "indices"
+        ]
 
         # Build series for each category
         series = []
@@ -3520,7 +4104,9 @@ class App(tk.Tk):
         if FigureCanvasTkAgg is None or Figure is None:
             try:
                 if self.pnl_status is not None:
-                    self.pnl_status.config(text="Matplotlib not available; cannot render PnL.")
+                    self.pnl_status.config(
+                        text="Matplotlib not available; cannot render PnL."
+                    )
             except Exception:
                 pass
             return
@@ -3528,7 +4114,7 @@ class App(tk.Tk):
             self._init_pnl_chart_widgets()
         ax = self._pnl_ax
         ax.clear()
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
         # Convert times to display timezone
         try:
@@ -3552,11 +4138,26 @@ class App(tk.Tk):
 
         # Use smooth curves to show trends; add breakeven line
         try:
-            ax.plot(times_plot, cum_plot, color='#1f77b4', linewidth=2,
-                    label='Cumulative PnL (sum of +RRR/-1)', marker='o', markersize=3)
-            ax.plot(times_plot, avg_plot, color='#ff7f0e', linewidth=1.2, linestyle='--',
-                    label='Avg PnL per trade', marker='s', markersize=2)
-            ax.axhline(0.0, color='#888888', linewidth=2.0, linestyle='-', alpha=0.9)
+            ax.plot(
+                times_plot,
+                cum_plot,
+                color="#1f77b4",
+                linewidth=2,
+                label="Cumulative PnL (sum of +RRR/-1)",
+                marker="o",
+                markersize=3,
+            )
+            ax.plot(
+                times_plot,
+                avg_plot,
+                color="#ff7f0e",
+                linewidth=1.2,
+                linestyle="--",
+                label="Avg PnL per trade",
+                marker="s",
+                markersize=2,
+            )
+            ax.axhline(0.0, color="#888888", linewidth=2.0, linestyle="-", alpha=0.9)
         except Exception:
             pass
 
@@ -3567,9 +4168,11 @@ class App(tk.Tk):
             losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
             losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
             if wins_x:
-                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='TP')
+                ax.scatter(wins_x, wins_y, color="green", marker="^", s=40, label="TP")
             if losses_x:
-                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='SL')
+                ax.scatter(
+                    losses_x, losses_y, color="red", marker="v", s=40, label="SL"
+                )
         except Exception:
             pass
 
@@ -3577,18 +4180,32 @@ class App(tk.Tk):
         try:
             if returns:
                 last_idx = len(returns) - 1
-                ax.annotate(f"{returns[last_idx]:+.2f}",
-                            xy=(times_disp[last_idx], cum[last_idx]),
-                            xytext=(0, -16), textcoords="offset points",
-                            ha="right", va="top", fontsize=9,
-                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                ax.annotate(
+                    f"{returns[last_idx]:+.2f}",
+                    xy=(times_disp[last_idx], cum[last_idx]),
+                    xytext=(0, -16),
+                    textcoords="offset points",
+                    ha="right",
+                    va="top",
+                    fontsize=9,
+                    bbox=dict(
+                        boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9
+                    ),
+                )
                 if len(returns) <= 12:
                     for i, r in enumerate(returns):
-                        color = 'green' if r > 0 else ('red' if r < 0 else '#333333')
-                        ax.annotate(f"{r:+.2f}",
-                                    xy=(times_disp[i], cum[i]),
-                                    xytext=(0, 8), textcoords="offset points",
-                                    ha="center", va="bottom", fontsize=8, color=color, alpha=0.9)
+                        color = "green" if r > 0 else ("red" if r < 0 else "#333333")
+                        ax.annotate(
+                            f"{r:+.2f}",
+                            xy=(times_disp[i], cum[i]),
+                            xytext=(0, 8),
+                            textcoords="offset points",
+                            ha="center",
+                            va="bottom",
+                            fontsize=8,
+                            color=color,
+                            alpha=0.9,
+                        )
         except Exception:
             pass
 
@@ -3599,27 +4216,36 @@ class App(tk.Tk):
                 n = len(returns)
                 start = 0 if n <= max_labels else n - max_labels
                 for i in range(start, n):
-                    sym = (symbols[i] if symbols and i < len(symbols) else '')
+                    sym = symbols[i] if symbols and i < len(symbols) else ""
                     if not sym:
                         continue
-                    ax.annotate(str(sym),
-                                xy=(times_disp[i], cum[i]),
-                                xytext=(0, 18), textcoords="offset points",
-                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+                    ax.annotate(
+                        str(sym),
+                        xy=(times_disp[i], cum[i]),
+                        xytext=(0, 18),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        color="#1f1f1f",
+                        alpha=0.9,
+                    )
         except Exception:
             pass
 
         # X-axis formatter
         try:
             locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            formatter = mdates.ConciseDateFormatter(
+                locator, tz=DISPLAY_TZ, show_offset=False
+            )
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(formatter)
         except Exception:
             pass
 
         try:
-            ax.legend(loc='upper left')
+            ax.legend(loc="upper left")
         except Exception:
             pass
         try:
@@ -3631,8 +4257,10 @@ class App(tk.Tk):
         try:
             if self.pnl_status is not None:
                 last_change = returns[-1] if returns else 0.0
-                last_sym = (symbols[-1] if symbols else '')
-                self.pnl_status.config(text=f"Rendered PnL: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}")
+                last_sym = symbols[-1] if symbols else ""
+                self.pnl_status.config(
+                    text=f"Rendered PnL: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}"
+                )
         except Exception:
             pass
 
@@ -3641,7 +4269,19 @@ class App(tk.Tk):
 
         return classify_symbol(sym)
 
-    def _pnl_category_render(self, title: str, ax, fig, canvas, status_label, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+    def _pnl_category_render(
+        self,
+        title: str,
+        ax,
+        fig,
+        canvas,
+        status_label,
+        times,
+        returns_abs,
+        cum_abs,
+        avg_abs,
+        symbols,
+    ) -> None:
         """Common renderer for 10k-notional category charts."""
         if FigureCanvasTkAgg is None or Figure is None:
             try:
@@ -3659,17 +4299,25 @@ class App(tk.Tk):
                     ax, fig, canvas = self._fx_ax, self._fx_fig, self._fx_canvas
                 elif title.endswith("Crypto"):
                     self._init_crypto_chart_widgets()
-                    ax, fig, canvas = self._crypto_ax, self._crypto_fig, self._crypto_canvas
+                    ax, fig, canvas = (
+                        self._crypto_ax,
+                        self._crypto_fig,
+                        self._crypto_canvas,
+                    )
                 else:
                     self._init_indices_chart_widgets()
-                    ax, fig, canvas = self._indices_ax, self._indices_fig, self._indices_canvas
+                    ax, fig, canvas = (
+                        self._indices_ax,
+                        self._indices_fig,
+                        self._indices_canvas,
+                    )
             except Exception:
                 return
         if ax is None:
             return
 
         ax.clear()
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
         # Convert times to display timezone
         try:
@@ -3694,9 +4342,17 @@ class App(tk.Tk):
         # Plot cumulative and avg as smooth curves, add breakeven line
         try:
             ax.set_title(title)
-            ax.plot(times_plot, cum_plot, color='#2c7fb8', linewidth=2, label='Cumulative (10k)', marker='o', markersize=3)
+            ax.plot(
+                times_plot,
+                cum_plot,
+                color="#2c7fb8",
+                linewidth=2,
+                label="Cumulative (10k)",
+                marker="o",
+                markersize=3,
+            )
             # ax.plot(times_plot, avg_plot, color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)', marker='s', markersize=2)
-            ax.axhline(0.0, color='#888888', linewidth=2.0, linestyle='-', alpha=0.9)
+            ax.axhline(0.0, color="#888888", linewidth=2.0, linestyle="-", alpha=0.9)
         except Exception:
             pass
 
@@ -3707,9 +4363,11 @@ class App(tk.Tk):
             losses_x = [times_disp[i] for i, v in enumerate(returns_abs) if v < 0]
             losses_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v < 0]
             if wins_x:
-                ax.scatter(wins_x, wins_y, color='green', marker='^', s=40, label='Win')
+                ax.scatter(wins_x, wins_y, color="green", marker="^", s=40, label="Win")
             if losses_x:
-                ax.scatter(losses_x, losses_y, color='red', marker='v', s=40, label='Loss')
+                ax.scatter(
+                    losses_x, losses_y, color="red", marker="v", s=40, label="Loss"
+                )
         except Exception:
             pass
 
@@ -3717,36 +4375,52 @@ class App(tk.Tk):
         try:
             if returns_abs:
                 last_idx = len(returns_abs) - 1
-                ax.annotate(f"{returns_abs[last_idx]:+.2f}",
-                            xy=(times_disp[last_idx], cum_abs[last_idx]),
-                            xytext=(0, -16), textcoords="offset points",
-                            ha="right", va="top", fontsize=9,
-                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9))
+                ax.annotate(
+                    f"{returns_abs[last_idx]:+.2f}",
+                    xy=(times_disp[last_idx], cum_abs[last_idx]),
+                    xytext=(0, -16),
+                    textcoords="offset points",
+                    ha="right",
+                    va="top",
+                    fontsize=9,
+                    bbox=dict(
+                        boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9
+                    ),
+                )
                 max_labels = 20
                 n = len(returns_abs)
                 start = 0 if n <= max_labels else n - max_labels
                 for i in range(start, n):
-                    sym = symbols[i] if symbols and i < len(symbols) else ''
+                    sym = symbols[i] if symbols and i < len(symbols) else ""
                     if not sym:
                         continue
-                    ax.annotate(str(sym),
-                                xy=(times_disp[i], cum_abs[i]),
-                                xytext=(0, 18), textcoords="offset points",
-                                ha="center", va="bottom", fontsize=8, color='#1f1f1f', alpha=0.9)
+                    ax.annotate(
+                        str(sym),
+                        xy=(times_disp[i], cum_abs[i]),
+                        xytext=(0, 18),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        color="#1f1f1f",
+                        alpha=0.9,
+                    )
         except Exception:
             pass
 
         # Axis formatter
         try:
             locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            formatter = mdates.ConciseDateFormatter(
+                locator, tz=DISPLAY_TZ, show_offset=False
+            )
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(formatter)
         except Exception:
             pass
 
         try:
-            ax.legend(loc='upper left')
+            ax.legend(loc="upper left")
         except Exception:
             pass
         try:
@@ -3760,30 +4434,69 @@ class App(tk.Tk):
             if status_label is not None:
                 if cum_abs:
                     last_change = returns_abs[-1] if returns_abs else 0.0
-                    last_sym = symbols[-1] if symbols else ''
-                    status_label.config(text=f"{title}: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}")
+                    last_sym = symbols[-1] if symbols else ""
+                    status_label.config(
+                        text=f"{title}: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}"
+                    )
                 else:
                     status_label.config(text=f"{title}: no trades")
         except Exception:
             pass
 
-    def _pnl_fx_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+    def _pnl_fx_render_draw(
+        self, times, returns_abs, cum_abs, avg_abs, symbols
+    ) -> None:
         if self._fx_ax is None or self._fx_canvas is None:
             self._init_fx_chart_widgets()
-        self._pnl_category_render("PnL (10k - Forex)", self._fx_ax, self._fx_fig, self._fx_canvas, self.pnl_fx_status,
-                                  times, returns_abs, cum_abs, avg_abs, symbols)
+        self._pnl_category_render(
+            "PnL (10k - Forex)",
+            self._fx_ax,
+            self._fx_fig,
+            self._fx_canvas,
+            self.pnl_fx_status,
+            times,
+            returns_abs,
+            cum_abs,
+            avg_abs,
+            symbols,
+        )
 
-    def _pnl_crypto_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+    def _pnl_crypto_render_draw(
+        self, times, returns_abs, cum_abs, avg_abs, symbols
+    ) -> None:
         if self._crypto_ax is None or self._crypto_canvas is None:
             self._init_crypto_chart_widgets()
-        self._pnl_category_render("PnL (10k - Crypto)", self._crypto_ax, self._crypto_fig, self._crypto_canvas, self.pnl_crypto_status,
-                                  times, returns_abs, cum_abs, avg_abs, symbols)
+        self._pnl_category_render(
+            "PnL (10k - Crypto)",
+            self._crypto_ax,
+            self._crypto_fig,
+            self._crypto_canvas,
+            self.pnl_crypto_status,
+            times,
+            returns_abs,
+            cum_abs,
+            avg_abs,
+            symbols,
+        )
 
-    def _pnl_indices_render_draw(self, times, returns_abs, cum_abs, avg_abs, symbols) -> None:
+    def _pnl_indices_render_draw(
+        self, times, returns_abs, cum_abs, avg_abs, symbols
+    ) -> None:
         if self._indices_ax is None or self._indices_canvas is None:
             self._init_indices_chart_widgets()
-        self._pnl_category_render("PnL (10k - Indices)", self._indices_ax, self._indices_fig, self._indices_canvas, self.pnl_indices_status,
-                                  times, returns_abs, cum_abs, avg_abs, symbols)
+        self._pnl_category_render(
+            "PnL (10k - Indices)",
+            self._indices_ax,
+            self._indices_fig,
+            self._indices_canvas,
+            self.pnl_indices_status,
+            times,
+            returns_abs,
+            cum_abs,
+            avg_abs,
+            symbols,
+        )
+
     def _enqueue_log(self, name: str, text: str) -> None:
         self.log_q.put((name, text))
 
@@ -3809,15 +4522,15 @@ class App(tk.Tk):
         widget.configure(state=tk.NORMAL)
         widget.insert(tk.END, s)
         try:
-            end_index = widget.index('end-1c')
-            line_count = int(end_index.split('.')[0]) if end_index else 0
+            end_index = widget.index("end-1c")
+            line_count = int(end_index.split(".")[0]) if end_index else 0
         except Exception:
             line_count = 0
         if line_count > self.LOG_MAX_LINES:
             try:
                 # Trim oldest lines while keeping at most LOG_MAX_LINES in the widget
                 trim_line = line_count - self.LOG_MAX_LINES
-                widget.delete('1.0', f'{trim_line + 1}.0')
+                widget.delete("1.0", f"{trim_line + 1}.0")
             except Exception:
                 pass
         widget.see(tk.END)
@@ -3886,7 +4599,9 @@ class App(tk.Tk):
             try:
                 cur = conn.cursor()
                 # If setups table does not exist, return empty
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'"
+                )
                 if cur.fetchone() is None:
                     rows_display = []
                 else:
@@ -3894,9 +4609,11 @@ class App(tk.Tk):
                     try:
                         cur.execute("PRAGMA table_info(timelapse_setups)")
                         cols = {str(r[1]) for r in (cur.fetchall() or [])}
-                        if 'proximity_bin' not in cols:
+                        if "proximity_bin" not in cols:
                             try:
-                                cur.execute("ALTER TABLE timelapse_setups ADD COLUMN proximity_bin TEXT")
+                                cur.execute(
+                                    "ALTER TABLE timelapse_setups ADD COLUMN proximity_bin TEXT"
+                                )
                                 conn.commit()
                             except Exception:
                                 pass
@@ -3904,9 +4621,11 @@ class App(tk.Tk):
                         pass
 
                     from datetime import timezone as _tz
-                    thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
-                    sql = (
-                        """
+
+                    thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    sql = """
                         SELECT s.id, s.symbol, s.direction, s.inserted_at,
                                h.hit_time_utc3, h.hit_time, h.hit, h.hit_price,
                                s.tp, s.sl, COALESCE(h.entry_price, s.price) AS entry_price,
@@ -3916,15 +4635,27 @@ class App(tk.Tk):
                         WHERE s.inserted_at >= ?
                         ORDER BY s.inserted_at DESC, s.symbol
                         """
-                    )
                     cur.execute(sql, (thr,))
                     all_rows = cur.fetchall() or []
-
 
                     # Apply filters in Python code instead of SQL
                     filtered_rows = []
                     for row in all_rows:
-                        (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin) = row
+                        (
+                            sid,
+                            sym,
+                            direction,
+                            inserted_at,
+                            hit_utc3,
+                            hit_time,
+                            hit,
+                            hit_price,
+                            tp,
+                            sl,
+                            entry_price,
+                            proximity_to_sl,
+                            proximity_bin,
+                        ) = row
 
                         # Apply symbol category filter
                         if symbol_category != "All":
@@ -3952,54 +4683,113 @@ class App(tk.Tk):
                         filtered_rows.append(row)
 
                     # Process filtered rows
-                    for (sid, sym, direction, inserted_at, hit_utc3, hit_time, hit, hit_price, tp, sl, entry_price, proximity_to_sl, proximity_bin) in filtered_rows:
-                        sym_s = str(sym) if sym is not None else ''
-                        dir_s = str(direction) if direction is not None else ''
+                    for (
+                        sid,
+                        sym,
+                        direction,
+                        inserted_at,
+                        hit_utc3,
+                        hit_time,
+                        hit,
+                        hit_price,
+                        tp,
+                        sl,
+                        entry_price,
+                        proximity_to_sl,
+                        proximity_bin,
+                    ) in filtered_rows:
+                        sym_s = str(sym) if sym is not None else ""
+                        dir_s = str(direction) if direction is not None else ""
                         try:
-                            as_naive = datetime.fromisoformat(inserted_at) if isinstance(inserted_at, str) else inserted_at
+                            as_naive = (
+                                datetime.fromisoformat(inserted_at)
+                                if isinstance(inserted_at, str)
+                                else inserted_at
+                            )
                         except Exception:
                             as_naive = None
-                        ent_s = ''
+                        ent_s = ""
                         if as_naive is not None:
-                            ent_s = (as_naive + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
-                        hit_s = ''
+                            ent_s = (as_naive + timedelta(hours=3)).strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
+                        hit_s = ""
                         if hit_utc3 is not None:
                             hit_s = str(hit_utc3)
                         elif hit_time is not None:
                             try:
-                                ht = datetime.fromisoformat(hit_time) if isinstance(hit_time, str) else hit_time
-                                hit_s = (ht + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
+                                ht = (
+                                    datetime.fromisoformat(hit_time)
+                                    if isinstance(hit_time, str)
+                                    else hit_time
+                                )
+                                hit_s = (ht + timedelta(hours=3)).strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
                             except Exception:
-                                hit_s = ''
-                        hit_str = str(hit) if hit is not None else ''
+                                hit_s = ""
+                        hit_str = str(hit) if hit is not None else ""
+
                         def fmt_price(v):
                             try:
                                 if v is None:
-                                    return ''
+                                    return ""
                                 return f"{float(v):g}"
                             except Exception:
                                 return str(v)
+
                         tp_s = fmt_price(tp)
                         sl_s = fmt_price(sl)
                         ep_s = fmt_price(entry_price)
                         prox_sl_s = fmt_price(proximity_to_sl)
-                        prox_bin_s = str(proximity_bin) if proximity_bin not in (None, "") else ""
-                        rows_display.append((sym_s, dir_s, ent_s, hit_s, hit_str, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s))
+                        prox_bin_s = (
+                            str(proximity_bin)
+                            if proximity_bin not in (None, "")
+                            else ""
+                        )
+                        rows_display.append(
+                            (
+                                sym_s,
+                                dir_s,
+                                ent_s,
+                                hit_s,
+                                hit_str,
+                                tp_s,
+                                sl_s,
+                                ep_s,
+                                prox_sl_s,
+                                prox_bin_s,
+                            )
+                        )
                         # Raw/meta for chart
-                        rows_meta.append({
-                            'iid': None,  # to fill on UI insert
-                            'setup_id': sid,
-                            'symbol': sym_s,
-                            'direction': dir_s,
-                            'entry_utc_str': (as_naive.strftime('%Y-%m-%d %H:%M:%S.%f') if as_naive else ''),
-                            'entry_price': float(entry_price) if entry_price is not None else None,
-                            'tp': float(tp) if tp is not None else None,
-                            'sl': float(sl) if sl is not None else None,
-                            'hit_kind': hit_str if hit_str else None,
-                            'hit_time_utc_str': (str(hit_time) if hit_time is not None else None),
-                            'proximity_bin': prox_bin_s,
-                            'hit_price': (float(hit_price) if hit_price is not None else None),
-                        })
+                        rows_meta.append(
+                            {
+                                "iid": None,  # to fill on UI insert
+                                "setup_id": sid,
+                                "symbol": sym_s,
+                                "direction": dir_s,
+                                "entry_utc_str": (
+                                    as_naive.strftime("%Y-%m-%d %H:%M:%S.%f")
+                                    if as_naive
+                                    else ""
+                                ),
+                                "entry_price": (
+                                    float(entry_price)
+                                    if entry_price is not None
+                                    else None
+                                ),
+                                "tp": float(tp) if tp is not None else None,
+                                "sl": float(sl) if sl is not None else None,
+                                "hit_kind": hit_str if hit_str else None,
+                                "hit_time_utc_str": (
+                                    str(hit_time) if hit_time is not None else None
+                                ),
+                                "proximity_bin": prox_bin_s,
+                                "hit_price": (
+                                    float(hit_price) if hit_price is not None else None
+                                ),
+                            }
+                        )
             finally:
                 try:
                     conn.close()
@@ -4029,23 +4819,54 @@ class App(tk.Tk):
             self.db_status.config(text=f"Error: {error}")
         else:
             new_selected_iid = None
-            for idx, (sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s) in enumerate(rows_display):
+            for idx, (
+                sym,
+                direction,
+                ent_s,
+                hit_s,
+                hit,
+                tp_s,
+                sl_s,
+                ep_s,
+                prox_sl_s,
+                prox_bin_s,
+            ) in enumerate(rows_display):
                 tags = ()
-                if hit == 'TP':
-                    tags = ('tp',)
-                elif hit == 'SL':
-                    tags = ('sl',)
-                iid = self.db_tree.insert('', tk.END, values=(sym, direction, ent_s, hit_s, hit, tp_s, sl_s, ep_s, prox_sl_s, prox_bin_s), tags=tags)
+                if hit == "TP":
+                    tags = ("tp",)
+                elif hit == "SL":
+                    tags = ("sl",)
+                iid = self.db_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        sym,
+                        direction,
+                        ent_s,
+                        hit_s,
+                        hit,
+                        tp_s,
+                        sl_s,
+                        ep_s,
+                        prox_sl_s,
+                        prox_bin_s,
+                    ),
+                    tags=tags,
+                )
                 if idx < len(rows_meta):
                     meta = rows_meta[idx]
-                    meta['iid'] = iid
+                    meta["iid"] = iid
                     self._db_row_meta[iid] = meta
 
                     # Check if this item matches the previously selected item
                     if selected_item_data and not new_selected_iid:
-                        if (meta.get('symbol') == selected_item_data.get('symbol') and
-                            meta.get('direction') == selected_item_data.get('direction') and
-                            meta.get('entry_utc_str') == selected_item_data.get('entry_utc_str')):
+                        if (
+                            meta.get("symbol") == selected_item_data.get("symbol")
+                            and meta.get("direction")
+                            == selected_item_data.get("direction")
+                            and meta.get("entry_utc_str")
+                            == selected_item_data.get("entry_utc_str")
+                        ):
                             new_selected_iid = iid
 
             # Restore selection if we found a matching item
@@ -4055,7 +4876,9 @@ class App(tk.Tk):
                 self.db_tree.focus_set()  # Set keyboard focus to the treeview
                 self.db_tree.focus(new_selected_iid)  # Set focus to the specific item
 
-            self.db_status.config(text=f"Rows: {len(rows_display)} - Updated {datetime.now().strftime('%H:%M:%S')}")
+            self.db_status.config(
+                text=f"Rows: {len(rows_display)} - Updated {datetime.now().strftime('%H:%M:%S')}"
+            )
 
         # Schedule next auto refresh if enabled
         self._db_schedule_next()
@@ -4076,8 +4899,8 @@ class App(tk.Tk):
         if not meta:
             self.db_status.config(text="No metadata for selection.")
             return
-        setup_id = meta.get('setup_id')
-        hit_kind = (meta.get('hit_kind') or '').upper()
+        setup_id = meta.get("setup_id")
+        hit_kind = (meta.get("hit_kind") or "").upper()
         if not setup_id:
             self.db_status.config(text="Missing setup id; cannot delete.")
             return
@@ -4085,10 +4908,14 @@ class App(tk.Tk):
         # Confirm
         try:
             from tkinter import messagebox
-            sym = meta.get('symbol') or ''
-            direction = meta.get('direction') or ''
-            hit_info = f" and its {hit_kind} hit" if hit_kind in ('TP', 'SL') else ""
-            if not messagebox.askyesno("Confirm Delete", f"Delete setup {setup_id} ({sym} {direction}){hit_info}? This cannot be undone."):
+
+            sym = meta.get("symbol") or ""
+            direction = meta.get("direction") or ""
+            hit_info = f" and its {hit_kind} hit" if hit_kind in ("TP", "SL") else ""
+            if not messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete setup {setup_id} ({sym} {direction}){hit_info}? This cannot be undone.",
+            ):
                 return
         except Exception:
             pass
@@ -4100,14 +4927,20 @@ class App(tk.Tk):
             err = None
             try:
                 import sqlite3  # type: ignore
+
                 conn = sqlite3.connect(db_path, timeout=5)
                 try:
                     with conn:
                         cur = conn.cursor()
                         # Delete hit first (if exists), then setup
-                        if hit_kind in ('TP', 'SL'):
-                            cur.execute("DELETE FROM timelapse_hits WHERE setup_id=?", (setup_id,))
-                        cur.execute("DELETE FROM timelapse_setups WHERE id=?", (setup_id,))
+                        if hit_kind in ("TP", "SL"):
+                            cur.execute(
+                                "DELETE FROM timelapse_hits WHERE setup_id=?",
+                                (setup_id,),
+                            )
+                        cur.execute(
+                            "DELETE FROM timelapse_setups WHERE id=?", (setup_id,)
+                        )
                 finally:
                     try:
                         conn.close()
@@ -4115,6 +4948,7 @@ class App(tk.Tk):
                         pass
             except Exception as e:
                 err = str(e)
+
             # UI thread update
             def _after():
                 if err:
@@ -4122,6 +4956,7 @@ class App(tk.Tk):
                 else:
                     self.db_status.config(text=f"Deleted setup {setup_id}.")
                     self._db_refresh()
+
             self.after(0, _after)
 
         threading.Thread(target=_do_delete, daemon=True).start()
@@ -4139,10 +4974,10 @@ class App(tk.Tk):
                 pass
         fig = Figure(figsize=(5, 3), dpi=100)
         ax = fig.add_subplot(111)
-        ax.set_title('')
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time (UTC)')
-        ax.set_ylabel('Price')
+        ax.set_title("")
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        ax.set_xlabel("Time (UTC)")
+        ax.set_ylabel("Price")
         canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
         canvas_widget = canvas.get_tk_widget()
         canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -4164,7 +4999,7 @@ class App(tk.Tk):
             pass
 
     def _chart_spinner_start(self, rid: int) -> None:
-        spinner = getattr(self, 'chart_spinner', None)
+        spinner = getattr(self, "chart_spinner", None)
         if spinner is None:
             return
         self._chart_spinner_req_id = rid
@@ -4180,7 +5015,7 @@ class App(tk.Tk):
             pass
 
     def _chart_spinner_stop(self, rid: int | None = None) -> None:
-        spinner = getattr(self, 'chart_spinner', None)
+        spinner = getattr(self, "chart_spinner", None)
         if spinner is None:
             return
         if rid is not None and self._chart_spinner_req_id != rid:
@@ -4217,7 +5052,7 @@ class App(tk.Tk):
 
     def _chart_quiet_guard(self) -> None:
         try:
-            last_symbol = getattr(self, '_chart_last_symbol', None)
+            last_symbol = getattr(self, "_chart_last_symbol", None)
             if is_quiet_time(datetime.now(UTC), symbol=last_symbol):
                 if not self._chart_quiet_paused:
                     self._chart_pause_for_quiet()
@@ -4241,23 +5076,25 @@ class App(tk.Tk):
         if not meta:
             return
         # Parse needed fields
-        symbol = meta.get('symbol')
-        direction = (meta.get('direction') or '').lower()
-        entry_utc_str = meta.get('entry_utc_str')
-        entry_price = meta.get('entry_price')
-        tp = meta.get('tp')
-        sl = meta.get('sl')
-        hit_kind = meta.get('hit_kind')
-        hit_time_utc_str = meta.get('hit_time_utc_str')
-        hit_price = meta.get('hit_price')
+        symbol = meta.get("symbol")
+        direction = (meta.get("direction") or "").lower()
+        entry_utc_str = meta.get("entry_utc_str")
+        entry_price = meta.get("entry_price")
+        tp = meta.get("tp")
+        sl = meta.get("sl")
+        hit_kind = meta.get("hit_kind")
+        hit_time_utc_str = meta.get("hit_time_utc_str")
+        hit_price = meta.get("hit_price")
         if not symbol or not entry_utc_str:
-            self._set_chart_message('Missing symbol or entry time; cannot render chart.')
+            self._set_chart_message(
+                "Missing symbol or entry time; cannot render chart."
+            )
             return
         self._chart_last_symbol = symbol
         try:
             entry_utc = datetime.fromisoformat(entry_utc_str).replace(tzinfo=UTC)
         except Exception:
-            self._set_chart_message('Invalid entry time format.')
+            self._set_chart_message("Invalid entry time format.")
             return
         now_utc = datetime.now(UTC)
         if is_quiet_time(now_utc, symbol=symbol):
@@ -4269,19 +5106,39 @@ class App(tk.Tk):
         self._chart_req_id += 1
         rid = self._chart_req_id
         self._chart_active_req_id = rid
-        self._set_chart_message(f"Loading 1m chart for {symbol} from {start_utc.strftime('%H:%M')} UTC (inserted time)…")
+        self._set_chart_message(
+            f"Loading 1m chart for {symbol} from {start_utc.strftime('%H:%M')} UTC (inserted time)…"
+        )
         self._chart_spinner_start(rid)
         self._ohlc_loading = True
         # Watchdog to avoid indefinite waiting if MT5 blocks
         self.after(8000, self._chart_watchdog, rid, symbol)
-        t = threading.Thread(target=self._fetch_and_render_chart_thread,
-                              args=(rid, symbol, direction, start_utc, end_utc, entry_utc, entry_price, sl, tp, hit_kind, hit_time_utc_str, hit_price),
-                              daemon=True)
+        t = threading.Thread(
+            target=self._fetch_and_render_chart_thread,
+            args=(
+                rid,
+                symbol,
+                direction,
+                start_utc,
+                end_utc,
+                entry_utc,
+                entry_price,
+                sl,
+                tp,
+                hit_kind,
+                hit_time_utc_str,
+                hit_price,
+            ),
+            daemon=True,
+        )
         t.start()
 
     def _ensure_mt5(self) -> tuple[bool, str | None]:
         if not _MT5_IMPORTED or mt5 is None:
-            return False, 'MetaTrader5 module not available. Install with: pip install MetaTrader5'
+            return (
+                False,
+                "MetaTrader5 module not available. Install with: pip install MetaTrader5",
+            )
         try:
             # If not initialized, initialize now
             if not self._mt5_inited:
@@ -4297,7 +5154,9 @@ class App(tk.Tk):
         if self._chart_active_req_id == rid and self._ohlc_loading:
             self._ohlc_loading = False
             self._chart_spinner_stop(rid)
-            self._set_chart_message(f"Still loading {symbol}… MT5 may be busy. Try again or check terminal.")
+            self._set_chart_message(
+                f"Still loading {symbol}… MT5 may be busy. Try again or check terminal."
+            )
 
     def _resolve_symbol(self, base: str) -> tuple[str | None, str | None]:
         # Prefer shared helper
@@ -4313,7 +5172,7 @@ class App(tk.Tk):
                 return base, None
             cands = mt5.symbols_get(f"{base}*") or []
             if cands:
-                cand = getattr(cands[0], 'name', None) or None
+                cand = getattr(cands[0], "name", None) or None
                 if cand and mt5.symbol_select(cand, True):
                     return cand, None
         except Exception:
@@ -4428,11 +5287,15 @@ class App(tk.Tk):
         for window_start, window_end in active_ranges:
             start_srv = self._to_server_naive(window_start, offset_hours)
             end_srv = self._to_server_naive(window_end, offset_hours)
-            part = mt5.copy_ticks_range(sym_name, start_srv, end_srv, mt5.COPY_TICKS_ALL)
+            part = mt5.copy_ticks_range(
+                sym_name, start_srv, end_srv, mt5.COPY_TICKS_ALL
+            )
             if part is None or len(part) == 0:
                 start_naive = window_start.replace(tzinfo=None)
                 end_naive = window_end.replace(tzinfo=None)
-                part = mt5.copy_ticks_range(sym_name, start_naive, end_naive, mt5.COPY_TICKS_ALL)
+                part = mt5.copy_ticks_range(
+                    sym_name, start_naive, end_naive, mt5.COPY_TICKS_ALL
+                )
             if part is None or len(part) == 0:
                 continue
             try:
@@ -4446,39 +5309,43 @@ class App(tk.Tk):
         minute_data: dict[datetime, list[float]] = defaultdict(list)
         for tk in ticks_aggregate:
             try:
-                bid = float(getattr(tk, 'bid'))
+                bid = float(getattr(tk, "bid"))
             except Exception:
                 try:
-                    bid = float(tk['bid'])
+                    bid = float(tk["bid"])
                 except Exception:
                     bid = None
             try:
-                ask = float(getattr(tk, 'ask'))
+                ask = float(getattr(tk, "ask"))
             except Exception:
                 try:
-                    ask = float(tk['ask'])
+                    ask = float(tk["ask"])
                 except Exception:
                     ask = None
             if bid is None and ask is None:
                 continue
-            price = bid if (direction or '').lower() == 'buy' else ask if ask is not None else bid
+            price = (
+                bid
+                if (direction or "").lower() == "buy"
+                else ask if ask is not None else bid
+            )
             if price is None:
                 continue
             try:
-                tms = getattr(tk, 'time_msc')
+                tms = getattr(tk, "time_msc")
             except Exception:
                 try:
-                    tms = tk['time_msc']
+                    tms = tk["time_msc"]
                 except Exception:
                     tms = None
             if tms:
                 dt_raw = datetime.fromtimestamp(float(tms) / 1000.0, tz=UTC)
             else:
                 try:
-                    tse = getattr(tk, 'time')
+                    tse = getattr(tk, "time")
                 except Exception:
                     try:
-                        tse = tk['time']
+                        tse = tk["time"]
                     except Exception:
                         continue
                 dt_raw = datetime.fromtimestamp(float(tse), tz=UTC)
@@ -4504,21 +5371,40 @@ class App(tk.Tk):
             closes.append(prices[-1])
         return times, opens, highs, lows, closes
 
-    def _fetch_and_render_chart_thread(self, rid: int, symbol: str, direction: str, start_utc: datetime, end_utc: datetime,
-                                        entry_utc: datetime, entry_price, sl, tp,
-                                        hit_kind, hit_time_utc_str, hit_price) -> None:
+    def _fetch_and_render_chart_thread(
+        self,
+        rid: int,
+        symbol: str,
+        direction: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        entry_utc: datetime,
+        entry_price,
+        sl,
+        tp,
+        hit_kind,
+        hit_time_utc_str,
+        hit_price,
+    ) -> None:
         try:
             # Step 1: MT5 init
             ok, err = self._ensure_mt5()
             if not ok:
-                msg = err or 'MT5 initialize failed.'
+                msg = err or "MT5 initialize failed."
                 self.after(0, self._chart_render_error, rid, msg)
                 return
-            self.after(0, self._set_chart_message, f"MT5 ready. Resolving symbol {symbol}…")
+            self.after(
+                0, self._set_chart_message, f"MT5 ready. Resolving symbol {symbol}…"
+            )
             # Step 2: Resolve symbol
             sym_name, err2 = self._resolve_symbol(symbol)
             if sym_name is None:
-                self.after(0, self._chart_render_error, rid, err2 or f"Symbol '{symbol}' not found.")
+                self.after(
+                    0,
+                    self._chart_render_error,
+                    rid,
+                    err2 or f"Symbol '{symbol}' not found.",
+                )
                 return
             # Step 3: Compute server window
             try:
@@ -4526,10 +5412,14 @@ class App(tk.Tk):
                 # If a hit exists, cap fetch end to 20 minutes after the hit
                 fetch_end_utc = end_utc
                 hit_dt = None
-                if hit_time_utc_str and hit_kind in ('TP', 'SL'):
+                if hit_time_utc_str and hit_kind in ("TP", "SL"):
                     try:
-                        hit_dt = datetime.fromisoformat(str(hit_time_utc_str)).replace(tzinfo=UTC)
-                        fetch_end_utc = min(end_utc, hit_dt + timedelta(minutes=20, seconds=30))
+                        hit_dt = datetime.fromisoformat(str(hit_time_utc_str)).replace(
+                            tzinfo=UTC
+                        )
+                        fetch_end_utc = min(
+                            end_utc, hit_dt + timedelta(minutes=20, seconds=30)
+                        )
                     except Exception:
                         hit_dt = None
                 start_server = self._to_server_naive(start_utc, offset_h)
@@ -4565,19 +5455,39 @@ class App(tk.Tk):
             timeframe = _TIMEFRAME_M1()
             timeframe_secs = _TIMEFRAME_SECONDS(timeframe)
             self.after(0, self._set_chart_message, f"Fetching M1 bars for {sym_name}…")
-            rates = _RATES_RANGE(sym_name, timeframe, start_utc, fetch_end_utc, offset_h, trace=False)
-            times, opens, highs, lows, closes = self._rates_to_ohlc_lists(rates, offset_h, timeframe_secs)
+            rates = _RATES_RANGE(
+                sym_name, timeframe, start_utc, fetch_end_utc, offset_h, trace=False
+            )
+            times, opens, highs, lows, closes = self._rates_to_ohlc_lists(
+                rates, offset_h, timeframe_secs
+            )
 
             if not times:
-                self.after(0, self._set_chart_message, f"No bars returned; falling back to raw ticks for {sym_name}…")
-                times, opens, highs, lows, closes = self._ticks_to_ohlc_lists(sym_name, offset_h, active_ranges, direction)
+                self.after(
+                    0,
+                    self._set_chart_message,
+                    f"No bars returned; falling back to raw ticks for {sym_name}…",
+                )
+                times, opens, highs, lows, closes = self._ticks_to_ohlc_lists(
+                    sym_name, offset_h, active_ranges, direction
+                )
                 if not times:
-                    self.after(0, self._chart_render_error, rid, "No price data available for requested range.")
+                    self.after(
+                        0,
+                        self._chart_render_error,
+                        rid,
+                        "No price data available for requested range.",
+                    )
                     return
 
             # Hard-trim arrays to include at most 20 minutes AFTER the hit time
             try:
-                if 'hit_dt' in locals() and hit_dt is not None and hit_kind in ('TP', 'SL') and times:
+                if (
+                    "hit_dt" in locals()
+                    and hit_dt is not None
+                    and hit_kind in ("TP", "SL")
+                    and times
+                ):
                     cutoff = hit_dt + timedelta(minutes=20, seconds=30)
                     end_idx = 0
                     for i, t in enumerate(times):
@@ -4594,9 +5504,11 @@ class App(tk.Tk):
                 pass
 
             # Hit info (reuse parsed hit_dt when available)
-            if hit_time_utc_str and 'hit_dt' not in locals():
+            if hit_time_utc_str and "hit_dt" not in locals():
                 try:
-                    hit_dt = datetime.fromisoformat(str(hit_time_utc_str)).replace(tzinfo=UTC)
+                    hit_dt = datetime.fromisoformat(str(hit_time_utc_str)).replace(
+                        tzinfo=UTC
+                    )
                 except Exception:
                     hit_dt = None
 
@@ -4607,9 +5519,26 @@ class App(tk.Tk):
                 if is_quiet_time(datetime.now(UTC), symbol=symbol):
                     self._chart_render_quiet(rid)
                     return
-                self._chart_render_draw(rid, symbol, times, opens, highs, lows, closes,
-                                        entry_utc, entry_price, sl, tp, hit_kind, hit_dt, hit_price,
-                                        start_utc, end_utc, quiet_segments)
+                self._chart_render_draw(
+                    rid,
+                    symbol,
+                    times,
+                    opens,
+                    highs,
+                    lows,
+                    closes,
+                    entry_utc,
+                    entry_price,
+                    sl,
+                    tp,
+                    hit_kind,
+                    hit_dt,
+                    hit_price,
+                    start_utc,
+                    end_utc,
+                    quiet_segments,
+                )
+
             self.after(0, _finish)
         except Exception as e:
             self.after(0, self._chart_render_error, rid, f"Chart thread error: {e}")
@@ -4653,11 +5582,11 @@ class App(tk.Tk):
         if self._chart_ax is None or self._chart_canvas is None:
             self._init_chart_widgets()
         if self._chart_ax is None:
-            self._set_chart_message('Matplotlib not available; cannot render chart.')
+            self._set_chart_message("Matplotlib not available; cannot render chart.")
             return
         ax = self._chart_ax
         ax.clear()
-        ax.grid(True, which='both', linestyle='--', alpha=0.3)
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
         if quiet_segments is None:
             quiet_segments = []
         if quiet_segments:
@@ -4696,15 +5625,19 @@ class App(tk.Tk):
             start_disp = start_utc + timedelta(hours=3)
             end_disp = end_utc + timedelta(hours=3)
 
-        ax.set_title(f"{symbol} | 1m | {entry_disp.strftime('%Y-%m-%d %H:%M:%S.%f')} UTC+3 inserted")
-        ax.set_xlabel('Time (UTC+3)')
-        ax.set_ylabel('Price')
+        ax.set_title(
+            f"{symbol} | 1m | {entry_disp.strftime('%Y-%m-%d %H:%M:%S.%f')} UTC+3 inserted"
+        )
+        ax.set_xlabel("Time (UTC+3)")
+        ax.set_ylabel("Price")
 
         # X-axis formatter
         try:
             locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
             # Ensure tick labels are rendered in UTC+3 (DISPLAY_TZ)
-            formatter = mdates.ConciseDateFormatter(locator, tz=DISPLAY_TZ, show_offset=False)
+            formatter = mdates.ConciseDateFormatter(
+                locator, tz=DISPLAY_TZ, show_offset=False
+            )
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(formatter)
         except Exception:
@@ -4712,26 +5645,37 @@ class App(tk.Tk):
 
         # Draw simple candlesticks directly (robust, no extra deps)
         try:
-            from matplotlib.patches import Rectangle
             import matplotlib.dates as mdates_local
+            from matplotlib.patches import Rectangle
+
             xs = [mdates_local.date2num(t) for t in times_disp]
             # body width ~= 60% of bar spacing
             if len(xs) >= 2:
                 w = (xs[1] - xs[0]) * 0.6
             else:
-                w = (1.0 / (24*60)) * 0.6  # fallback ~ 0.6 minute
+                w = (1.0 / (24 * 60)) * 0.6  # fallback ~ 0.6 minute
             for x, o, h, l, c in zip(xs, opens, highs, lows, closes):
-                col = '#2ca02c' if c >= o else '#d62728'  # green/red
+                col = "#2ca02c" if c >= o else "#d62728"  # green/red
                 # wick
                 ax.vlines(x, l, h, colors=col, linewidth=0.8, alpha=0.9)
                 # body (ensure non-zero height is visible)
                 bottom = min(o, c)
                 height = max(abs(c - o), (max(highs) - min(lows)) * 0.0002)
-                ax.add_patch(Rectangle((x - w/2, bottom), w, height, facecolor=col, edgecolor=col, linewidth=0.8, alpha=0.8))
+                ax.add_patch(
+                    Rectangle(
+                        (x - w / 2, bottom),
+                        w,
+                        height,
+                        facecolor=col,
+                        edgecolor=col,
+                        linewidth=0.8,
+                        alpha=0.8,
+                    )
+                )
             ax.set_xlim(xs[0], xs[-1])
         except Exception:
             # Ultimate fallback: plot closes
-            ax.plot(times_disp, closes, color='#1f77b4', linewidth=1.5, label='Close')
+            ax.plot(times_disp, closes, color="#1f77b4", linewidth=1.5, label="Close")
 
         # Overlays: Entry marker; SL/TP lines
         y_values = [v for v in closes]
@@ -4749,26 +5693,41 @@ class App(tk.Tk):
                 if next_time is None:
                     next_time = rounded_entry_disp + timedelta(minutes=5)
                 # Draw a left-pointing arrow so its tip is exactly at the rounded entry point
-                ax.annotate('',
-                            xy=(rounded_entry_disp, float(entry_price)),
-                            xytext=(next_time, float(entry_price)),
-                            arrowprops=dict(arrowstyle='-|>', color='tab:blue', lw=1.4, shrinkA=0, shrinkB=0),
-                            zorder=7)
+                ax.annotate(
+                    "",
+                    xy=(rounded_entry_disp, float(entry_price)),
+                    xytext=(next_time, float(entry_price)),
+                    arrowprops=dict(
+                        arrowstyle="-|>", color="tab:blue", lw=1.4, shrinkA=0, shrinkB=0
+                    ),
+                    zorder=7,
+                )
                 # Legend proxy so "Entry" shows with a left arrow marker
-                ax.plot([], [], color='tab:blue', marker='<', linestyle='None', label='Entry')
+                ax.plot(
+                    [],
+                    [],
+                    color="tab:blue",
+                    marker="<",
+                    linestyle="None",
+                    label="Entry",
+                )
             except Exception:
                 pass
         if isinstance(sl, (int, float)):
             y_values.append(float(sl))
-            ax.axhline(float(sl), color='tab:red', linestyle='-', linewidth=1.0, label='SL')
+            ax.axhline(
+                float(sl), color="tab:red", linestyle="-", linewidth=1.0, label="SL"
+            )
         if isinstance(tp, (int, float)):
             y_values.append(float(tp))
-            ax.axhline(float(tp), color='tab:green', linestyle='-', linewidth=1.0, label='TP')
+            ax.axhline(
+                float(tp), color="tab:green", linestyle="-", linewidth=1.0, label="TP"
+            )
 
         # Hit marker
-        if hit_disp is not None and hit_kind in ('TP', 'SL'):
+        if hit_disp is not None and hit_kind in ("TP", "SL"):
             try:
-                color = 'skyblue' if hit_kind == 'TP' else 'orange'
+                color = "skyblue" if hit_kind == "TP" else "orange"
                 price = None
                 if isinstance(hit_price, (int, float)):
                     price = float(hit_price)
@@ -4776,11 +5735,24 @@ class App(tk.Tk):
                     # approximate by close at nearest time
                     try:
                         # find index of closest time
-                        idx = min(range(len(times_disp)), key=lambda i: abs((times_disp[i] - hit_disp).total_seconds()))
+                        idx = min(
+                            range(len(times_disp)),
+                            key=lambda i: abs(
+                                (times_disp[i] - hit_disp).total_seconds()
+                            ),
+                        )
                         price = closes[idx]
                     except Exception:
                         price = None
-                ax.scatter([hit_disp], [price] if price is not None else [], color=color, s=40, marker='o', zorder=5, label=f'{hit_kind} hit')
+                ax.scatter(
+                    [hit_disp],
+                    [price] if price is not None else [],
+                    color=color,
+                    s=40,
+                    marker="o",
+                    zorder=5,
+                    label=f"{hit_kind} hit",
+                )
             except Exception:
                 pass
 
@@ -4790,8 +5762,16 @@ class App(tk.Tk):
         try:
             # Round entry time to the nearest minute for consistent positioning
             rounded_entry_disp = entry_disp.replace(second=0, microsecond=0)
-            left = min(times_disp[0], rounded_entry_disp, hit_disp) if hit_disp else min(times_disp[0], rounded_entry_disp)
-            right = max(times_disp[-1], rounded_entry_disp, hit_disp) if hit_disp else max(times_disp[-1], rounded_entry_disp)
+            left = (
+                min(times_disp[0], rounded_entry_disp, hit_disp)
+                if hit_disp
+                else min(times_disp[0], rounded_entry_disp)
+            )
+            right = (
+                max(times_disp[-1], rounded_entry_disp, hit_disp)
+                if hit_disp
+                else max(times_disp[-1], rounded_entry_disp)
+            )
             left = min(left, start_disp)
             right = max(right, end_disp)
             # Clamp right edge if hit occurs: include only 20 minutes after the hit time
@@ -4811,13 +5791,23 @@ class App(tk.Tk):
         # Y limits with padding, computed over visible x-range
         try:
             if left_xlim is not None and right_xlim is not None:
-                idxs = [i for i, t in enumerate(times_disp) if (t >= left_xlim and t <= right_xlim)]
+                idxs = [
+                    i
+                    for i, t in enumerate(times_disp)
+                    if (t >= left_xlim and t <= right_xlim)
+                ]
             else:
                 idxs = list(range(len(times_disp)))
             vis_highs = [highs[i] for i in idxs] if idxs else highs
             vis_lows = [lows[i] for i in idxs] if idxs else lows
-            ymin = min([min(vis_lows)] + [v for v in (sl, tp, entry_price) if isinstance(v, (int, float))])
-            ymax = max([max(vis_highs)] + [v for v in (sl, tp, entry_price) if isinstance(v, (int, float))])
+            ymin = min(
+                [min(vis_lows)]
+                + [v for v in (sl, tp, entry_price) if isinstance(v, (int, float))]
+            )
+            ymax = max(
+                [max(vis_highs)]
+                + [v for v in (sl, tp, entry_price) if isinstance(v, (int, float))]
+            )
             pad = (ymax - ymin) * 0.05 if (ymax > ymin) else 1.0
             ax.set_ylim(ymin - pad, ymax + pad)
         except Exception:
@@ -4845,11 +5835,15 @@ class App(tk.Tk):
     # Toggle button helpers
     def _update_buttons(self) -> None:
         try:
-            self.btn_tl_toggle.configure(text=("Stop" if self.timelapse.is_running() else "Start"))
+            self.btn_tl_toggle.configure(
+                text=("Stop" if self.timelapse.is_running() else "Start")
+            )
         except Exception:
             pass
         try:
-            self.btn_hits_toggle.configure(text=("Stop" if self.hits.is_running() else "Start"))
+            self.btn_hits_toggle.configure(
+                text=("Stop" if self.hits.is_running() else "Start")
+            )
         except Exception:
             pass
 
@@ -4881,7 +5875,9 @@ class App(tk.Tk):
         quiet_active = is_quiet_time(now_utc, asset_kind="crypto")
         try:
             transition = next_quiet_transition(now_utc, asset_kind="crypto")
-            delta_ms = int(max(1.0, min(60.0, (transition - now_utc).total_seconds())) * 1000)
+            delta_ms = int(
+                max(1.0, min(60.0, (transition - now_utc).total_seconds())) * 1000
+            )
         except Exception:
             delta_ms = 30000
 
@@ -4898,7 +5894,9 @@ class App(tk.Tk):
             was_paused = self._hits_quiet_paused
             self._hits_quiet_paused = False
             if was_paused and self._hits_should_run and not self.hits.is_running():
-                self._enqueue_log("hits", "Quiet window ended; resuming hits monitor.\n")
+                self._enqueue_log(
+                    "hits", "Quiet window ended; resuming hits monitor.\n"
+                )
                 self.hits.start()
         try:
             self._update_buttons()
@@ -4976,14 +5974,16 @@ class App(tk.Tk):
 
             # Create temporary files
             if timelapse_content.strip():
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False,
-                                               encoding='utf-8') as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".log", delete=False, encoding="utf-8"
+                ) as f:
                     f.write(timelapse_content)
                     timelapse_log_path = f.name
 
             if hits_content.strip():
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False,
-                                               encoding='utf-8') as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".log", delete=False, encoding="utf-8"
+                ) as f:
                     f.write(hits_content)
                     hits_log_path = f.name
         except Exception:
@@ -4992,11 +5992,11 @@ class App(tk.Tk):
             hits_log_path = None
 
         # Start a new instance of the GUI with log restore arguments
-        cmd = ['monitor-gui']
+        cmd = ["monitor-gui"]
         if timelapse_log_path:
-            cmd.extend(['--restore-timelapse-log', timelapse_log_path])
+            cmd.extend(["--restore-timelapse-log", timelapse_log_path])
         if hits_log_path:
-            cmd.extend(['--restore-hits-log', hits_log_path])
+            cmd.extend(["--restore-hits-log", hits_log_path])
 
         try:
             subprocess.Popen(cmd, cwd=HERE)
@@ -5147,18 +6147,60 @@ class App(tk.Tk):
 
     def _save_settings(self) -> None:
         data = {
-            "exclude_symbols": self.var_exclude_symbols.get() if self.var_exclude_symbols is not None else "",
-            "since_hours": self.var_since_hours.get() if self.var_since_hours is not None else 168,
-            "interval": self.var_interval.get() if self.var_interval is not None else 60,
-            "symbol_category": self.var_symbol_category.get() if self.var_symbol_category is not None else "All",
-            "hit_status": self.var_hit_status.get() if self.var_hit_status is not None else "All",
-            "symbol_filter": self.var_symbol_filter.get() if self.var_symbol_filter is not None else "",
-            "prox_since_hours": self.var_prox_since_hours.get() if self.var_prox_since_hours is not None else 336,
-            "prox_min_trades": self.var_prox_min_trades.get() if self.var_prox_min_trades is not None else 5,
-            "prox_symbol_filter": self.var_prox_symbol_filter.get() if self.var_prox_symbol_filter is not None else "",
-            "prox_category": self.var_prox_category.get() if self.var_prox_category is not None else "All",
-            "prox_auto": bool(self.var_prox_auto.get()) if self.var_prox_auto is not None else False,
-            "prox_interval": self.var_prox_interval.get() if self.var_prox_interval is not None else 300,
+            "exclude_symbols": (
+                self.var_exclude_symbols.get()
+                if self.var_exclude_symbols is not None
+                else ""
+            ),
+            "since_hours": (
+                self.var_since_hours.get() if self.var_since_hours is not None else 168
+            ),
+            "interval": (
+                self.var_interval.get() if self.var_interval is not None else 60
+            ),
+            "symbol_category": (
+                self.var_symbol_category.get()
+                if self.var_symbol_category is not None
+                else "All"
+            ),
+            "hit_status": (
+                self.var_hit_status.get() if self.var_hit_status is not None else "All"
+            ),
+            "symbol_filter": (
+                self.var_symbol_filter.get()
+                if self.var_symbol_filter is not None
+                else ""
+            ),
+            "prox_since_hours": (
+                self.var_prox_since_hours.get()
+                if self.var_prox_since_hours is not None
+                else 336
+            ),
+            "prox_min_trades": (
+                self.var_prox_min_trades.get()
+                if self.var_prox_min_trades is not None
+                else 5
+            ),
+            "prox_symbol_filter": (
+                self.var_prox_symbol_filter.get()
+                if self.var_prox_symbol_filter is not None
+                else ""
+            ),
+            "prox_category": (
+                self.var_prox_category.get()
+                if self.var_prox_category is not None
+                else "All"
+            ),
+            "prox_auto": (
+                bool(self.var_prox_auto.get())
+                if self.var_prox_auto is not None
+                else False
+            ),
+            "prox_interval": (
+                self.var_prox_interval.get()
+                if self.var_prox_interval is not None
+                else 300
+            ),
         }
         try:
             with open(self._settings_path(), "w", encoding="utf-8") as f:
@@ -5179,11 +6221,13 @@ class App(tk.Tk):
             pass
         self._schedule_prox_refresh()
 
-
     def _on_filter_changed(self, *args) -> None:
         """Trigger refresh when filter values change."""
         # Schedule a refresh with a small delay to avoid excessive refreshes
-        if hasattr(self, '_filter_refresh_job') and self._filter_refresh_job is not None:
+        if (
+            hasattr(self, "_filter_refresh_job")
+            and self._filter_refresh_job is not None
+        ):
             try:
                 self.after_cancel(self._filter_refresh_job)
             except Exception:
@@ -5191,14 +6235,14 @@ class App(tk.Tk):
         self._filter_refresh_job = self.after(300, self._db_refresh)
 
 
-
 def main() -> None:
     args = parse_args()
-    app = App(restore_timelapse_log=args.restore_timelapse_log,
-              restore_hits_log=args.restore_hits_log)
+    app = App(
+        restore_timelapse_log=args.restore_timelapse_log,
+        restore_hits_log=args.restore_hits_log,
+    )
     app.mainloop()
 
 
 if __name__ == "__main__":
     main()
-

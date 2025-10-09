@@ -38,7 +38,10 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
     """Populate denormalised columns on timelapse_hits based on the setups table."""
     with conn:
         cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (setups_table,))
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (setups_table,),
+        )
         has_setups = cur.fetchone() is not None
         if has_setups:
             cur.execute(
@@ -67,7 +70,7 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
                 )
                 WHERE entry_price IS NULL
                 """
-        )
+            )
 
 
 def ensure_tp_sl_setup_state_sqlite(conn) -> None:
@@ -85,7 +88,9 @@ def ensure_tp_sl_setup_state_sqlite(conn) -> None:
         )
 
 
-def load_tp_sl_setup_state_sqlite(conn, setup_ids: Iterable[int]) -> Dict[int, datetime]:
+def load_tp_sl_setup_state_sqlite(
+    conn, setup_ids: Iterable[int]
+) -> Dict[int, datetime]:
     """Return the last processed UTC timestamp for each setup id."""
 
     ids = list(dict.fromkeys(int(sid) for sid in setup_ids))
@@ -164,7 +169,9 @@ def load_setups_sqlite(
 ) -> List[Setup]:
     """Load setups from SQLite applying optional filters."""
     cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    )
     if cur.fetchone() is None:
         return []
 
@@ -175,7 +182,9 @@ def load_setups_sqlite(
         where.append(f"id IN ({placeholders})")
         params.extend([int(x) for x in ids])
     elif since_hours is not None:
-        threshold = (datetime.now(UTC) - timedelta(hours=since_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        threshold = (datetime.now(UTC) - timedelta(hours=since_hours)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         where.append("inserted_at >= ?")
         params.append(threshold)
     if symbols:
@@ -187,14 +196,14 @@ def load_setups_sqlite(
     sql = f"SELECT id, symbol, direction, sl, tp, price, as_of FROM {table}{where_clause} ORDER BY id"
     rows: List[Setup] = []
     cur.execute(sql, params)
-    for (sid, sym, direction, sl, tp, price, as_of) in cur.fetchall() or []:
+    for sid, sym, direction, sl, tp, price, as_of in cur.fetchall() or []:
         if as_of is None:
             continue
         if isinstance(as_of, str):
             try:
                 as_naive = datetime.fromisoformat(as_of)
             except Exception:
-                as_naive = datetime.strptime(as_of.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                as_naive = datetime.strptime(as_of.split(".")[0], "%Y-%m-%d %H:%M:%S")
         else:
             as_naive = as_of
         as_of_utc = as_naive.replace(tzinfo=UTC)
@@ -214,7 +223,9 @@ def load_setups_sqlite(
     return rows
 
 
-def record_hit_sqlite(conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool, utc3_hours: int = 3) -> None:
+def record_hit_sqlite(
+    conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool, utc3_hours: int = 3
+) -> None:
     """Insert or update a hit row for the supplied setup."""
 
     def infer_decimals_from_price(price: Optional[float]) -> int:
@@ -222,18 +233,18 @@ def record_hit_sqlite(conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool
             if price is None:
                 return 5
             s = str(float(price))
-            if 'e' in s or 'E' in s:
+            if "e" in s or "E" in s:
                 s = f"{float(price):.10f}"
-            return len(s.split('.')[1]) if '.' in s else 0
+            return len(s.split(".")[1]) if "." in s else 0
         except Exception:
             return 5
 
     def instrument_digits(symbol: str, ref_price: Optional[float]) -> int:
         try:
-            sym = (symbol or '').upper()
+            sym = (symbol or "").upper()
             if re.fullmatch(r"[A-Z]{6}", sym):
                 quote = sym[3:]
-                return 3 if quote == 'JPY' else 5
+                return 3 if quote == "JPY" else 5
             if re.fullmatch(r"XA[UG][A-Z]{3}", sym):
                 return 2
         except Exception:
@@ -241,7 +252,9 @@ def record_hit_sqlite(conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool
         digits = infer_decimals_from_price(ref_price)
         return max(0, min(10, digits)) or 5
 
-    digits = instrument_digits(setup.symbol, setup.entry_price if setup.entry_price is not None else hit.price)
+    digits = instrument_digits(
+        setup.symbol, setup.entry_price if setup.entry_price is not None else hit.price
+    )
 
     def r(value: Optional[float]) -> Optional[float]:
         try:
@@ -262,15 +275,19 @@ def record_hit_sqlite(conn, setup: Setup, hit: Hit, dry_run: bool, verbose: bool
                 setup.direction,
                 hit.kind,
                 (rounded_hit_price if rounded_hit_price is not None else hit.price),
-                hit.time_utc.isoformat(timespec='seconds'),
+                hit.time_utc.isoformat(timespec="seconds"),
             )
         )
     if dry_run:
         return
 
     hit_time_str = hit.time_utc.strftime("%Y-%m-%d %H:%M:%S")
-    hit_time_utc3 = (hit.time_utc + timedelta(hours=utc3_hours)).strftime("%Y-%m-%d %H:%M:%S")
-    entry_time_utc3 = (setup.as_of_utc + timedelta(hours=utc3_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    hit_time_utc3 = (hit.time_utc + timedelta(hours=utc3_hours)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    entry_time_utc3 = (setup.as_of_utc + timedelta(hours=utc3_hours)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     with conn:
         cur = conn.cursor()

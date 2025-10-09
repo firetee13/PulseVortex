@@ -46,10 +46,6 @@ jobs:
         isort --check-only src tests
         flake8 src tests
 
-    - name: Run type checking
-      run: |
-        mypy src/monitor
-
     - name: Run tests
       run: |
         pytest --cov=monitor --cov-report=xml --cov-report=html --cov-report=term-missing

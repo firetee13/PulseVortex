@@ -5,19 +5,19 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .domain import Hit, TickFetchStats
 
 try:
-    import MetaTrader5 as mt5  # type: ignore
+    import MetaTrader5 as mt5
 except Exception:  # pragma: no cover
-    mt5 = None  # type: ignore
+    mt5 = None
 
 UTC = timezone.utc
 
 
-def _coerce_price(value: object) -> Optional[float]:
+def _coerce_price(value: Any) -> Optional[float]:
     """Best-effort float conversion that ignores missing values."""
     if value is None:
         return None
@@ -172,7 +172,7 @@ def init_mt5(
                 )
             ok = False
             try:
-                kwargs = {"timeout": timeout}
+                kwargs: Dict[str, object] = {"timeout": timeout}
                 if portable:
                     kwargs["portable"] = True
                 if login and password and server:
@@ -246,7 +246,7 @@ def resolve_symbol(base: str) -> Optional[str]:
     return None
 
 
-def get_symbol_info(symbol: str):
+def get_symbol_info(symbol: str) -> Any | None:
     if mt5 is None:
         return None
     try:

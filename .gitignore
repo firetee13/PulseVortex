@@ -7,3 +7,4 @@ backup
 .clinerules
 *.json
 .python-version
+scripts/

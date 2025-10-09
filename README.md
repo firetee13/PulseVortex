@@ -71,8 +71,8 @@ Supports automated setup detection, real-time TP/SL hit monitoring, database per
 - **Monitors Tab**: Start/stop CLI tools (`timelapse_setups.py --watch`, `check_tp_sl_hits.py --watch`); live dual-pane logs; exclude symbols input
 - **DB Results Tab**: Table of setups/hits with filters (time, category, status, symbol); delete selected; auto-refresh; 1m candlestick charts with SL/TP overlays (pauses in quiet hours)
 - **SL Proximity Tab**: Analyzes entry position within SL-TP range; sweet-spot bins (e.g., 0.3-0.4 often >0.2R expectancy); per-symbol/category stats; auto-refresh
-- **PnL Tab**: Cumulative/average charts by category (Forex/Crypto/Indices) at 10k notional; win/loss markers; time-range filter
-- **PnL (Normalized) Tab**: ATR-normalized returns (risk units, log equity, vol-target, notional); category/bin filters; interactive metric switching
+- **PnL Tab**: Cumulative/average charts by category (Forex/Crypto/Indices) at 10k notional; win/loss markers; time-range filter; positive expectancy filtering for proximity bins
+- **PnL (Normalized) Tab**: ATR-normalized returns (risk units, log equity, vol-target, notional); category/bin filters; interactive metric switching; expectancy metrics displayed in R (risk units)
 - **Persistence**: Settings saved to `monitor_gui_settings.json` (excludes, filters, intervals); quiet-hour aware (pauses charts/monitors 23:45-00:59 UTC+3)
 
 ### TP/SL Hit Monitoring
@@ -93,7 +93,7 @@ Supports automated setup detection, real-time TP/SL hit monitoring, database per
 
 - **MT5 Rate Caching**: TTL per timeframe (W1:120s, D1/H4:45s, H1:12s, M15:6s); reduces IPC calls
 - **Tick Fetching**: Chunked by minute (default 1440min/page); prefiltered via M1 bars crossing SL/TP
-- **DB Indexing**: On symbol/setup_id/hit_time; lazy connections with managed close
+- **Database Performance**: Enhanced connection timeout (12s) and indexing on `timelapse_setups` and `timelapse_hits` tables for faster queries; lazy connections with managed close
 
 ## Requirements
 
@@ -335,6 +335,9 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - `tests/test_mt5_client.py`: Caching, offsets, symbol resolution
 - `tests/test_quiet_hours.py`: Timezone logic, ranges
 - `tests/test_tp_sl_state.py`: DB state persistence
+- `tests/test_config.py`: Environment variable handling, DB path resolution
+- `tests/test_db_helpers.py`: Database helper functions, hit recording, setup loading
+- `tests/test_symbols.py`: Symbol classification, category detection
 
 Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 
@@ -365,68 +368,108 @@ Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 ```mermaid
 graph TD
     subgraph External ["External Dependencies"]
-        MT5([🔌 MT5 Terminal])
+        MT5([🔌 MT5 Terminal<br/>Live market data])
     end
 
-    subgraph Core ["Core Modules monitor"]
+    subgraph EntryPoints ["Entry Points & Configuration"]
         direction TB
-        MC{{📡 mt5_client.py<br/>MT5 wrapper, caching,<br/>ticks/rates}}
+        VBS[🚀 Run_Monitors.vbs<br/>Windows launcher]
+        PYW[⚡ run_monitor_gui.pyw<br/>Direct GUI launcher]
+        REQ[📋 requirements.txt<br/>Dependencies]
+    end
+
+    subgraph Core ["Core Modules monitor/"]
+        direction TB
+        MC{{📡 mt5_client.py<br/>MT5 wrapper, caching,<br/>ticks/rates/ATR}}
         DB[(💾 db.py<br/>SQLite ops, schema,<br/>inserts/queries)]
-        QH{⏰ quiet_hours.py<br/>Timezone-aware pauses/<br/>exclusions}
+        QH{⏰ quiet_hours.py<br/>Timezone-aware pauses/<br/>quiet hour filtering}
         SY[🏷️ symbols.py<br/>Classification: forex/<br/>crypto/indices]
-        CF[⚙️ config.py<br/>DB path, env vars]
-        DM[/📋 domain.py<br/>Dataclasses: Setup,<br/>Hit, etc./]
+        CF[⚙️ config.py<br/>DB path, env vars,<br/>settings resolution]
+        DM[/📋 domain.py<br/>Dataclasses: Setup,<br/>Hit, TickFetchStats/]
     end
 
     subgraph CLI ["CLI Tools"]
         direction TB
-        TS{{🔍 timelapse_setups.py<br/>Setup analysis, scoring,<br/>DB insert}}
-        CH[🎯 check_tp_sl_hits.py<br/>TP/SL hit detection,<br/>tick scanning]
+        TS{{🔍 timelapse_setups.py<br/>Setup analysis, scoring,<br/>multi-TF consensus}}
+        CH[🎯 check_tp_sl_hits.py<br/>TP/SL hit detection,<br/>tick scanning + filtering]
     end
 
     subgraph GUISub ["GUI Interface"]
-        MG([📊 monitor_gui.py<br/>Tabs: Monitors, DB Results,<br/>SL Proximity, PnL])
+        MG([📊 monitor_gui.py<br/>Tabs: Monitors, DB Results,<br/>SL Proximity, PnL<br/>+ Expectancy Filtering])
+    end
+
+    subgraph Testing ["Test Suite"]
+        direction TB
+        TESTS[[🧪 tests/<br/>Unit tests<br/>90%+ coverage<br/>MT5 fakes for isolation]]
     end
 
     subgraph Persist ["Persistence Layer"]
         direction TB
-        TIMELAPSE[(📁 timelapse.db<br/>Setups & Hits tables)]
-        SETTINGS[⚡ monitor_gui_settings.json<br/>UI prefs, excludes/filters]
+        TIMELAPSE[(📁 timelapse.db<br/>Setups & Hits tables<br/>+ Indexes for performance)]
+        SETTINGS[⚡ monitor_gui_settings.json<br/>UI prefs, excludes,<br/>filters, intervals]
     end
 
-    MT5 -.->|"Live data: ticks, rates, symbols"| MC
-    MC -->|"Cached data"| TS
-    MC -->|"Ticks/Bars"| CH
-    MC -.->|"Live charts"| MG
-    TS -->|"Analysis results"| DB
-    CH -->|"Hit records"| DB
-    DB <-->|"CRUD ops"| TIMELAPSE
-    TIMELAPSE -->|"Queries: results, stats, PnL"| MG
-    QH -.->|"Quiet checks"| TS
-    QH -.->|"Pause monitoring"| CH
-    QH -.->|"Chart pauses"| MG
-    SY -.->|"Symbol filtering"| TS
-    SY -.->|"Category stats"| CH
-    SY -.->|"Per-symbol views"| MG
-    CF -->|"Config resolution"| DB
-    DM -->|"Data models"| TS
-    DM -->|"Hit structs"| CH
-    DM -.->|"GUI bindings"| MG
-    MG -->|"Saved settings"| SETTINGS
+    %% Entry Points connections
+    VBS -->|"Launches minimized"| MG
+    PYW -->|"Direct launch"| MG
+    REQ -.->|"Dependency management"| Core
+
+    %% MT5 data flows
+    MT5 -.->|"Live data: ticks, rates, symbols<br/>ATR calculations, timeframes"| MC
+    MC -->|"Cached rates (W1/D1/H4/H1/M15)"| TS
+    MC -->|"Real-time ticks/bars<br/>Server offset detection"| CH
+    MC -.->|"Historical data for charts<br/>Live price updates"| MG
+
+    %% Analysis flows
+    TS -->|"Setup records (score, RRR, prox)"| DB
+    CH -->|"Hit records (TP/SL detection)"| DB
+    DB <-->|"CRUD ops with indexes<br/>12s timeout optimization"| TIMELAPSE
+    TIMELAPSE -->|"Queries: results, stats, PnL<br/>Proximity bin analysis"| MG
+
+    %% Quiet hours integration
+    QH -.->|"Pause during quiet hours<br/>23:45-00:59 UTC+3"| TS
+    QH -.->|"Suspend monitoring<br/>Auto-resume after quiet"| CH
+    QH -.->|"Chart pauses<br/>Weekend crypto handling"| MG
+
+    %% Symbol classification flows
+    SY -.->|"Symbol filtering & categorization<br/>Forex/Crypto/Indices"| TS
+    SY -.->|"Category-based statistics<br/>Per-symbol analytics"| CH
+    SY -.->"|Per-symbol views & filtering<br/>Category-based PnL"| MG
+
+    %% Configuration and data models
+    CF -->|"Environment variables<br/>DB path resolution"| DB
+    DM -->|"Setup/Hit data structures<br/>Validation models"| TS
+    DM -->|"Hit detection structs<br/>State management"| CH
+    DM -.->|"GUI data bindings<br/>Chart data models"| MG
+
+    %% Settings persistence
+    MG <-->|"Save/load UI state<br/>Filter persistence"| SETTINGS
+
+    %% Testing integration
+    TESTS -.->|"Unit test coverage<br/>Mock MT5/SQLite"| Core
+    TESTS -.->|"CLI tool testing<br/>Integration tests"| CLI
+    TESTS -.->|"Database testing<br/>Schema validation"| Persist
 
     classDef external fill:#e1f5fe,stroke:#01579b,stroke-width:3px,color:#000
+    classDef entry fill:#e8f4fd,stroke:#1976d2,stroke-width:2px,color:#000,stroke-dasharray: 5 5
     classDef core fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,color:#000
     classDef cli fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px,color:#000
     classDef gui fill:#fff3e0,stroke:#e65100,stroke-width:3px,color:#000
+    classDef test fill:#f1f8e9,stroke:#558b2f,stroke-width:2px,color:#000
     classDef persist fill:#fce4ec,stroke:#880e4f,stroke-width:2px,color:#000
 
     class MT5 external
+    class VBS,PYW,REQ entry
     class MC,DB,QH,SY,CF,DM core
     class TS,CH cli
     class MG gui
+    class TESTS test
     class TIMELAPSE,SETTINGS persist
 
     linkStyle default stroke:#333,stroke-width:2px
+    linkStyle 0,1,2 stroke:#1976d2,stroke-width:2px,stroke-dasharray: 5 5
+    linkStyle 3,4,5 stroke:#01579b,stroke-width:3px
+    linkStyle 21,22,23 stroke:#558b2f,stroke-width:2px,stroke-dasharray: 3 3
 ```
 
 ### Common Issues

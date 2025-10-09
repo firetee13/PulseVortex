@@ -1237,11 +1237,12 @@ def analyze(
 
         price_out = _round_to(price, symbol_digits)
 
-        precision_digits = symbol_digits
-        if price_out is not None:
-            inferred = _infer_decimals_from_price(price_out)
+        precision_candidates = [symbol_digits]
+        for level in (price, sl, tp):
+            inferred = _infer_decimals_from_price(level)
             if 0 <= inferred <= 10:
-                precision_digits = inferred
+                precision_candidates.append(inferred)
+        precision_digits = max(precision_candidates) if precision_candidates else symbol_digits
 
         sl_out = _round_to(sl, precision_digits)
         tp_out = _round_to(tp, precision_digits)

@@ -228,6 +228,9 @@ class App(tk.Tk):
         self.tab_pnl_norm = ttk.Frame(self.nb)
         self.nb.add(self.tab_pnl_norm, text="PnL (Normalized)")
 
+        self.tab_top = ttk.Frame(self.nb)
+        self.nb.add(self.tab_top, text="Top Performers")
+
         # Set DB Results tab as default active tab
         self.nb.select(self.tab_db)
 
@@ -253,6 +256,11 @@ class App(tk.Tk):
         self.var_pnl_norm_mode = tk.StringVar(value="risk_units")
         self.var_pnl_norm_category = tk.StringVar(value="overall")
         self.var_pnl_norm_bin = tk.StringVar(value="All")
+        # Top Performers tab variables
+        self.var_top_since_hours = tk.IntVar(value=168)
+        self.var_top_min_trades = tk.IntVar(value=10)
+        self.var_top_auto = tk.BooleanVar(value=True)
+        self.var_top_interval = tk.IntVar(value=300)
         # Load persisted settings (if any) before building controls
         try:
             self._load_settings()
@@ -284,6 +292,8 @@ class App(tk.Tk):
         # UI elements in PnL tab
         self._make_pnl_tab(self.tab_pnl)
         self._make_pnl_norm_tab(self.tab_pnl_norm)
+        # UI elements in Top Performers tab
+        self._make_top_tab(self.tab_top)
         # Ensure DB results refresh once at startup and auto-refresh is active
         try:
             self.var_auto.set(True)
@@ -303,6 +313,11 @@ class App(tk.Tk):
         # Prime proximity stats view
         try:
             self._prox_refresh()
+        except Exception:
+            pass
+        # Prime top performers view
+        try:
+            self._top_refresh()
         except Exception:
             pass
 
@@ -618,6 +633,17 @@ class App(tk.Tk):
         self.pnl_indices_chart_frame = None
         # Filter refresh job
         self._filter_refresh_job = None
+        # Top Performers state
+        self._top_fig = None
+        self._top_ax = None
+        self._top_canvas = None
+        self._top_toolbar = None
+        self._top_loading = False
+        self.top_status = None
+        self.top_table = None
+        self.top_chart_frame = None
+        self._top_auto_job: str | None = None
+        self._top_refresh_job: str | None = None
 
         # Guard to blank charts during quiet hours even without new selections
         try:
@@ -1588,6 +1614,549 @@ class App(tk.Tk):
                 self._prox_canvas.draw_idle()
         except Exception:
             pass
+
+    def _make_top_tab(self, parent) -> None:
+        """Create the Top Performers tab UI: controls + table + chart."""
+        top = ttk.Frame(parent)
+        top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+        row1 = ttk.Frame(top)
+        row1.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=1, to=24 * 365, textvariable=self.var_top_since_hours,
+                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(row1, text="Min trades:").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=1, to=500, textvariable=self.var_top_min_trades,
+                    width=4).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Button(row1, text="Refresh", command=self._top_refresh).pack(side=tk.LEFT)
+        ttk.Checkbutton(row1, text="Auto", variable=self.var_top_auto,
+                        command=self._top_auto_toggle).pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Label(row1, text="Every(s):").pack(side=tk.LEFT)
+        ttk.Spinbox(row1, from_=15, to=3600, textvariable=self.var_top_interval,
+                    width=6).pack(side=tk.LEFT, padx=(4, 10))
+
+        chart_wrap = ttk.Frame(parent)
+        chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.top_status = ttk.Label(chart_wrap, text="Top performers pending refresh…")
+        self.top_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 4))
+
+        table_frame = ttk.Frame(chart_wrap)
+        table_frame.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 6))
+        cols = ("rank", "symbol", "trades", "win_rate", "expectancy", "avg_rrr", "score")
+        self.top_table = ttk.Treeview(table_frame, columns=cols, show='headings', height=10)
+        headings = {
+            "rank": "Rank",
+            "symbol": "Symbol",
+            "trades": "Trades",
+            "win_rate": "Win %",
+            "expectancy": "Edge (R)",
+            "avg_rrr": "Avg RRR",
+            "score": "Score",
+        }
+        for col in cols:
+            self.top_table.heading(col, text=headings[col])
+        self.top_table.column("rank", width=50, anchor=tk.CENTER)
+        self.top_table.column("symbol", width=100, anchor=tk.W)
+        self.top_table.column("trades", width=60, anchor=tk.E)
+        self.top_table.column("win_rate", width=70, anchor=tk.E)
+        self.top_table.column("expectancy", width=80, anchor=tk.E)
+        self.top_table.column("avg_rrr", width=80, anchor=tk.E)
+        self.top_table.column("score", width=60, anchor=tk.E)
+        vs_table = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.top_table.yview)
+        self.top_table.configure(yscrollcommand=vs_table.set)
+        self.top_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs_table.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.top_chart_frame = ttk.Frame(chart_wrap)
+        self.top_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        if FigureCanvasTkAgg is None or Figure is None:
+            try:
+                self.top_status.config(text="Matplotlib not available; charts disabled.")
+            except Exception:
+                pass
+
+    def _top_auto_toggle(self) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        if self.var_top_auto.get():
+            self._top_schedule_next(soon=True)
+        else:
+            if self._top_auto_job is not None:
+                try:
+                    self.after_cancel(self._top_auto_job)
+                except Exception:
+                    pass
+                self._top_auto_job = None
+
+    def _top_schedule_next(self, soon: bool = False) -> None:
+        if not self.var_top_auto.get():
+            return
+        delay = 1000 if soon else max(5, int(self.var_top_interval.get())) * 1000
+        if self._top_auto_job is not None:
+            try:
+                self.after_cancel(self._top_auto_job)
+            except Exception:
+                pass
+            self._top_auto_job = None
+        self._top_auto_job = self.after(delay, self._top_refresh)
+
+    def _schedule_top_refresh(self, delay_ms: int = 350) -> None:
+        if self._top_refresh_job is not None:
+            try:
+                self.after_cancel(self._top_refresh_job)
+            except Exception:
+                pass
+            self._top_refresh_job = None
+        self._top_refresh_job = self.after(delay_ms, self._top_refresh)
+
+    def _top_refresh(self) -> None:
+        if self._top_loading:
+            return
+        if self._top_refresh_job is not None:
+            try:
+                self.after_cancel(self._top_refresh_job)
+            except Exception:
+                pass
+            self._top_refresh_job = None
+        if self.top_status is not None:
+            try:
+                self.top_status.config(text="Loading top performers…")
+            except Exception:
+                pass
+        self._top_loading = True
+        threading.Thread(target=self._top_fetch_thread, daemon=True).start()
+
+    def _top_fetch_thread(self) -> None:
+        dbname = self.var_db_name.get().strip()
+        hours = max(1, int(self.var_top_since_hours.get()))
+        min_trades = max(1, int(self.var_top_min_trades.get()))
+
+        payload: dict[str, object] = {
+            'error': None,
+            'since_hours': hours,
+            'min_trades': min_trades,
+        }
+        rows: list[dict[str, object]] = []
+
+        try:
+            try:
+                import sqlite3  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"sqlite3 not available: {exc}")
+            db_path = db_path_str(dbname)
+            conn = sqlite3.connect(db_path, timeout=12)
+            try:
+                cur = conn.cursor()
+                try:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_setups_inserted_at ON timelapse_setups(inserted_at)")
+                except Exception:
+                    pass
+                try:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_hits_setup_id ON timelapse_hits(setup_id)")
+                except Exception:
+                    pass
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timelapse_setups'")
+                if cur.fetchone() is None:
+                    payload['rows'] = []
+                else:
+                    thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+                    sql = (
+                        """
+                        SELECT s.symbol, s.proximity_to_sl, s.rrr, s.inserted_at, h.hit, h.hit_time, h.entry_price, h.hit_price, h.sl, s.direction
+                        FROM timelapse_setups s
+                        LEFT JOIN timelapse_hits h ON h.setup_id = s.id
+                        WHERE s.inserted_at >= ?
+                        ORDER BY s.inserted_at DESC
+                        """
+                    )
+                    cur.execute(sql, (thr,))
+                    raw_rows = cur.fetchmany(100000) or []
+                    for symbol, prox_raw, rrr_raw, inserted_at, hit, hit_time, entry_price, hit_price, sl_val, direction in raw_rows:
+                        symbol_s = str(symbol) if symbol is not None else ''
+                        if prox_raw is None:
+                            continue
+                        try:
+                            prox_val = float(prox_raw)
+                        except Exception:
+                            continue
+                        rrr_val = None
+                        if rrr_raw is not None:
+                            try:
+                                rrr_val = float(rrr_raw)
+                            except Exception:
+                                rrr_val = None
+                        hit_str = (hit or '')
+                        outcome = None
+                        if isinstance(hit_str, str):
+                            u = hit_str.upper()
+                            if u == 'TP':
+                                outcome = 'win'
+                            elif u == 'SL':
+                                outcome = 'loss'
+
+                        # Calculate trade R multiple
+                        trade_r = None
+                        if outcome in ['win', 'loss'] and entry_price and hit_price and sl_val:
+                            try:
+                                ep = float(entry_price)
+                                hp = float(hit_price)
+                                slp = float(sl_val)
+                                dir_s = (str(direction) or '').lower()
+                                profit = (hp - ep) if dir_s == 'buy' else (ep - hp)
+                                risk = (ep - slp) if dir_s == 'buy' else (slp - ep)
+                                if risk > 0:
+                                    trade_r = profit / risk
+                            except Exception:
+                                pass
+
+                        rows.append({
+                            'symbol': symbol_s,
+                            'proximity': prox_val,
+                            'rrr': rrr_val,
+                            'outcome': outcome,
+                            'trade_r': trade_r,
+                            'inserted_at': inserted_at,
+                            'hit_time': hit_time,
+                        })
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            payload['error'] = str(exc)
+
+        payload['rows'] = rows
+
+        self.after(0, lambda: self._top_apply_result(payload))
+
+    def _top_apply_result(self, payload: dict[str, object]) -> None:
+        self._top_loading = False
+        error = payload.get('error')
+        if error:
+            if self.top_status is not None:
+                try:
+                    self.top_status.config(text=f"Error: {error}")
+                except Exception:
+                    pass
+            self._top_schedule_next()
+            return
+
+        rows = payload.get('rows')
+        if not isinstance(rows, list):
+            rows = []
+
+        try:
+            processed = self._top_compute_stats(rows, payload)
+        except Exception as exc:
+            if self.top_status is not None:
+                try:
+                    self.top_status.config(text=f"Error during compute: {exc}")
+                except Exception:
+                    pass
+            print(f"[top_apply_result] compute error: {exc}", file=sys.stderr)
+            self._top_schedule_next()
+            return
+
+        try:
+            self._top_render(processed)
+        except Exception as exc:
+            if self.top_status is not None:
+                try:
+                    self.top_status.config(text=f"Error during render: {exc}")
+                except Exception:
+                    pass
+            print(f"[top_apply_result] render error: {exc}", file=sys.stderr)
+            self._top_schedule_next()
+            return
+
+        if self.top_status is not None:
+            try:
+                self.top_status.config(text="Top performers ready.")
+            except Exception:
+                pass
+        self._top_schedule_next()
+
+    def _top_compute_stats(self, rows: list[dict[str, object]], payload: dict[str, object]) -> dict[str, object]:
+        hours = payload.get('since_hours', 0)
+        min_trades = payload.get('min_trades', 1)
+        try:
+            min_trades_int = max(1, int(min_trades))
+        except Exception:
+            min_trades_int = 1
+
+        symbol_stats: dict[str, dict[str, object]] = {}
+
+        for row in rows:
+            symbol = str(row.get('symbol') or '')
+            outcome = row.get('outcome')
+            rrr_val = row.get('rrr')
+            trade_r = row.get('trade_r')
+            inserted_at = row.get('inserted_at')
+            hit_time = row.get('hit_time')
+
+            # Use hit_time for completed trades, inserted_at for pending trades
+            event_time = hit_time if hit_time else inserted_at
+
+            stat = symbol_stats.setdefault(symbol, {
+                'symbol': symbol,
+                'trades': 0,
+                'completed': 0,
+                'wins': 0,
+                'losses': 0,
+                'sum_rrr_wins': 0.0,
+                'sum_trade_r': 0.0,
+                'recent_trades': [],  # For recency weighting
+            })
+
+            stat['trades'] = int(stat['trades']) + 1
+
+            # Add to recent trades for recency calculation
+            if event_time:
+                stat['recent_trades'].append({
+                    'time': event_time,
+                    'outcome': outcome,
+                    'trade_r': trade_r
+                })
+
+            if outcome in ['win', 'loss']:
+                stat['completed'] = int(stat['completed']) + 1
+                if outcome == 'win':
+                    stat['wins'] = int(stat['wins']) + 1
+                    if rrr_val is not None:
+                        stat['sum_rrr_wins'] = float(stat.get('sum_rrr_wins', 0.0)) + rrr_val
+                else:
+                    stat['losses'] = int(stat['losses']) + 1
+
+                if trade_r is not None:
+                    stat['sum_trade_r'] = float(stat.get('sum_trade_r', 0.0)) + trade_r
+
+        # Calculate metrics and scores for each symbol
+        results = []
+        now = datetime.now(timezone.utc)
+
+        for symbol, stat in symbol_stats.items():
+            trades = int(stat['trades'])
+            completed = int(stat['completed'])
+            wins = int(stat['wins'])
+
+            if completed < min_trades_int:
+                continue
+
+            # Win Rate (40% weight)
+            win_rate = wins / completed if completed > 0 else 0.0
+
+            # Expectancy (30% weight) - average R multiple per trade
+            avg_trade_r = float(stat.get('sum_trade_r', 0.0)) / completed if completed > 0 else 0.0
+
+            # Skip symbols with negative expectancy (losing symbols)
+            if avg_trade_r <= 0:
+                continue
+
+            # Average RRR (15% weight)
+            avg_rrr = float(stat.get('sum_rrr_wins', 0.0)) / wins if wins > 0 else 0.0
+
+            # Trade Frequency Factor (10% weight) - more trades = more reliable
+            frequency_factor = min(1.0, completed / 50.0)  # Normalize to max at 50 trades
+
+            # Recency Factor (5% weight) - recent performance weighted higher
+            recency_factor = 0.0
+            recent_trades = stat.get('recent_trades', [])
+            if recent_trades:
+                recent_weight = 0.0
+                recent_score = 0.0
+                for trade in recent_trades:
+                    try:
+                        trade_time = trade['time']
+                        if isinstance(trade_time, str):
+                            trade_dt = datetime.fromisoformat(trade_time.replace('Z', '+00:00'))
+                        else:
+                            trade_dt = trade_time
+
+                        days_ago = (now - trade_dt).days
+                        if days_ago <= 30:  # Only consider last 30 days
+                            weight = 1.0 - (days_ago / 30.0)  # Linear decay
+                            recent_weight += weight
+
+                            # Score recent performance (wins=1, losses=0)
+                            recent_score += weight if trade['outcome'] == 'win' else 0
+                    except Exception:
+                        continue
+
+                if recent_weight > 0:
+                    recency_factor = recent_score / recent_weight
+
+            # Calculate weighted score
+            score = (win_rate * 0.4) + (avg_trade_r * 0.3) + (avg_rrr * 0.15) + (frequency_factor * 0.1) + (recency_factor * 0.05)
+
+            results.append({
+                'symbol': symbol,
+                'trades': completed,
+                'win_rate': win_rate,
+                'expectancy': avg_trade_r,
+                'avg_rrr': avg_rrr,
+                'score': score,
+                'frequency_factor': frequency_factor,
+                'recency_factor': recency_factor,
+            })
+
+        # Sort by score and take top 10
+        results.sort(key=lambda x: x['score'], reverse=True)
+        top_results = results[:10]
+
+        return {
+            'top_performers': top_results,
+            'total_symbols': len(symbol_stats),
+            'since_hours': hours,
+            'min_trades': min_trades_int,
+        }
+
+    def _top_render(self, data: dict[str, object]) -> None:
+        if self.top_status is None:
+            return
+
+        top_performers = data.get('top_performers', [])
+        total_symbols = data.get('total_symbols', 0)
+        since_hours = data.get('since_hours', 0)
+        min_trades = data.get('min_trades', 1)
+
+        # Update status
+        try:
+            status_text = f"Top {len(top_performers)} profitable performers from {total_symbols} symbols (last {since_hours}h, min {min_trades} trades, positive R only)"
+            self.top_status.config(text=status_text)
+        except Exception:
+            pass
+
+        # Update table
+        top_table = getattr(self, 'top_table', None)
+        if top_table is not None:
+            try:
+                top_table.delete(*top_table.get_children())
+            except Exception:
+                pass
+
+            for i, performer in enumerate(top_performers, 1):
+                try:
+                    symbol = performer.get('symbol', '')
+                    trades = performer.get('trades', 0)
+                    win_rate = performer.get('win_rate', 0.0)
+                    expectancy = performer.get('expectancy', 0.0)
+                    avg_rrr = performer.get('avg_rrr', 0.0)
+                    score = performer.get('score', 0.0)
+
+                    row = (
+                        i,
+                        symbol,
+                        trades,
+                        f"{win_rate * 100:.1f}%",
+                        f"{expectancy:+.2f}",
+                        f"{avg_rrr:.2f}",
+                        f"{score:.3f}",
+                    )
+                    top_table.insert('', tk.END, values=row)
+                except Exception:
+                    continue
+
+        # Render chart if matplotlib is available
+        if FigureCanvasTkAgg is not None and Figure is not None:
+            self._top_render_chart(data)
+
+    def _top_render_chart(self, data: dict[str, object]) -> None:
+        if self.top_chart_frame is None:
+            return
+
+        # Initialize chart widgets if needed
+        if self._top_ax is None or self._top_canvas is None:
+            self._init_top_chart_widgets()
+
+        if self._top_ax is None:
+            return
+
+        ax = self._top_ax
+        ax.clear()
+
+        top_performers = data.get('top_performers', [])
+        if not top_performers:
+            ax.text(0.5, 0.5, 'No data available', ha='center', va='center',
+                   transform=ax.transAxes, fontsize=12)
+            if self._top_canvas is not None:
+                self._top_canvas.draw_idle()
+            return
+
+        # Prepare data for chart
+        symbols = [p.get('symbol', '') for p in top_performers]
+        scores = [p.get('score', 0.0) for p in top_performers]
+        win_rates = [p.get('win_rate', 0.0) for p in top_performers]
+
+        # Create horizontal bar chart
+        y_pos = range(len(symbols))
+        bars = ax.barh(y_pos, scores, color='#2ca02c', alpha=0.7)
+
+        # Color bars based on win rate
+        for i, (bar, win_rate) in enumerate(zip(bars, win_rates)):
+            if win_rate >= 0.7:
+                bar.set_color('#2ca02c')  # Green for high win rate
+            elif win_rate >= 0.5:
+                bar.set_color('#ff7f0e')  # Orange for medium win rate
+            else:
+                bar.set_color('#d62728')  # Red for low win rate
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(symbols)
+        ax.set_xlabel('Performance Score')
+        ax.set_title('Top 10 Performing Symbols')
+        ax.grid(True, axis='x', linestyle='--', alpha=0.3)
+
+        # Add score labels on bars
+        for i, (bar, score) in enumerate(zip(bars, scores)):
+            width = bar.get_width()
+            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2,
+                   f'{score:.3f}', ha='left', va='center', fontsize=9)
+
+        ax.set_xlim(0, max(scores) * 1.15 if scores else 1.0)
+
+        try:
+            if self._top_fig is not None:
+                self._top_fig.tight_layout()
+            if self._top_canvas is not None:
+                self._top_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _init_top_chart_widgets(self) -> None:
+        if FigureCanvasTkAgg is None or Figure is None:
+            return
+        if self.top_chart_frame is None:
+            return
+
+        # Clear existing widgets
+        for child in list(self.top_chart_frame.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        fig = Figure(figsize=(8, 6), dpi=100)
+        ax = fig.add_subplot(111)
+
+        canvas = FigureCanvasTkAgg(fig, master=self.top_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        try:
+            toolbar = NavigationToolbar2Tk(canvas, self.top_chart_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._top_toolbar = toolbar
+        except Exception:
+            self._top_toolbar = None
+
+        self._top_fig = fig
+        self._top_ax = ax
+        self._top_canvas = canvas
 
     def _make_pnl_tab(self, parent) -> None:
         """Create the PnL tab UI: simple controls + Matplotlib chart."""

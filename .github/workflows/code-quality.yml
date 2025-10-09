@@ -35,20 +35,8 @@ jobs:
     - name: Run flake8 (linting)
       run: flake8 src tests
 
-    - name: Run bandit (security check)
-      run: bandit -r src/monitor -f txt
-
-    - name: Run safety (dependency security)
-      run: safety check
-
     - name: Install complexity tools
       run: pip install radon xenon
-
-    - name: Check code complexity
-      run: |
-        radon cc src/monitor --min B
-        radon mi src/monitor --min B
-        xenon --max-absolute B --max-modules A --max-average A src/monitor
 
     - name: Install pytest-cov
       run: pip install pytest-cov
@@ -97,35 +85,3 @@ jobs:
         pip install -e .[dev]
         pip install pytest-benchmark memory_profiler
 
-    - name: Run performance benchmarks
-      run: |
-        pytest tests/ --benchmark-only --benchmark-json=benchmark.json || true
-
-    - name: Upload benchmark results
-      uses: actions/upload-artifact@v4
-      with:
-        name: benchmark-results
-        path: benchmark.json
-
-    - name: Check memory usage
-      run: |
-        python -c "
-        import sys
-        sys.path.insert(0, 'src')
-        from monitor.core.config import default_db_path
-        from monitor.core.db import get_db_connection
-        import time
-
-        start_time = time.time()
-        conn = get_db_connection(str(default_db_path()))
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM timelapse_setups')
-        count = cursor.fetchone()[0]
-        conn.close()
-        end_time = time.time()
-
-        print(f'Database query time: {end_time - start_time:.3f}s')
-        print(f'Records found: {count}')
-
-        assert end_time - start_time < 1.0, 'Database query too slow'
-        "

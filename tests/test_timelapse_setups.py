@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 import sqlite3
 from decimal import Decimal
 
-import timelapse_setups as tls
+import monitor.cli.setup_analyzer as tls
 
 UTC = timezone.utc
 

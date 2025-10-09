@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterator, List, Tuple
 
-from monitor.symbols import classify_symbol
+from .symbols import classify_symbol
 
 UTC = timezone.utc
 UTC_PLUS_3 = timezone(timedelta(hours=3))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from monitor.quiet_hours import (
+from monitor.core.quiet_hours import (
     UTC,
     iter_active_utc_ranges,
     iter_quiet_utc_ranges,

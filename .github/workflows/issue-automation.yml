@@ -1,0 +1,198 @@
+name: Issue Automation
+
+on:
+  issues:
+    types: [opened, closed, labeled]
+  pull_request:
+    types: [opened, closed, ready_for_review]
+
+jobs:
+  issue-labeler:
+    name: Auto-label Issues
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    permissions:
+      issues: write
+    steps:
+    - name: Auto-label new issues
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const issue = context.payload.issue;
+          const title = issue.title.toLowerCase();
+          const body = issue.body.toLowerCase();
+
+          const labels = [];
+
+          // Label based on issue content
+          if (title.includes('bug') || title.includes('error') || title.includes('crash')) {
+            labels.push('bug');
+          }
+
+          if (title.includes('feature') || title.includes('enhancement') || title.includes('add')) {
+            labels.push('enhancement');
+          }
+
+          if (title.includes('documentation') || title.includes('readme') || title.includes('docs')) {
+            labels.push('documentation');
+          }
+
+          if (title.includes('question') || title.includes('help') || title.includes('how')) {
+            labels.push('question');
+          }
+
+          if (title.includes('performance') || title.includes('slow') || title.includes('speed')) {
+            labels.push('performance');
+          }
+
+          if (title.includes('gui') || title.includes('interface') || title.includes('ui')) {
+            labels.push('gui');
+          }
+
+          if (title.includes('cli') || title.includes('command line') || title.includes('terminal')) {
+            labels.push('cli');
+          }
+
+          if (title.includes('database') || title.includes('db') || title.includes('sqlite')) {
+            labels.push('database');
+          }
+
+          if (title.includes('mt5') || title.includes('metatrader') || title.includes('trading')) {
+            labels.push('mt5-integration');
+          }
+
+          // Add good first issue and help wanted labels based on complexity
+          if (body.length < 500 && !title.includes('complex') && !title.includes('refactor')) {
+            labels.push('good first issue');
+          }
+
+          if (labels.length > 0) {
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: labels
+            });
+          }
+
+  pr-checklist:
+    name: PR Checklist
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    permissions:
+      pull-requests: write
+    steps:
+    - name: Add PR checklist comment
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { data: pr } = await github.rest.pulls.get({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: context.issue.number
+          });
+
+          const comment = `
+          ## 📋 Pull Request Checklist
+
+          Please ensure your PR meets these requirements:
+
+          ### Code Quality
+          - [ ] Code follows the project's style guidelines (Black, isort, flake8)
+          - [ ] All tests pass: \`pytest -v\`
+          - [ ] Code has appropriate type hints
+          - [ ] Documentation is updated if necessary
+
+          ### Testing
+          - [ ] New functionality includes tests
+          - [ ] Tests cover edge cases
+          - [ ] No regression in existing functionality
+
+          ### Performance
+          - [ ] No significant performance degradation
+          - [ ] Memory usage is reasonable
+          - [ ] Database queries are optimized
+
+          ### Security
+          - [ ] No hardcoded secrets or credentials
+          - [ ] Dependencies are secure (check with \`safety\`)
+          - [ ] Input validation is appropriate
+
+          ### Trading Logic
+          - [ ] MT5 integration is tested
+          - [ ] Database schema changes are migration-safe
+          - [ ] Risk management logic is preserved
+
+          ### Documentation
+          - [ ] README.md is updated if needed
+          - [ ] Commit messages follow conventional format
+          - [ ] PR description explains the "why" not just the "what"
+
+          ---
+
+          🤖 **This is an automated checklist. Please check items that apply.**
+          `;
+
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: comment
+          });
+
+  welcome:
+    name: Welcome New Contributors
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    permissions:
+      pull-requests: write
+    steps:
+    - name: Check if first-time contributor
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { data: pr } = await github.rest.pulls.get({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: context.issue.number
+          });
+
+          // Check if this is the user's first PR
+          const { data: user } = await github.rest.users.getByUsername({
+            username: pr.user.login
+          });
+
+          // Simple heuristic: if user has < 5 public repos, assume new contributor
+          if (user.public_repos < 5) {
+            const comment = `
+            ## 🎉 Welcome to PulseVortex Monitor!
+
+            Thank you for your first contribution! 🙏
+
+            Here are some things that might help:
+
+            ### 📚 Resources
+            - [Project README](https://github.com/${{ github.repository }}#readme)
+            - [Code Style Guide](https://github.com/${{ github.repository }}/blob/main/CONTRIBUTING.md)
+            - [Architecture Documentation](https://github.com/${{ github.repository }}/blob/main/docs/ARCHITECTURE.md)
+
+            ### 🤝 Getting Help
+            - Feel free to ask questions in this PR
+            - Join our discussions for general questions
+            - Check existing issues for similar problems
+
+            ### 📝 Review Process
+            - Maintainers will review your PR soon
+            - We focus on code quality, testing, and trading logic safety
+            - Don't worry if we ask for changes - it's part of the process!
+
+            Happy contributing! 🚀
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+          }

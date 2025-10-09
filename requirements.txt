@@ -1,8 +1,8 @@
-# Core runtime dependencies for the timelapse tools
-# - timelapse_setups.py: polls MT5 for data updates
-# - check_tp_sl_hits.py: uses MetaTrader5 to fetch ticks/bars
-# - monitor_gui.py: uses matplotlib for chart rendering in Tkinter
+# Core runtime dependencies for PulseVortex Monitor
+# - monitor-setup: polls MT5 for data updates
+# - monitor-hits: uses MetaTrader5 to fetch ticks/bars
+# - monitor-gui: uses matplotlib for chart rendering in Tkinter
 
-MetaTrader5
-matplotlib
-numpy
+MetaTrader5>=5.0.45
+matplotlib>=3.5.0
+numpy>=1.21.0

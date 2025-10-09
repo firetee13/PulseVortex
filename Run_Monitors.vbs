@@ -1,4 +1,5 @@
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = WshShell.CurrentDirectory
-WshShell.Run "pyenv exec pythonw run_monitor_gui.pyw", 0, False
+' Launch the monitor GUI using the CLI entry point
+WshShell.Run "pyenv exec monitor-gui", 0, False
 Set WshShell = Nothing

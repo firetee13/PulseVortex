@@ -1,0 +1,92 @@
+name: Release Automation
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Get version
+      id: get_version
+      run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ steps.get_version.outputs.version }}
+        draft: false
+        prerelease: false
+        body: |
+          ## Release ${{ steps.get_version.outputs.version }}
+
+          ### Changes
+          <!-- Add your changelog here -->
+
+          ### Installation
+          ```bash
+          pip install monitor==${{ steps.get_version.outputs.version }}
+          ```
+
+          ### Docker
+          ```bash
+          docker pull pulsevortex/monitor:${{ steps.get_version.outputs.version }}
+          ```
+
+  build-and-upload:
+    name: Build and Upload Artifacts
+    runs-on: ${{ matrix.os }}
+    needs: create-release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+            ext: ''
+          - os: windows-latest
+            platform: windows
+            arch: amd64
+            ext: '.exe'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+
+    - name: Build standalone executable
+      run: |
+        pyinstaller --onefile --name monitor-${{ needs.create-release.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }} src/monitor/gui/main.py
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: dist/monitor-${{ needs.create-release.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
+        asset_name: monitor-${{ needs.create-release.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
+        asset_content_type: application/octet-stream

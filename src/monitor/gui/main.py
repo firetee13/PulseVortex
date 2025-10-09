@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 PulseVortex GUI Launcher for:
-  - timelapse_setups.py --watch
-  - realtime_check_tp_sl_hits.py
+  - monitor-setup --watch
+  - monitor-hits --watch
 
 Provides Start/Stop buttons and a shared log output.
 
 Usage:
-  python monitor_gui.py
+  monitor-gui
 
 Notes:
-  - Uses the same Python interpreter as this script (sys.executable).
+  - Uses the CLI entry points for proper package integration.
   - Runs both child scripts with unbuffered output (-u) so logs stream live.
   - Stops processes via terminate() when pressing Stop or closing the window.
 """
@@ -34,8 +34,8 @@ import tempfile
 import shutil
 import math
 from typing import List, Sequence, Optional
-from monitor.config import db_path_str, default_db_path
-from monitor.mt5_client import (
+from monitor.core.config import db_path_str, default_db_path
+from monitor.core.mt5_client import (
     resolve_symbol as _RESOLVE,
     get_server_offset_hours as _GET_OFFS,
     to_server_naive as _TO_SERVER,
@@ -43,13 +43,13 @@ from monitor.mt5_client import (
     timeframe_m1 as _TIMEFRAME_M1,
     timeframe_seconds as _TIMEFRAME_SECONDS,
 )
-from monitor.quiet_hours import (
+from monitor.core.quiet_hours import (
     iter_active_utc_ranges,
     iter_quiet_utc_ranges,
     is_quiet_time,
     next_quiet_transition,
 )
-from monitor.symbols import classify_symbol
+from monitor.core.symbols import classify_symbol
 
 # Plotting
 try:
@@ -117,9 +117,10 @@ class ProcController:
             return
         self._stop_evt.clear()
         try:
+            from monitor.core.config import project_root
             self.proc = subprocess.Popen(
                 self.cmd,
-                cwd=HERE,
+                cwd=str(project_root()),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,
@@ -328,12 +329,12 @@ class App(tk.Tk):
         py = sys.executable or "python"
         self.timelapse = ProcController(
             name="timelapse",
-            cmd=[py, "-u", "timelapse_setups.py", "--watch"],
+            cmd=["monitor-setup", "--watch"],
             log_put=self._enqueue_log,
         )
         self.hits = ProcController(
             name="hits",
-            cmd=[py, "-u", "check_tp_sl_hits.py", "--watch", "--interval", "1"],
+            cmd=["monitor-hits", "--watch", "--interval", "1"],
             log_put=self._enqueue_log,
         )
 
@@ -4911,8 +4912,7 @@ class App(tk.Tk):
     # Button handlers
     def _start_timelapse(self) -> None:
         # Build command dynamically to include exclude list and prox sl if provided
-        py = sys.executable or "python"
-        cmd = [py, "-u", "timelapse_setups.py", "--watch"]
+        cmd = ["monitor-setup", "--watch"]
         try:
             ex = (self.var_exclude_symbols.get() or "").strip()
         except Exception:
@@ -4992,7 +4992,7 @@ class App(tk.Tk):
             hits_log_path = None
 
         # Start a new instance of the GUI with log restore arguments
-        cmd = [sys.executable, 'run_monitor_gui.pyw']
+        cmd = ['monitor-gui']
         if timelapse_log_path:
             cmd.extend(['--restore-timelapse-log', timelapse_log_path])
         if hits_log_path:

@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from check_tp_sl_hits import RateBar, _bar_crosses_price, _evaluate_setup
-from monitor.domain import Setup, TickFetchStats
+from monitor.cli.hit_checker import RateBar, _bar_crosses_price, _evaluate_setup
+from monitor.core.domain import Setup, TickFetchStats
 
 
 UTC = timezone.utc
@@ -71,7 +71,7 @@ class EvaluateSetupQuietHoursTests(unittest.TestCase):
             captured_ranges.append((kwargs['start_utc'], kwargs['end_utc']))
             return None, stats, 1
 
-        with patch('check_tp_sl_hits.scan_for_hit_with_chunks', side_effect=fake_scan_for_hit):
+        with patch('monitor.cli.hit_checker.scan_for_hit_with_chunks', side_effect=fake_scan_for_hit):
             result = _evaluate_setup(
                 setup,
                 last_checked_utc=setup.as_of_utc,
@@ -106,7 +106,7 @@ class EvaluateSetupQuietHoursTests(unittest.TestCase):
         )
         now_utc = datetime(2025, 9, 28, 21, 30, tzinfo=UTC)
 
-        with patch('check_tp_sl_hits.scan_for_hit_with_chunks') as fake_scan:
+        with patch('monitor.cli.hit_checker.scan_for_hit_with_chunks') as fake_scan:
             fake_scan.return_value = (None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False), 0)
             result = _evaluate_setup(
                 setup,

@@ -2,14 +2,14 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from monitor.db import (
+from monitor.core.db import (
     backfill_hit_columns_sqlite,
     ensure_hits_table_sqlite,
     load_recorded_ids_sqlite,
     load_setups_sqlite,
     record_hit_sqlite,
 )
-from monitor.domain import Hit, Setup
+from monitor.core.domain import Hit, Setup
 
 
 UTC = timezone.utc

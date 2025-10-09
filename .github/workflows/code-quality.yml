@@ -1,0 +1,134 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better analysis
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Run Black (code formatting)
+      run: black --check --diff src tests
+
+    - name: Run isort (import sorting)
+      run: isort --check-only --diff src tests
+
+    - name: Run flake8 (linting)
+      run: flake8 src tests
+
+    - name: Run mypy (type checking)
+      run: mypy src/monitor
+
+    - name: Run bandit (security check)
+      run: bandit -r src/monitor -f txt
+
+    - name: Run safety (dependency security)
+      run: safety check
+
+    - name: Install complexity tools
+      run: pip install radon xenon
+
+    - name: Check code complexity
+      run: |
+        radon cc src/monitor --min B
+        radon mi src/monitor --min B
+        xenon --max-absolute B --max-modules A --max-average A src/monitor
+
+    - name: Install pytest-cov
+      run: pip install pytest-cov
+
+    - name: Run tests with coverage
+      run: |
+        pytest --cov=monitor --cov-report=term-missing --cov-fail-under=80
+
+    - name: Check for TODO/FIXME comments
+      run: |
+        if grep -r "TODO\|FIXME" src/ --include="*.py"; then
+          echo "Found TODO/FIXME comments. Please address them or move to issues."
+          exit 1
+        fi
+
+    - name: Validate package metadata
+      run: |
+        python -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            data = tomllib.load(f)
+
+        # Check required fields
+        required = ['name', 'version', 'description', 'authors']
+        for field in required:
+            assert field in data['project'], f'Missing required field: {field}'
+
+        print('✅ Package metadata is valid')
+        "
+
+  performance:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+        pip install pytest-benchmark memory_profiler
+
+    - name: Run performance benchmarks
+      run: |
+        pytest tests/ --benchmark-only --benchmark-json=benchmark.json || true
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark.json
+
+    - name: Check memory usage
+      run: |
+        python -c "
+        import sys
+        sys.path.insert(0, 'src')
+        from monitor.core.config import default_db_path
+        from monitor.core.db import get_db_connection
+        import time
+
+        start_time = time.time()
+        conn = get_db_connection(str(default_db_path()))
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM timelapse_setups')
+        count = cursor.fetchone()[0]
+        conn.close()
+        end_time = time.time()
+
+        print(f'Database query time: {end_time - start_time:.3f}s')
+        print(f'Records found: {count}')
+
+        assert end_time - start_time < 1.0, 'Database query too slow'
+        "

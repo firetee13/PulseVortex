@@ -38,9 +38,9 @@ except Exception:
     sqlite3 = None  # type: ignore
 
 
-from monitor.config import default_db_path
-from monitor import mt5_client
-from monitor.quiet_hours import is_quiet_time, UTC_PLUS_3
+from monitor.core.config import default_db_path
+from monitor.core import mt5_client
+from monitor.core.quiet_hours import is_quiet_time, UTC_PLUS_3
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import json

@@ -39,9 +39,9 @@ try:
 except ImportError:
     sqlite3 = None  # type: ignore
 
-from monitor.domain import Hit, Setup, TickFetchStats
-from monitor.config import db_path_str
-from monitor.db import (
+from monitor.core.domain import Hit, Setup, TickFetchStats
+from monitor.core.config import db_path_str
+from monitor.core.db import (
     backfill_hit_columns_sqlite,
     ensure_hits_table_sqlite,
     ensure_tp_sl_setup_state_sqlite,
@@ -51,7 +51,7 @@ from monitor.db import (
     persist_tp_sl_setup_state_sqlite,
     record_hit_sqlite,
 )
-from monitor.mt5_client import (
+from monitor.core.mt5_client import (
     earliest_hit_from_ticks,
     get_server_offset_hours,
     get_symbol_info,
@@ -65,8 +65,8 @@ from monitor.mt5_client import (
     timeframe_seconds,
     to_server_naive,
 )
-from monitor.quiet_hours import iter_active_utc_ranges, is_quiet_time
-from monitor.symbols import classify_symbol
+from monitor.core.quiet_hours import iter_active_utc_ranges, is_quiet_time
+from monitor.core.symbols import classify_symbol
 
 UTC = timezone.utc
 

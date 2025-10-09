@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from monitor.mt5_client import earliest_hit_from_ticks
+from monitor.core.mt5_client import earliest_hit_from_ticks
 
 
 class EarliestHitFromTicksTests(unittest.TestCase):

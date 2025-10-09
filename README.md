@@ -1,12 +1,12 @@
 # PulseVortex: Trade Setup Analyzer & Monitor
 
-[![Build Status](https://github.com/firetee13/monitor/workflows/CI/badge.svg)](https://github.com/firetee13/monitor/actions)
-[![Code Quality](https://github.com/firetee13/monitor/workflows/Code-Quality/badge.svg)](https://github.com/firetee13/monitor/actions)
+[![Build Status](https://github.com/firetee13/monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/firetee13/monitor/actions/workflows/ci.yml)
+[![Code Quality](https://github.com/firetee13/monitor/actions/workflows/code-quality.yml/badge.svg)](https://github.com/firetee13/monitor/actions/workflows/code-quality.yml)
 [![Coverage: >80%](https://img.shields.io/badge/coverage-%3E80%25-brightgreen)](https://github.com/firetee13/monitor#testing)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![Type checking: mypy](https://img.shields.io/badge/type%20checking-mypy-blue)](https://mypy.readthedocs.io/)
-[![Linting: flake8](https://img.shields.io/badge/linting-flake8-green)](https://flake8.pycqa.org/)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000)](https://github.com/psf/black)
+[![Type checking: mypy](https://img.shields.io/badge/type%20checking-mypy-blue)](https://mypy-lang.org/)
+[![Linting: flake8](https://img.shields.io/badge/linting-flake8-green)](https://github.com/pycqa/flake8)
 [![Security: bandit](https://img.shields.io/badge/security-bandit-yellow)](https://bandit.readthedocs.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

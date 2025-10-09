@@ -15,7 +15,7 @@ jobs:
       issues: write
     steps:
     - name: Auto-label new issues
-      uses: actions/github-script@v6
+      uses: actions/github-script@v8
       with:
         script: |
           const issue = context.payload.issue;
@@ -83,7 +83,7 @@ jobs:
       pull-requests: write
     steps:
     - name: Add PR checklist comment
-      uses: actions/github-script@v6
+      uses: actions/github-script@v8
       with:
         script: |
           const { data: pr } = await github.rest.pulls.get({
@@ -148,7 +148,7 @@ jobs:
       pull-requests: write
     steps:
     - name: Check if first-time contributor
-      uses: actions/github-script@v6
+      uses: actions/github-script@v8
       with:
         script: |
           const { data: pr } = await github.rest.pulls.get({

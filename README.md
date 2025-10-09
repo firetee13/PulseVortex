@@ -1,5 +1,12 @@
 # PulseVortex: Trade Setup Analyzer & Monitor
 
+[![CI/CD Pipeline](https://github.com/firetee13/monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/firetee13/monitor/actions/workflows/ci.yml)
+[![Code Quality](https://github.com/firetee13/monitor/actions/workflows/code-quality.yml/badge.svg)](https://github.com/firetee13/monitor/actions/workflows/code-quality.yml)
+[![codecov](https://codecov.io/gh/firetee13/monitor/branch/main/graph/badge.svg)](https://codecov.io/gh/firetee13/monitor)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A comprehensive Python application suite for automated trade setup detection and monitoring via MetaTrader 5 (MT5) integration. Designed for forex, crypto, and indices traders, it provides CLI tools for analysis and hit detection, plus a GUI for visualization, SL proximity optimization, and PnL analytics.
 
 Key Components:

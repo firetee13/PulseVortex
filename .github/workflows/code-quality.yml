@@ -1,0 +1,81 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  quality:
+    name: Code Quality Checks
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better analysis
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Run Black (code formatting)
+      run: black --check --diff src tests
+
+    - name: Run isort (import sorting)
+      run: isort --check-only --diff src tests
+
+    - name: Run flake8 (linting)
+      run: flake8 src tests
+
+    - name: Install complexity tools
+      run: pip install radon xenon
+
+    - name: Install pytest-cov
+      run: pip install pytest-cov
+
+    - name: Run tests with coverage
+      run: |
+        coverage erase
+        pytest --cov=monitor --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80
+
+    - name: Validate package metadata
+      run: |
+        python -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            data = tomllib.load(f)
+
+        # Check required fields
+        required = ['name', 'version', 'description', 'authors']
+        for field in required:
+            assert field in data['project'], f'Missing required field: {field}'
+
+        print('Package metadata is valid')
+        "
+
+  performance:
+    name: Performance Tests
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+        pip install pytest-benchmark memory_profiler
+

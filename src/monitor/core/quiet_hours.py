@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterator, List, Tuple
 
-from monitor.symbols import classify_symbol
+from .symbols import classify_symbol
 
 UTC = timezone.utc
 UTC_PLUS_3 = timezone(timedelta(hours=3))
@@ -40,14 +40,18 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.astimezone(UTC)
 
 
-def _daily_quiet_intervals(day_local: date, weekend_quiet: bool) -> List[Tuple[datetime, datetime]]:
+def _daily_quiet_intervals(
+    day_local: date, weekend_quiet: bool
+) -> List[Tuple[datetime, datetime]]:
     """Compute quiet intervals for a given local day as UTC datetimes."""
 
     intervals: List[Tuple[datetime, datetime]] = []
     for window in QUIET_WINDOWS_UTC3:
         start_local = datetime.combine(day_local, window.start, tzinfo=UTC_PLUS_3)
         if window.spans_midnight():
-            end_local = datetime.combine(day_local + timedelta(days=1), window.end, tzinfo=UTC_PLUS_3)
+            end_local = datetime.combine(
+                day_local + timedelta(days=1), window.end, tzinfo=UTC_PLUS_3
+            )
         else:
             end_local = datetime.combine(day_local, window.end, tzinfo=UTC_PLUS_3)
         intervals.append((start_local.astimezone(UTC), end_local.astimezone(UTC)))
@@ -57,7 +61,9 @@ def _daily_quiet_intervals(day_local: date, weekend_quiet: bool) -> List[Tuple[d
         weekend_end_local = datetime.combine(
             day_local + timedelta(days=2), time(hour=0, minute=59), tzinfo=UTC_PLUS_3
         )
-        intervals.append((weekend_start_local.astimezone(UTC), weekend_end_local.astimezone(UTC)))
+        intervals.append(
+            (weekend_start_local.astimezone(UTC), weekend_end_local.astimezone(UTC))
+        )
 
     return intervals
 
@@ -133,7 +139,9 @@ def iter_active_utc_ranges(
     if start_utc >= end_utc:
         return
 
-    quiet = list(iter_quiet_utc_ranges(start_utc, end_utc, asset_kind=asset_kind, symbol=symbol))
+    quiet = list(
+        iter_quiet_utc_ranges(start_utc, end_utc, asset_kind=asset_kind, symbol=symbol)
+    )
     cursor = start_utc
     for qs, qe in quiet:
         if cursor < qs:

@@ -1,0 +1,194 @@
+name: Scheduled Tasks
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  health-check:
+    name: Daily Health Check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+
+    - name: Check package health
+      run: |
+        # Test CLI entry points
+        monitor-setup --help
+        monitor-hits --help
+        monitor-gui --help
+
+        # Test imports
+        python -c "
+        from monitor.core.config import project_root, default_db_path
+        from monitor.core.domain import Setup, Hit
+        print('✅ Package imports successfully')
+        "
+
+    - name: Check dependencies for security issues
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json || true
+
+    - name: Check for outdated dependencies
+      run: |
+        pip list --outdated --format=json > outdated-deps.json || true
+
+    - name: Create issue if problems found
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const title = '🚨 Daily Health Check Failed';
+          const body = `
+          The daily health check failed for repository ${{ github.repository }}.
+
+          **Workflow**: ${{ github.workflow }}
+          **Run ID**: ${{ github.run_id }}
+          **Timestamp**: ${{ github.event.head_commit.timestamp }}
+
+          Please investigate the failure and fix any issues.
+
+          [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          `;
+
+          // Check if similar issue already exists
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: ['health-check']
+          });
+
+          const existingIssue = issues.find(issue =>
+            issue.title.includes('Daily Health Check Failed')
+          );
+
+          if (!existingIssue) {
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['health-check', 'bug']
+            });
+          }
+
+    - name: Upload reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: health-check-reports
+        path: |
+          safety-report.json
+          outdated-deps.json
+        retention-days: 30
+
+  dependency-update-check:
+    name: Check for Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Check for updates
+      run: |
+        python -m pip install --upgrade pip
+        pip install pip-upgrader
+
+        # Check if dependencies need updates
+        echo "Checking for outdated packages..."
+        pip list --outdated > outdated.txt
+
+        if [ -s outdated.txt ]; then
+          echo "Found outdated dependencies:"
+          cat outdated.txt
+
+          # Create a summary for potential issue
+          echo "## Outdated Dependencies" > dependency-summary.md
+          echo "" >> dependency-summary.md
+          "\`\`\`" >> dependency-summary.md
+          cat outdated.txt >> dependency-summary.md
+          "\`\`\`" >> dependency-summary.md
+        else
+          echo "All dependencies are up to date!"
+        fi
+
+    - name: Upload dependency report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-report
+        path: |
+          outdated.txt
+          dependency-summary.md
+        retention-days: 7
+
+  backup-check:
+    name: Database Backup Check
+    runs-on: ubuntu-latest
+    # Only run if this is the main repository (not forks)
+    if: github.repository == 'firetee13/monitor_prod'
+    steps:
+    - name: Check if backup workflow exists
+      run: |
+        if [ -f ".github/workflows/backup.yml" ]; then
+          echo "✅ Backup workflow found"
+        else
+          echo "⚠️ No backup workflow found"
+          echo "Consider creating a backup workflow for your trading data"
+        fi
+
+    - name: Create backup reminder issue
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const title = '💾 Database Backup Reminder';
+          const body = `
+          This is a reminder to set up automated backups for your trading data.
+
+          **Why backups are important:**
+          - Trading data has financial value
+          - Historical data is irreplaceable
+          - Configuration files contain custom settings
+
+          **Suggested backup locations:**
+          - Cloud storage (Google Drive, Dropbox, etc.)
+          - Git LFS for smaller files
+          - External database services
+          - Institutional backup solutions
+
+          **What to backup:**
+          - \`timelapse.db\` (main database)
+          - \`monitor_gui_settings.json\` (GUI settings)
+          - Custom configuration files
+          - Historical data exports
+
+          Consider setting up a GitHub Actions workflow for automated backups.
+          `;
+
+          await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: title,
+            body: body,
+            labels: ['maintenance', 'backup']
+          });

@@ -25,13 +25,13 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import os
+import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
-import os
-import sys
-import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 try:
@@ -39,9 +39,8 @@ try:
 except ImportError:
     sqlite3 = None  # type: ignore
 
-from monitor.domain import Hit, Setup, TickFetchStats
-from monitor.config import db_path_str
-from monitor.db import (
+from monitor.core.config import db_path_str
+from monitor.core.db import (
     backfill_hit_columns_sqlite,
     ensure_hits_table_sqlite,
     ensure_tp_sl_setup_state_sqlite,
@@ -51,13 +50,14 @@ from monitor.db import (
     persist_tp_sl_setup_state_sqlite,
     record_hit_sqlite,
 )
-from monitor.mt5_client import (
+from monitor.core.domain import Hit, Setup, TickFetchStats
+from monitor.core.mt5_client import (
     earliest_hit_from_ticks,
     get_server_offset_hours,
     get_symbol_info,
     init_mt5,
-    resolve_symbol,
     rates_range_utc,
+    resolve_symbol,
     shutdown_mt5,
     ticks_range_all,
     timeframe_from_code,
@@ -65,8 +65,8 @@ from monitor.mt5_client import (
     timeframe_seconds,
     to_server_naive,
 )
-from monitor.quiet_hours import iter_active_utc_ranges, is_quiet_time
-from monitor.symbols import classify_symbol
+from monitor.core.quiet_hours import is_quiet_time, iter_active_utc_ranges
+from monitor.core.symbols import classify_symbol
 
 UTC = timezone.utc
 
@@ -89,7 +89,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional: only check setups inserted in the last N hours (default: all)",
     )
-    group.add_argument("--ids", help="Comma-separated setup IDs to check (overrides --since-hours)")
+    group.add_argument(
+        "--ids", help="Comma-separated setup IDs to check (overrides --since-hours)"
+    )
     parser.add_argument(
         "--symbols",
         help="Optional comma-separated symbols filter (e.g., BTCUSD,SOLUSD)",
@@ -117,7 +119,9 @@ def parse_args() -> argparse.Namespace:
         default=db_path_str(),
         help="Path to SQLite DB file (default: timelapse.db next to script)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Do not write hit records to DB")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Do not write hit records to DB"
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--mt5-path",
@@ -146,7 +150,11 @@ def parse_args() -> argparse.Namespace:
         default=_env_bool("MT5_PORTABLE", False),
         help="Pass portable=True to MT5 (env: MT5_PORTABLE)",
     )
-    parser.add_argument("--watch", action="store_true", help="Run continuously, polling every --interval seconds")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Run continuously, polling every --interval seconds",
+    )
     parser.add_argument(
         "--interval",
         type=int,
@@ -191,7 +199,6 @@ def _parse_symbols(symbols_arg: Optional[str]) -> Optional[List[str]]:
     if not symbols_arg:
         return None
     return [s.strip() for s in symbols_arg.split(",") if s.strip()]
-
 
 
 @dataclass
@@ -262,7 +269,9 @@ def _rate_time(rate: object, offset_hours: int) -> Optional[datetime]:
     return dt_server - timedelta(hours=offset_hours)
 
 
-def _rates_to_bars(rates: Iterable[object], timeframe_seconds: int, offset_hours: int) -> List[RateBar]:
+def _rates_to_bars(
+    rates: Iterable[object], timeframe_seconds: int, offset_hours: int
+) -> List[RateBar]:
     bars: List[RateBar] = []
     for rate in rates:
         start = _rate_time(rate, offset_hours)
@@ -273,7 +282,9 @@ def _rates_to_bars(rates: Iterable[object], timeframe_seconds: int, offset_hours
         if low is None or high is None:
             continue
         end = start + timedelta(seconds=timeframe_seconds)
-        bars.append(RateBar(start_utc=start, end_utc=end, low=float(low), high=float(high)))
+        bars.append(
+            RateBar(start_utc=start, end_utc=end, low=float(low), high=float(high))
+        )
     return bars
 
 
@@ -323,7 +334,9 @@ def _merge_windows(windows: List[CandidateWindow]) -> List[CandidateWindow]:
             merged.append(win)
             continue
         last = merged[-1]
-        if win.setup_id == last.setup_id and win.start_utc <= last.end_utc + timedelta(seconds=1):
+        if win.setup_id == last.setup_id and win.start_utc <= last.end_utc + timedelta(
+            seconds=1
+        ):
             merged_start = min(last.start_utc, win.start_utc)
             merged_end = max(last.end_utc, win.end_utc)
             merged_bar_start = min(last.bar_start_utc, win.bar_start_utc)
@@ -426,7 +439,9 @@ def _evaluate_setup(
         )
         intro_start = max(cursor, window_start)
         if active_ranges and intro_start < window_end:
-            already_covered = any(start <= intro_start < end for start, end in active_ranges)
+            already_covered = any(
+                start <= intro_start < end for start, end in active_ranges
+            )
             if not already_covered:
                 intro_end = min(window_end, intro_start + timedelta(minutes=1), now_utc)
                 if intro_end > intro_start:
@@ -459,7 +474,9 @@ def _evaluate_setup(
             total_elapsed += stats.elapsed_s
 
             if candidate_hit is not None:
-                if candidate_hit.time_utc <= setup.as_of_utc + timedelta(milliseconds=1):
+                if candidate_hit.time_utc <= setup.as_of_utc + timedelta(
+                    milliseconds=1
+                ):
                     ignored_hit = True
                 elif is_quiet_time(
                     candidate_hit.time_utc,
@@ -491,8 +508,6 @@ def _evaluate_setup(
     )
 
 
-
-
 def scan_for_hit_with_chunks(
     symbol: str,
     direction: str,
@@ -506,8 +521,16 @@ def scan_for_hit_with_chunks(
 ) -> Tuple[Optional[Hit], TickFetchStats, int]:
     """Fetch ticks in bounded chunks until a hit is found or the range is exhausted."""
     if start_utc >= end_utc:
-        return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False), 0
-    chunk_span = chunk_minutes if chunk_minutes is not None and chunk_minutes > 0 else None
+        return (
+            None,
+            TickFetchStats(
+                pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+            ),
+            0,
+        )
+    chunk_span = (
+        chunk_minutes if chunk_minutes is not None and chunk_minutes > 0 else None
+    )
     chunk_count = 0
     total_ticks = 0
     total_pages = 0
@@ -557,6 +580,7 @@ def scan_for_hit_with_chunks(
         early_stop=hit is not None,
     )
     return hit, stats_out, chunk_count
+
 
 def run_once(args: argparse.Namespace) -> None:
     ids = _parse_ids(getattr(args, "ids", None))
@@ -613,14 +637,18 @@ def run_once(args: argparse.Namespace) -> None:
             recorded = set(load_recorded_ids_sqlite(conn, id_list))
             t_recload = perf_counter() - t_recload
             if args.verbose:
-                print(f"[timing] preload_recorded={t_recload*1000:.1f}ms (records: {len(recorded)})")
+                print(
+                    f"[timing] preload_recorded={t_recload*1000:.1f}ms (records: {len(recorded)})"
+                )
 
             pending_setups = [setup for setup in setups if setup.id not in recorded]
             if not pending_setups:
                 print("No setups to check.")
                 return
 
-            raw_state = load_tp_sl_setup_state_sqlite(conn, [setup.id for setup in pending_setups])
+            raw_state = load_tp_sl_setup_state_sqlite(
+                conn, [setup.id for setup in pending_setups]
+            )
             last_checked_map: Dict[int, datetime] = {}
             for setup in pending_setups:
                 state_dt = raw_state.get(setup.id)
@@ -633,9 +661,12 @@ def run_once(args: argparse.Namespace) -> None:
             timeframe_secs = timeframe_seconds(timeframe)
             backtrack_minutes = max(0, int(getattr(args, "bar_backtrack", 2)))
             tick_padding_seconds = max(
-                0.0, float(getattr(args, "tick_padding", getattr(args, "tick_slack", 1.0)))
+                0.0,
+                float(getattr(args, "tick_padding", getattr(args, "tick_slack", 1.0))),
             )
-            chunk_minutes = args.max_mins if args.max_mins and args.max_mins > 0 else None
+            chunk_minutes = (
+                args.max_mins if args.max_mins and args.max_mins > 0 else None
+            )
             trace_ticks = bool(args.verbose and args.trace_pages)
 
             groups: Dict[str, List[Setup]] = defaultdict(list)
@@ -651,11 +682,9 @@ def run_once(args: argparse.Namespace) -> None:
             hit_symbols: List[str] = []
 
             for base_symbol, grouped_setups in groups.items():
-                t_resolve_start = perf_counter()
                 if base_symbol not in resolve_cache:
                     resolve_cache[base_symbol] = resolve_symbol(base_symbol)
                 sym_name = resolve_cache[base_symbol]
-                t_resolve = perf_counter() - t_resolve_start
                 if sym_name is None:
                     print(
                         f"Symbol '{base_symbol}' not found; skipping {len(grouped_setups)} setup(s)."
@@ -681,9 +710,13 @@ def run_once(args: argparse.Namespace) -> None:
                     spread_guard = _compute_spread_guard(sym_name)
                     spread_cache[sym_name] = spread_guard
 
-                min_last_checked = min(last_checked_map[setup.id] for setup in grouped_setups)
+                min_last_checked = min(
+                    last_checked_map[setup.id] for setup in grouped_setups
+                )
                 earliest_as_of = min(setup.as_of_utc for setup in grouped_setups)
-                fetch_start = min(min_last_checked, earliest_as_of) - timedelta(minutes=backtrack_minutes)
+                fetch_start = min(min_last_checked, earliest_as_of) - timedelta(
+                    minutes=backtrack_minutes
+                )
                 fetch_start = min(fetch_start, now_utc)
                 fetch_end = now_utc + timedelta(seconds=timeframe_secs)
                 rates = rates_range_utc(
@@ -716,21 +749,31 @@ def run_once(args: argparse.Namespace) -> None:
                     if result.hit is not None:
                         if args.verbose:
                             t_fetch_ms = result.fetch_s * 1000.0
-                            t_scan_ms = max(0.0, (result.elapsed_s - result.fetch_s) * 1000.0)
+                            t_scan_ms = max(
+                                0.0, (result.elapsed_s - result.fetch_s) * 1000.0
+                            )
                             print(
                                 f"[HIT TIMING] #{setup.id} {setup.symbol} {setup.direction} | "
                                 f"windows {result.windows} | ticks {result.ticks} pages {result.pages} | "
                                 f"fetch={t_fetch_ms:.1f}ms scan={t_scan_ms:.1f}ms"
                             )
-                        record_hit_sqlite(conn, setup, result.hit, args.dry_run, args.verbose)
+                        record_hit_sqlite(
+                            conn, setup, result.hit, args.dry_run, args.verbose
+                        )
                         hits += 1
                         hit_symbols.append(setup.symbol)
                         continue
 
                     if args.verbose:
                         duration = (now_utc - setup.as_of_utc).total_seconds() / 60.0
-                        thr = (result.ticks / result.elapsed_s) if result.elapsed_s > 0 else 0.0
-                        avg_per_page = (result.ticks / result.pages) if result.pages > 0 else 0.0
+                        thr = (
+                            (result.ticks / result.elapsed_s)
+                            if result.elapsed_s > 0
+                            else 0.0
+                        )
+                        avg_per_page = (
+                            (result.ticks / result.pages) if result.pages > 0 else 0.0
+                        )
                         print(
                             f"[NO HIT] #{setup.id} {setup.symbol} {setup.direction} | window {duration:.1f} mins | "
                             f"ticks {result.ticks} | pages {result.pages} | "
@@ -745,7 +788,9 @@ def run_once(args: argparse.Namespace) -> None:
 
             if hit_symbols:
                 symbols_str = " ".join(sorted(set(hit_symbols)))
-                print(f"Checked {checked} setup(s); hits recorded: {hits}. {symbols_str}")
+                print(
+                    f"Checked {checked} setup(s); hits recorded: {hits}. {symbols_str}"
+                )
         finally:
             shutdown_mt5()
     finally:

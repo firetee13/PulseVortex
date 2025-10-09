@@ -20,17 +20,21 @@ Notes:
 
 from __future__ import annotations
 
-import atexit
 import argparse
+import atexit
+import json
 import math
 import os
 import re
 import sys
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Set
 import types
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np  # required for ATR computations
+
 # DB backend: SQLite only
 try:
     import sqlite3  # type: ignore
@@ -38,20 +42,16 @@ except Exception:
     sqlite3 = None  # type: ignore
 
 
-from monitor.config import default_db_path
-from monitor import mt5_client
-from monitor.quiet_hours import is_quiet_time, UTC_PLUS_3
+from monitor.core import mt5_client
+from monitor.core.config import default_db_path
+from monitor.core.quiet_hours import UTC_PLUS_3, is_quiet_time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-import json
-import numpy as np  # required for ATR computations
 
 # Optional MT5
 mt5 = getattr(mt5_client, "mt5", None)  # type: ignore
 _MT5_IMPORTED = mt5_client.has_mt5()
 atexit.register(mt5_client.shutdown_mt5)
-
-
 
 
 # -----------------------------------------
@@ -106,15 +106,43 @@ CANONICAL_KEYS: Dict[str, str] = {}
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Analyze MT5 symbols for trade setups (MT5 is the only source)")
-    p.add_argument("--symbols", default="", help="Comma-separated symbols (default: all visible in MarketWatch)")
-    p.add_argument("--min-rrr", type=float, default=1.0, help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering")
-    p.add_argument("--top", type=int, default=None, help="Limit to top N setups (after filtering)")
-    p.add_argument("--brief", action="store_true", help="Brief output without detailed explanation")
-    p.add_argument("--watch", action="store_true", help="Run continuously and poll MT5 for updates")
-    p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds when --watch is used (default: 1)")
-    p.add_argument("--debug", action="store_true", help="Print filtering diagnostics and counts")
-    p.add_argument("--exclude", default="", help="Comma-separated symbols to exclude (e.g., GLMUSD,BCHUSD)")
+    p = argparse.ArgumentParser(
+        description="Analyze MT5 symbols for trade setups (MT5 is the only source)"
+    )
+    p.add_argument(
+        "--symbols",
+        default="",
+        help="Comma-separated symbols (default: all visible in MarketWatch)",
+    )
+    p.add_argument(
+        "--min-rrr",
+        type=float,
+        default=1.0,
+        help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering",
+    )
+    p.add_argument(
+        "--top", type=int, default=None, help="Limit to top N setups (after filtering)"
+    )
+    p.add_argument(
+        "--brief", action="store_true", help="Brief output without detailed explanation"
+    )
+    p.add_argument(
+        "--watch", action="store_true", help="Run continuously and poll MT5 for updates"
+    )
+    p.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Polling interval in seconds when --watch is used (default: 1)",
+    )
+    p.add_argument(
+        "--debug", action="store_true", help="Print filtering diagnostics and counts"
+    )
+    p.add_argument(
+        "--exclude",
+        default="",
+        help="Comma-separated symbols to exclude (e.g., GLMUSD,BCHUSD)",
+    )
     return p.parse_args()
 
 
@@ -123,7 +151,9 @@ PROXIMITY_BIN_BUCKET = 0.1
 SPREAD_MULTIPLIER = float(os.environ.get("TIMELAPSE_SPREAD_MULT", "10"))
 
 
-def _proximity_bin_label(proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET) -> Optional[str]:
+def _proximity_bin_label(
+    proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET
+) -> Optional[str]:
     """Return the proximity bucket label (e.g., '0.4-0.5') used for gating/stats."""
     try:
         if proximity is None:
@@ -149,7 +179,9 @@ UTC3 = UTC_PLUS_3
 # within this many seconds. Avoid creating entries for closed markets.
 TICK_FRESHNESS_SEC = 60  # 60 seconds
 # Cache last tick data to minimize expensive history lookups
-_LAST_TICK_CACHE: Dict[str, Tuple[Optional[float], Optional[float], Optional[datetime]]] = {}
+_LAST_TICK_CACHE: Dict[
+    str, Tuple[Optional[float], Optional[float], Optional[datetime]]
+] = {}
 
 # Cache MT5 rate data with lightweight TTLs per timeframe to reduce IPC churn
 _RATE_CACHE: Dict[Tuple[str, int, int], Tuple[float, Any]] = {}
@@ -168,6 +200,7 @@ _CONSENSUS_THRESHOLDS = {
 }
 
 if sqlite3 is not None:
+
     class _ManagedConnection(sqlite3.Connection):  # type: ignore[misc]
         _closed: bool = False
 
@@ -227,13 +260,16 @@ def _ensure_consensus_schema(cur: "sqlite3.Cursor", source_table: str) -> None:
     )
 
 
-def _calculate_consensus_flags(score: object, rrr: object, proximity_to_sl: object) -> Tuple[bool, bool, bool]:
+def _calculate_consensus_flags(
+    score: object, rrr: object, proximity_to_sl: object
+) -> Tuple[bool, bool, bool]:
     """Translate raw setup metrics into timeframe consensus booleans.
 
     The algorithm assumes higher timeframe agreement requires progressively
     stricter filters. We treat the existing score as a proxy for directional
     conviction, RRR as reward quality, and proximity_to_sl as risk tightness.
     """
+
     def _to_float(value: object, default: float = float("nan")) -> float:
         try:
             fval = float(value)
@@ -261,7 +297,9 @@ def _calculate_consensus_flags(score: object, rrr: object, proximity_to_sl: obje
     )
 
 
-def _rebuild_consensus_table(conn: "sqlite3.Connection", *, source_table: str = "timelapse_setups") -> None:
+def _rebuild_consensus_table(
+    conn: "sqlite3.Connection", *, source_table: str = "timelapse_setups"
+) -> None:
     """Recreate consensus rows for every setup, updating in place."""
     try:
         cur = conn.cursor()
@@ -270,10 +308,12 @@ def _rebuild_consensus_table(conn: "sqlite3.Connection", *, source_table: str = 
         columns = [str(row[1]) for row in (cur.fetchall() or [])]
         if "id" not in columns or "score" not in columns or "rrr" not in columns:
             return
-        proximity_selector = "proximity_to_sl" if "proximity_to_sl" in columns else "NULL AS proximity_to_sl"
-        cur.execute(
-            f"SELECT id, score, rrr, {proximity_selector} FROM {source_table}"
+        proximity_selector = (
+            "proximity_to_sl"
+            if "proximity_to_sl" in columns
+            else "NULL AS proximity_to_sl"
         )
+        cur.execute(f"SELECT id, score, rrr, {proximity_selector} FROM {source_table}")
         rows = cur.fetchall() or []
         if not rows:
             cur.execute(f"DELETE FROM {CONSENSUS_TABLE}")
@@ -285,12 +325,14 @@ def _rebuild_consensus_table(conn: "sqlite3.Connection", *, source_table: str = 
             if setup_id is None:
                 continue
             flags = _calculate_consensus_flags(row[1], row[2], row[3])
-            payload.append((
-                int(setup_id),
-                int(flags[0]),
-                int(flags[1]),
-                int(flags[2]),
-            ))
+            payload.append(
+                (
+                    int(setup_id),
+                    int(flags[0]),
+                    int(flags[1]),
+                    int(flags[2]),
+                )
+            )
 
         if not payload:
             return
@@ -337,7 +379,6 @@ _RATE_TTL_SECONDS = {
 }
 
 
-
 def to_input_tz(dt: datetime) -> datetime:
     """Convert a datetime to input timezone (UTC+2). If naive, assume it is input_tz local time.
 
@@ -360,15 +401,24 @@ def utc_naive(dt: datetime) -> datetime:
 
 
 _MT5_READY = False
+
+
 def _mt5_ensure_init() -> bool:
     global _MT5_READY
     if not _MT5_IMPORTED:
         return False
     if _MT5_READY:
         return True
-    timeout = int(os.environ.get("TIMELAPSE_MT5_TIMEOUT", os.environ.get("MT5_TIMEOUT", "30")))
+    timeout = int(
+        os.environ.get("TIMELAPSE_MT5_TIMEOUT", os.environ.get("MT5_TIMEOUT", "30"))
+    )
     retries = int(os.environ.get("TIMELAPSE_MT5_RETRIES", "1"))
-    portable = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    portable = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     try:
         mt5_client.init_mt5(timeout=timeout, retries=retries, portable=portable)
         global mt5
@@ -377,8 +427,6 @@ def _mt5_ensure_init() -> bool:
     except RuntimeError:
         _MT5_READY = False
     return _MT5_READY
-
-
 
 
 def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
@@ -400,6 +448,7 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
     else:
         _RATE_CACHE.pop(key, None)
     return rates
+
 
 def canonicalize_key(s: Optional[str]) -> str:
     """Canonicalize CSV header / lookup keys for case-insensitive, punctuation-robust matching.
@@ -424,6 +473,7 @@ def canonicalize_key(s: Optional[str]) -> str:
     CANONICAL_KEYS[orig_s] = s
     return s
 
+
 def fnum(v: Optional[str]) -> Optional[float]:
     """Parse a numeric value from a CSV cell robustly.
 
@@ -439,7 +489,7 @@ def fnum(v: Optional[str]) -> Optional[float]:
     if s == "" or s.upper() == "N/A":
         return None
     # strip BOM / NBSP characters and trim
-    s = s.lstrip("\ufeff").replace("\u00A0", " ").strip()
+    s = s.lstrip("\ufeff").replace("\u00a0", " ").strip()
 
     # Handle negative numbers formatted as (123.45)
     neg = False
@@ -540,11 +590,13 @@ def _atr(values: List[Tuple[float, float, float]], period: int = 14) -> Optional
         highs = vals[1:, 0]
         lows = vals[1:, 1]
         prev_closes = vals[:-1, 2]
-        tr = np.maximum.reduce([
-            highs - lows,
-            np.abs(highs - prev_closes),
-            np.abs(prev_closes - lows),
-        ])
+        tr = np.maximum.reduce(
+            [
+                highs - lows,
+                np.abs(highs - prev_closes),
+                np.abs(prev_closes - lows),
+            ]
+        )
         # Initial ATR: simple mean of first `period` TRs
         atr = float(np.mean(tr[:period]))
         # Wilder smoothing over remaining TRs (if any)
@@ -554,27 +606,30 @@ def _atr(values: List[Tuple[float, float, float]], period: int = 14) -> Optional
     except Exception:
         return None
 
+
 def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]]:
     try:
         if daily_rates is None or len(daily_rates) < 2:
             return None, None
         prev = daily_rates[-2]
-        h = float(prev['high']) if isinstance(prev, dict) else float(prev[2])
-        l = float(prev['low']) if isinstance(prev, dict) else float(prev[3])
-        c = float(prev['close']) if isinstance(prev, dict) else float(prev[4])
-        p = (h + l + c) / 3.0
-        s1 = 2*p - h
-        r1 = 2*p - l
+        high_value = float(prev["high"]) if isinstance(prev, dict) else float(prev[2])
+        low_value = float(prev["low"]) if isinstance(prev, dict) else float(prev[3])
+        close_value = float(prev["close"]) if isinstance(prev, dict) else float(prev[4])
+        pivot = (high_value + low_value + close_value) / 3.0
+        s1 = 2 * pivot - high_value
+        r1 = 2 * pivot - low_value
         return s1, r1
     except Exception:
         return None, None
 
 
-def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Optional[str], Optional[datetime]]:
+def read_series_mt5(
+    symbols: List[str],
+) -> Tuple[Dict[str, List[Snapshot]], Optional[str], Optional[datetime]]:
     now_utc = datetime.now(UTC)
     latest_ts = now_utc.astimezone(INPUT_TZ)
     if not _mt5_ensure_init():
-        print('[MT5] initialize() failed; cannot read symbols.')
+        print("[MT5] initialize() failed; cannot read symbols.")
         return {}, None, latest_ts
     series: Dict[str, List[Snapshot]] = {}
     for sym in symbols:
@@ -595,23 +650,23 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
 
         if tick is not None:
             try:
-                bid_candidate = float(getattr(tick, 'bid', 0.0) or 0.0)
+                bid_candidate = float(getattr(tick, "bid", 0.0) or 0.0)
             except Exception:
                 bid_candidate = 0.0
             if bid_candidate != 0.0:
                 bid = bid_candidate
             try:
-                ask_candidate = float(getattr(tick, 'ask', 0.0) or 0.0)
+                ask_candidate = float(getattr(tick, "ask", 0.0) or 0.0)
             except Exception:
                 ask_candidate = 0.0
             if ask_candidate != 0.0:
                 ask = ask_candidate
             try:
-                tmsc = getattr(tick, 'time_msc', None)
+                tmsc = getattr(tick, "time_msc", None)
                 if tmsc:
                     tick_time_utc = datetime.fromtimestamp(float(tmsc) / 1000.0, tz=UTC)
                 else:
-                    ts = getattr(tick, 'time', None)
+                    ts = getattr(tick, "time", None)
                     if ts:
                         tick_time_utc = datetime.fromtimestamp(float(ts), tz=UTC)
             except Exception:
@@ -630,14 +685,20 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 1)
         m15 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_M15, 1)
 
-        d1_close = float(d1[-1]['close']) if (d1 is not None and len(d1) >= 1) else None
-        d1_high = float(d1[-1]['high']) if (d1 is not None and len(d1) >= 1) else None
-        d1_low = float(d1[-1]['low']) if (d1 is not None and len(d1) >= 1) else None
-        first_d1_close = float(d1[-2]['close']) if (d1 is not None and len(d1) >= 2) else d1_close
+        d1_close = float(d1[-1]["close"]) if (d1 is not None and len(d1) >= 1) else None
+        d1_high = float(d1[-1]["high"]) if (d1 is not None and len(d1) >= 1) else None
+        d1_low = float(d1[-1]["low"]) if (d1 is not None and len(d1) >= 1) else None
+        first_d1_close = (
+            float(d1[-2]["close"]) if (d1 is not None and len(d1) >= 2) else d1_close
+        )
 
         def pct_change(arr):
             try:
-                return (float(arr[-1]['close']) - float(arr[-2]['close'])) / float(arr[-2]['close']) * 100.0
+                return (
+                    (float(arr[-1]["close"]) - float(arr[-2]["close"]))
+                    / float(arr[-2]["close"])
+                    * 100.0
+                )
             except Exception:
                 return None
 
@@ -648,7 +709,11 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         ss_4h_prev = None
         if h4 is not None and len(h4) >= 3:
             try:
-                ss_4h_prev = (float(h4[-2]['close']) - float(h4[-3]['close'])) / float(h4[-3]['close']) * 100.0
+                ss_4h_prev = (
+                    (float(h4[-2]["close"]) - float(h4[-3]["close"]))
+                    / float(h4[-3]["close"])
+                    * 100.0
+                )
             except Exception:
                 pass
 
@@ -656,7 +721,10 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         atrp = None
         try:
             if d1 is not None and len(d1) >= 15:
-                vals = [(float(b['high']), float(b['low']), float(b['close'])) for b in d1[-15:]]
+                vals = [
+                    (float(b["high"]), float(b["low"]), float(b["close"]))
+                    for b in d1[-15:]
+                ]
                 atr_d1 = _atr(vals, 14)
                 if atr_d1 is not None and d1_close is not None and d1_close != 0:
                     atrp = (atr_d1 / d1_close) * 100.0
@@ -673,8 +741,10 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
         except Exception:
             pass
 
-        m15_close = float(m15[-1]['close']) if (m15 is not None and len(m15) >= 1) else None
-        h1_close = float(h1[-1]['close']) if (h1 is not None and len(h1) >= 1) else None
+        m15_close = (
+            float(m15[-1]["close"]) if (m15 is not None and len(m15) >= 1) else None
+        )
+        h1_close = float(h1[-1]["close"]) if (h1 is not None and len(h1) >= 1) else None
 
         def build_row(**kwargs):
             row = {}
@@ -683,10 +753,12 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             row[HEADER_SYMBOL] = sym
             return row
 
-        first_row = build_row(**{
-            'D1 Close': first_d1_close,
-            'Strength 4H': ss_4h_prev,
-        })
+        first_row = build_row(
+            **{
+                "D1 Close": first_d1_close,
+                "Strength 4H": ss_4h_prev,
+            }
+        )
 
         if tick_age is None and tick_time_utc is not None:
             try:
@@ -694,29 +766,36 @@ def read_series_mt5(symbols: List[str]) -> Tuple[Dict[str, List[Snapshot]], Opti
             except Exception:
                 tick_age = None
 
-        last_row = build_row(**{
-            'Bid': bid,
-            'Ask': ask,
-            'Spread%': spreadpct,
-            'Backfilled': 0,
-            'Strength 1H': ss_1h,
-            'Strength 4H': ss_4h,
-            'Strength 1D': ss_1d,
-            'Strength 1W': ss_1w,
-            'ATR D1': atr_d1,
-            'ATR (%) D1': atrp,
-            'S1 Level M5': s1,
-            'R1 Level M5': r1,
-            'D1 Close': d1_close,
-            'D1 High': d1_high,
-            'D1 Low': d1_low,
-            'M15 Close': m15_close,
-            'H1 Close': h1_close,
-            'Recent Tick': 1 if has_recent_tick else 0,
-            'Last Tick UTC': tick_time_utc.strftime('%Y-%m-%d %H:%M:%S') if tick_time_utc else '',
-            'Tick Age Sec': tick_age if tick_age is not None else '',
-        })
-        series[sym] = [Snapshot(ts=latest_ts, row=first_row), Snapshot(ts=latest_ts, row=last_row)]
+        last_row = build_row(
+            **{
+                "Bid": bid,
+                "Ask": ask,
+                "Spread%": spreadpct,
+                "Backfilled": 0,
+                "Strength 1H": ss_1h,
+                "Strength 4H": ss_4h,
+                "Strength 1D": ss_1d,
+                "Strength 1W": ss_1w,
+                "ATR D1": atr_d1,
+                "ATR (%) D1": atrp,
+                "S1 Level M5": s1,
+                "R1 Level M5": r1,
+                "D1 Close": d1_close,
+                "D1 High": d1_high,
+                "D1 Low": d1_low,
+                "M15 Close": m15_close,
+                "H1 Close": h1_close,
+                "Recent Tick": 1 if has_recent_tick else 0,
+                "Last Tick UTC": (
+                    tick_time_utc.strftime("%Y-%m-%d %H:%M:%S") if tick_time_utc else ""
+                ),
+                "Tick Age Sec": tick_age if tick_age is not None else "",
+            }
+        )
+        series[sym] = [
+            Snapshot(ts=latest_ts, row=first_row),
+            Snapshot(ts=latest_ts, row=last_row),
+        ]
     return series, None, latest_ts
 
 
@@ -769,7 +848,9 @@ def _backfill_missing_proximity_bins(cur: "sqlite3.Cursor", table: str) -> int:
         return 0
 
 
-def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "timelapse_setups") -> Tuple[List[Dict[str, object]], Set[str]]:
+def _filter_recent_duplicates(
+    results: List[Dict[str, object]], table: str = "timelapse_setups"
+) -> Tuple[List[Dict[str, object]], Set[str]]:
     """Filter out results for symbols that already have an unsettled (open) setup.
 
     A setup is considered open if there is no record for its id in timelapse_hits.
@@ -786,11 +867,16 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
         conn = _connect_sqlite(db_path, timeout=3.0)
         cur = conn.cursor()
         # Ensure setups table exists
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        )
         if cur.fetchone() is None:
             return results, set()
         # Check hits table presence
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ("timelapse_hits",))
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            ("timelapse_hits",),
+        )
         if cur.fetchone() is None:
             return results, set()
         schema_ready = _ensure_proximity_bin_schema(cur, table)
@@ -848,8 +934,6 @@ def _filter_recent_duplicates(results: List[Dict[str, object]], table: str = "ti
                 pass
 
 
-
-
 def process_once(
     symbols: List[str],
     min_rrr: float,
@@ -893,7 +977,7 @@ def process_once(
         reasons.setdefault("one_trade_per_bin", []).extend(list(db_excluded))
 
     # Apply top limit after filtering
-    top_results = filtered[: top] if top else filtered
+    top_results = filtered[:top] if top else filtered
 
     if not top_results and debug:
         print("No high-confidence setups based on the latest timelapse and filters.")
@@ -903,7 +987,9 @@ def process_once(
     total_kept = len(filtered)  # Use filtered count which includes DB exclusions
     total_filtered = total_evaluated - total_kept
     if debug and total_filtered > 0:
-        print(f"Symbols evaluated: {total_evaluated}, kept: {total_kept}, filtered: {total_filtered}")
+        print(
+            f"Symbols evaluated: {total_evaluated}, kept: {total_kept}, filtered: {total_filtered}"
+        )
         if reasons:
             print("Rejection reasons:")
             for reason, symbol_list in sorted(reasons.items()):
@@ -917,17 +1003,23 @@ def process_once(
             tp = r["tp"]
             rrr = r["rrr"]
             score = r["score"]
-            print(f"{sym} | {direction} @ {price} | SL {sl} | TP {tp} | RRR {rrr:.2f} | score {score:.2f}")
+            print(
+                f"{sym} | {direction} @ {price} | SL {sl} | TP {tp} | RRR {rrr:.2f} | score {score:.2f}"
+            )
             if not brief:
                 try:
-                    rich = {k: v for k, v in r.items() if k not in ('series', 'raw_snaps')}
+                    rich = {
+                        k: v for k, v in r.items() if k not in ("series", "raw_snaps")
+                    }
                     print(json.dumps(rich, indent=2, default=str))
                 except Exception:
                     print(r)
 
     # Insert results into SQLite
     try:
-        insert_results_to_db(top_results, table="timelapse_setups", detected_at=detected_at)
+        insert_results_to_db(
+            top_results, table="timelapse_setups", detected_at=detected_at
+        )
     except Exception as e:
         # Keep non-fatal; just report the issue
         print(f"[DB] Skipped insert due to error: {e}")
@@ -944,7 +1036,9 @@ def watch_loop(
 ) -> None:
     # Quiet by default; only show banner in debug mode
     if debug:
-        print(f"Polling MT5 for {len(symbols)} symbols every {interval:.1f}s. Press Ctrl+C to stop.")
+        print(
+            f"Polling MT5 for {len(symbols)} symbols every {interval:.1f}s. Press Ctrl+C to stop."
+        )
         if exclude_set:
             print(f"[EXCLUDE] Will filter out symbols: {sorted(exclude_set)}")
     try:
@@ -965,8 +1059,6 @@ def watch_loop(
             print("\nStopped watching.")
 
 
-
-
 def analyze(
     series: Dict[str, List[Snapshot]],
     min_rrr: float,
@@ -974,8 +1066,10 @@ def analyze(
     debug: bool = False,
 ) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
     reasons: Dict[str, List[str]] = {}
+
     def bump(key: str) -> None:
         reasons.setdefault(key, []).append(sym)
+
     results: List[Dict[str, Any]] = []
     for sym, snaps in series.items():
         if not snaps:
@@ -1002,7 +1096,6 @@ def analyze(
         ss1h = last.g("Strength 1H")
         ss4 = last.g("Strength 4H")
         ss1d = last.g("Strength 1D")
-        ss1w = last.g("Strength 1W")
         atr = last.g("ATR D1")
         atrp = last.g("ATR (%) D1")
         s1 = last.g("S1 Level M5")
@@ -1010,14 +1103,15 @@ def analyze(
         d1_close = last.g("D1 Close")
         d1h = last.g("D1 High")
         d1l = last.g("D1 Low")
-        spreadpct_row = normalize_spread_pct(last.g("Spread%"))
         bid = last.g("Bid")
         ask = last.g("Ask")
         # Pull auxiliary tick info for downstream reporting
         try:
-            tick_time_str = str(last.row.get(canonicalize_key('Last Tick UTC'), '') or '')
+            tick_time_str = str(
+                last.row.get(canonicalize_key("Last Tick UTC"), "") or ""
+            )
         except Exception:
-            tick_time_str = ''
+            tick_time_str = ""
 
         # Drop symbols without recent ticks (avoid closed markets)
         recent_tick_flag = last.g("Recent Tick")
@@ -1028,8 +1122,16 @@ def analyze(
             continue
 
         # Timelapse deltas (context)
-        d1_close_trend = None if (d1_close is None or first.g("D1 Close") is None) else d1_close - (first.g("D1 Close") or 0.0)
-        ss4_trend = None if (ss4 is None or first.g("Strength 4H") is None) else ss4 - (first.g("Strength 4H") or 0.0)
+        d1_close_trend = (
+            None
+            if (d1_close is None or first.g("D1 Close") is None)
+            else d1_close - (first.g("D1 Close") or 0.0)
+        )
+        ss4_trend = (
+            None
+            if (ss4 is None or first.g("Strength 4H") is None)
+            else ss4 - (first.g("Strength 4H") or 0.0)
+        )
 
         # Direction from strength across TFs (require 4H alignment when available)
         pos = sum(1 for v in (ss1h, ss4, ss1d) if v is not None and v > 0)
@@ -1054,7 +1156,9 @@ def analyze(
             bump("no_live_bid_ask")
             if debug:
                 try:
-                    print(f"[DEBUG] skipping {sym}: no live Bid/Ask; waiting for live tick")
+                    print(
+                        f"[DEBUG] skipping {sym}: no live Bid/Ask; waiting for live tick"
+                    )
                 except Exception:
                     pass
             continue
@@ -1062,7 +1166,13 @@ def analyze(
         # Spread calculation only when bid and ask is available
         spreadpct = None
         try:
-            if bid is not None and ask is not None and bid > 0 and ask > 0 and ask > bid:
+            if (
+                bid is not None
+                and ask is not None
+                and bid > 0
+                and ask > 0
+                and ask > bid
+            ):
                 mid = (ask + bid) / 2.0
                 spreadpct = ((ask - bid) / mid) * 100.0
         except Exception:
@@ -1071,7 +1181,9 @@ def analyze(
         if spr_class == "Avoid":
             bump("spread_avoid")
             if debug:
-                print(f"[DEBUG] spread_avoid {sym}: bid={bid} ask={ask} spreadpct={spreadpct}")
+                print(
+                    f"[DEBUG] spread_avoid {sym}: bid={bid} ask={ask} spreadpct={spreadpct}"
+                )
             continue
         # ATR% score bonus only when value is present and within [60, 150]
         atrp_in_range = (atrp is not None) and (60.0 <= atrp <= 150.0)
@@ -1079,7 +1191,6 @@ def analyze(
         # S/R based SL/TP with D1 fallback; entry/RRR strictly computed from live Bid/Ask only
         # Initialize proximity flags
         prox_note = None
-        prox_flag = None
         prox_late = False
         if direction == "Buy":
             if s1 is None and r1 is None:
@@ -1102,10 +1213,8 @@ def analyze(
             if (tp is not None and sl is not None) and (tp - sl) != 0:
                 prox = (price - sl) / (tp - sl)
                 if prox <= 0.35:
-                    prox_flag = "near_support"
                     prox_note = "near S1 support"
                 elif prox >= 0.65:
-                    prox_flag = "near_resistance"
                     prox_late = True
                     prox_note = "near R1 resistance (late)"
         else:  # Sell
@@ -1128,10 +1237,8 @@ def analyze(
             if (sl is not None and tp is not None) and (sl - tp) != 0:
                 prox = (sl - price) / (sl - tp)
                 if prox <= 0.35:
-                    prox_flag = "near_resistance"
                     prox_note = "near R1 resistance"
                 elif prox >= 0.65:
-                    prox_flag = "near_support"
                     prox_late = True
                     prox_note = "near S1 support (late)"
         if rrr is None or rrr <= 0:
@@ -1148,7 +1255,9 @@ def analyze(
             if bid is None or ask is None or ask <= bid:
                 bump("invalid_bid_ask_for_spread_calculation")
                 if debug:
-                    print(f"[DEBUG] Invalid bid/ask for spread calculation: sym={sym}, bid={bid}, ask={ask}")
+                    print(
+                        f"[DEBUG] Invalid bid/ask for spread calculation: sym={sym}, bid={bid}, ask={ask}"
+                    )
                 continue
 
             spread_abs = ask - bid
@@ -1163,14 +1272,18 @@ def analyze(
             if distance is None or (distance + eps) < (SPREAD_MULTIPLIER * spread_abs):
                 bump("sl_too_close_to_spread")
                 if debug:
-                    print(f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}")
+                    print(
+                        f"[DEBUG] SL too close to spread: sym={sym}, dir={direction}, price={price}, sl={sl}, spread_abs={spread_abs}, distance={distance}"
+                    )
                 continue
 
         if tp is not None:
             if bid is None or ask is None or ask <= bid:
                 bump("invalid_bid_ask_for_spread_calculation")
                 if debug:
-                    print(f"[DEBUG] Invalid bid/ask for TP spread calculation: sym={sym}, bid={bid}, ask={ask}")
+                    print(
+                        f"[DEBUG] Invalid bid/ask for TP spread calculation: sym={sym}, bid={bid}, ask={ask}"
+                    )
                 continue
 
             spread_abs = ask - bid
@@ -1180,27 +1293,37 @@ def analyze(
             else:
                 tp_distance = ask - tp
 
-            if tp_distance is None or (tp_distance + eps) < (SPREAD_MULTIPLIER * spread_abs):
+            if tp_distance is None or (tp_distance + eps) < (
+                SPREAD_MULTIPLIER * spread_abs
+            ):
                 bump("too_far_from_tp_prox")
                 if debug:
-                    print(f"[DEBUG] TP too close to spread: sym={sym}, dir={direction}, price={price}, tp={tp}, spread_abs={spread_abs}, distance={tp_distance}")
+                    print(
+                        f"[DEBUG] TP too close to spread: sym={sym}, dir={direction}, price={price}, tp={tp}, spread_abs={spread_abs}, distance={tp_distance}"
+                    )
                 continue
-
 
         # Composite score
         score = 0.0
         score += (pos if direction == "Buy" else neg) * 1.5  # Strength consensus
         if atrp_in_range:
             score += 0.5
-        score += {"Excellent": 1.0, "Good": 0.5, "Acceptable": 0.0, "Avoid": -2.0}.get(spr_class, 0.0)
-        if d1_close_trend is not None and ((direction == "Buy" and d1_close_trend > 0) or (direction == "Sell" and d1_close_trend < 0)):
+        score += {"Excellent": 1.0, "Good": 0.5, "Acceptable": 0.0, "Avoid": -2.0}.get(
+            spr_class, 0.0
+        )
+        if d1_close_trend is not None and (
+            (direction == "Buy" and d1_close_trend > 0)
+            or (direction == "Sell" and d1_close_trend < 0)
+        ):
             score += 1.0
-        if ss4_trend is not None and ((direction == "Buy" and ss4_trend > 0) or (direction == "Sell" and ss4_trend < 0)):
+        if ss4_trend is not None and (
+            (direction == "Buy" and ss4_trend > 0)
+            or (direction == "Sell" and ss4_trend < 0)
+        ):
             score += 0.8
         # Penalize late entries near opposing level
         if prox_late:
             score -= 0.4
-
 
         # Build explanation
         parts: List[str] = []
@@ -1210,13 +1333,20 @@ def analyze(
             parts.append(f"ATR: {atr:.1f} pips ({atrp:.1f}%)")
         if (s1 is not None) or (r1 is not None):
             parts.append(
-                f"S/R: S1={s1 if s1 is not None else 'N/A'}, R1={r1 if r1 is not None else 'N/A'}" + (f" {prox_note}" if prox_note else "")
+                f"S/R: S1={s1 if s1 is not None else 'N/A'}, R1={r1 if r1 is not None else 'N/A'}"
+                + (f" {prox_note}" if prox_note else "")
             )
         tparts: List[str] = []
-        if d1_close_trend is not None and abs(d1_close_trend / price) >= 0.005:  # 0.5% threshold
-            tparts.append(f"D1 Close {'up' if d1_close_trend > 0 else 'down'} {abs(d1_close_trend):.4f}")
+        if (
+            d1_close_trend is not None and abs(d1_close_trend / price) >= 0.005
+        ):  # 0.5% threshold
+            tparts.append(
+                f"D1 Close {'up' if d1_close_trend > 0 else 'down'} {abs(d1_close_trend):.4f}"
+            )
         if ss4_trend is not None and abs(ss4_trend) >= 2:
-            tparts.append(f"Sym4H {'up' if ss4_trend > 0 else 'down'} {abs(ss4_trend):.1f}")
+            tparts.append(
+                f"Sym4H {'up' if ss4_trend > 0 else 'down'} {abs(ss4_trend):.1f}"
+            )
         if tparts:
             parts.append("Timelapse: " + ", ".join(tparts))
         spct_str = f"{spreadpct:.2f}%" if spreadpct is not None else "N/A"
@@ -1231,7 +1361,11 @@ def analyze(
 
         def _round_to(v: Optional[float], ndigits: int) -> Optional[float]:
             try:
-                return None if v is None else round(float(v), int(max(0, min(10, ndigits))))
+                return (
+                    None
+                    if v is None
+                    else round(float(v), int(max(0, min(10, ndigits))))
+                )
             except Exception:
                 return v
 
@@ -1242,7 +1376,9 @@ def analyze(
             inferred = _infer_decimals_from_price(level)
             if 0 <= inferred <= 10:
                 precision_candidates.append(inferred)
-        precision_digits = max(precision_candidates) if precision_candidates else symbol_digits
+        precision_digits = (
+            max(precision_candidates) if precision_candidates else symbol_digits
+        )
 
         sl_out = _round_to(sl, precision_digits)
         tp_out = _round_to(tp, precision_digits)
@@ -1280,8 +1416,11 @@ def analyze(
     return results, reasons
 
 
-
-def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelapse_setups", detected_at: Optional[datetime] = None) -> None:
+def insert_results_to_db(
+    results: List[Dict[str, object]],
+    table: str = "timelapse_setups",
+    detected_at: Optional[datetime] = None,
+) -> None:
     """Insert analyzed results into local SQLite DB.
 
     - Creates the table if it does not exist.
@@ -1322,7 +1461,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
         try:
             cur.execute(f"PRAGMA table_info({table})")
             cols = {str(r[1]) for r in (cur.fetchall() or [])}
-            if 'proximity_to_sl' not in cols:
+            if "proximity_to_sl" not in cols:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_to_sl REAL")
         except Exception as e:
             print(f"[DB] Warning: Could not add proximity_to_sl column: {e}")
@@ -1348,8 +1487,12 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 """
             )
             # Add indexes for performance
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_timelapse_hits_symbol ON timelapse_hits (symbol)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_timelapse_hits_setup_id ON timelapse_hits (setup_id)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_timelapse_hits_symbol ON timelapse_hits (symbol)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_timelapse_hits_setup_id ON timelapse_hits (setup_id)"
+            )
         except Exception:
             # If creation fails, we'll proceed without gating
             pass
@@ -1359,8 +1502,8 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
             # Inspect columns to handle older schemas gracefully
             cur.execute(f"PRAGMA table_info({table})")
             cols = {str(r[1]) for r in (cur.fetchall() or [])}
-            has_detected = 'detected_at' in cols
-            has_prox_bin = 'proximity_bin' in cols
+            has_detected = "detected_at" in cols
+            has_prox_bin = "proximity_bin" in cols
             # Try to migrate by adding detected_at if missing
             if not has_detected:
                 try:
@@ -1376,7 +1519,14 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                     has_prox_bin = False
 
             column_list = [
-                "symbol", "direction", "price", "sl", "tp", "rrr", "score", "as_of"
+                "symbol",
+                "direction",
+                "price",
+                "sl",
+                "tp",
+                "rrr",
+                "score",
+                "as_of",
             ]
             if has_detected:
                 column_list.append("detected_at")
@@ -1393,10 +1543,11 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
             ]
             gating_has_bin = has_prox_bin
             if gating_has_bin:
-                gating_conditions.insert(2, "COALESCE(t2.proximity_bin, '') = COALESCE(?, '')")
+                gating_conditions.insert(
+                    2, "COALESCE(t2.proximity_bin, '') = COALESCE(?, '')"
+                )
 
-            ins = (
-                f"""
+            ins = f"""
                 INSERT INTO {table}
                     ({', '.join(column_list)})
                 SELECT {', '.join(select_placeholders)}
@@ -1407,7 +1558,6 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                 )
                 ON CONFLICT(symbol, direction, as_of) DO NOTHING
                 """
-            )
 
             params: List[Tuple[object, ...]] = []
             for r in results:
@@ -1461,28 +1611,35 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
             try:
                 # Build detailed lines per result with tick time (UTC+3), bid/ask, and source
                 lines = []
-                for r in (results or []):
-                    sym = str(r.get('symbol') or '')
-                    bid = r.get('bid')
-                    ask = r.get('ask')
-                    src = str(r.get('source') or '')
-                    t = str(r.get('tick_utc') or '')
+                for r in results or []:
+                    sym = str(r.get("symbol") or "")
+                    bid = r.get("bid")
+                    ask = r.get("ask")
+                    src = str(r.get("source") or "")
+                    t = str(r.get("tick_utc") or "")
                     # Convert UTC string to UTC+3 clock time for display
-                    t_disp = 'N/A'
+                    t_disp = "N/A"
                     try:
                         if t:
                             # tick_utc is like 'YYYY-MM-DD HH:MM:SS' in UTC naive
-                            dt = datetime.strptime(t, '%Y-%m-%d %H:%M:%S').replace(tzinfo=UTC)
-                            t_disp = dt.astimezone(UTC3).strftime('%H:%M:%S') + ' UTC+3'
+                            dt = datetime.strptime(t, "%Y-%m-%d %H:%M:%S").replace(
+                                tzinfo=UTC
+                            )
+                            t_disp = dt.astimezone(UTC3).strftime("%H:%M:%S") + " UTC+3"
                     except Exception:
-                        t_disp = t or 'N/A'
+                        t_disp = t or "N/A"
+
                     # Format bid/ask concisely when available
                     def f(x):
                         try:
                             return f"{float(x):.5f}"
                         except Exception:
-                            return 'N/A'
-                    line = f"{sym} | tick time {t_disp} | bid {f(bid)} | ask {f(ask)}" + (f" | source {src}" if src else '')
+                            return "N/A"
+
+                    line = (
+                        f"{sym} | tick time {t_disp} | bid {f(bid)} | ask {f(ask)}"
+                        + (f" | source {src}" if src else "")
+                    )
                     if sym:
                         lines.append(line)
                 if lines:
@@ -1491,7 +1648,7 @@ def insert_results_to_db(results: List[Dict[str, object]], table: str = "timelap
                         print(f"  {line}")
                 else:
                     # Fallback to symbol list only
-                    syms = [str(r.get('symbol')) for r in (results or [])]
+                    syms = [str(r.get("symbol")) for r in (results or [])]
                     uniq = sorted({s for s in syms if s})
                     print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
             except Exception:
@@ -1525,10 +1682,10 @@ def main() -> None:
                     infos = mt5.symbols_get()  # type: ignore[union-attr, reportUnknownMember]
                 except Exception:
                     infos = []
-                for info in (infos or []):
+                for info in infos or []:
                     try:
-                        if getattr(info, 'visible', True):
-                            syms.append(str(getattr(info, 'name', '')))
+                        if getattr(info, "visible", True):
+                            syms.append(str(getattr(info, "name", "")))
                     except Exception:
                         pass
                 syms = [s for s in syms if s]
@@ -1557,6 +1714,7 @@ def main() -> None:
         debug=args.debug,
         exclude_set=exclude_set,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 ﻿import unittest
 
-from monitor.symbols import classify_symbol, is_crypto_symbol
+from monitor.core.symbols import classify_symbol, is_crypto_symbol
 
 
 class SymbolClassificationTests(unittest.TestCase):

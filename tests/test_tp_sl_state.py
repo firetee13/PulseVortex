@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime, timezone
 
-from monitor.db import (
+from monitor.core.db import (
     ensure_tp_sl_setup_state_sqlite,
     load_tp_sl_setup_state_sqlite,
     persist_tp_sl_setup_state_sqlite,

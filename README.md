@@ -670,6 +670,176 @@ The package provides three CLI entry points:
 - `monitor-hits` - TP/SL hit monitoring
 - `monitor-gui` - Graphical user interface
 
+## Code Quality and Testing Standards
+
+This project maintains high code quality standards through comprehensive automated checks and testing procedures.
+
+### ✅ Code Quality Checks
+
+Our CI/CD pipeline enforces the following quality standards:
+
+#### **Code Formatting & Style**
+- **Black** (`black>=22.0.0`): Automatic code formatting with 88-character line length
+  - Enforces consistent Python PEP 8 style
+  - Target versions: Python 3.8-3.12
+  - Config: `pyproject.toml [tool.black]`
+
+- **isort** (`isort>=5.10.0`): Import statement organization
+  - Black profile compatibility
+  - First-party packages: `monitor`
+  - Multi-line output: 3
+
+#### **Linting & Static Analysis**
+- **flake8** (`flake8>=4.0.0`): Code linting and error detection
+  - Max line length: 88 characters
+  - Extended ignore: `E203`, `E501`
+  - Additional dependency: `flake8-docstrings`
+
+- **mypy** (`mypy>=0.950`): Static type checking
+  - Python 3.12 compatibility
+  - Strict type checking enabled
+  - Unimported modules ignored for external dependencies
+  - Coverage: Core business logic modules
+
+#### **Security Analysis**
+- **bandit** (`bandit>=1.7.0`): Security vulnerability scanner
+  - Common security issue detection
+  - Zero high-severity security issues
+  - Excludes test files from scanning
+
+- **safety** (`safety>=2.0.0`): Dependency vulnerability checking
+  - Automated dependency security scans
+  - Package vulnerability database checks
+
+#### **Pre-commit Hooks**
+Local development enforces quality via pre-commit hooks:
+- Trailing whitespace removal
+- End-of-file consistency
+- YAML/TOML configuration validation
+- Large file detection
+- Merge conflict detection
+- Debug statement detection
+- All formatting and linting tools
+
+### 🧪 Testing Framework
+
+#### **Test Suite Configuration**
+- **pytest** (`pytest>=7.0.0`): Primary testing framework
+- **Coverage**: `pytest-cov>=4.0.0` with >80% requirement
+- **Benchmarking**: `pytest-benchmark>=4.0.0` for performance testing
+- **Test Structure**:
+  - Unit tests: Fast, isolated tests
+  - Integration tests: Component interaction testing
+  - Slow tests: Marked for selective execution
+
+#### **Coverage Requirements**
+- **Target**: >80% test coverage
+- **Source**: `src/` directory
+- **Exclusions**:
+  - Test files and directories
+  - CLI modules (`src/monitor/cli/*`)
+  - GUI modules (`src/monitor/gui/*`)
+  - External integration modules (MT5 client, DB)
+
+#### **Test Categories**
+- `tests/test_timelapse_setups.py`: Setup analysis logic
+- `tests/test_check_tp_sl_hits.py`: Hit detection algorithms
+- `tests/test_mt5_client.py`: MT5 API wrapper testing
+- `tests/test_quiet_hours.py`: Timezone and scheduling logic
+- `tests/test_config.py`: Configuration handling
+- `tests/test_db_helpers.py`: Database operations
+- `tests/test_symbols.py`: Symbol classification
+
+### 📦 Package Validation
+
+#### **Metadata Compliance**
+- Required fields validated: `name`, `version`, `description`, `authors`
+- `pyproject.toml` structure verification
+- Standard Python package format compliance
+
+#### **Build Verification**
+- **build** (`build>=0.8.0`): Package building
+- **twine** (`twine>=4.0.0`): Distribution validation
+- Artifact integrity checking
+- PyPI compatibility verification
+
+### 🔄 CI/CD Pipeline Integration
+
+#### **Continuous Integration Workflow**
+```yaml
+Quality Checks Sequence:
+1. Code checkout with full history
+2. Python 3.12 environment setup
+3. Dependency installation (pip install -e .[dev])
+4. Black formatting check
+5. isort import sorting verification
+6. flake8 linting
+7. pytest with coverage reporting
+8. Package metadata validation
+9. Security scanning
+10. Build and distribution verification
+```
+
+#### **Performance Testing**
+- Memory profiling with `memory_profiler`
+- Benchmark regression detection
+- Performance baseline establishment
+- Automated performance alerts
+
+#### **Multi-Platform Support**
+- Primary: Windows (MT5 compatibility)
+- Testing on: Windows latest
+- Python versions: 3.8-3.12 support matrix
+- Cross-platform compatibility validation
+
+### 🛠️ Local Development Setup
+
+#### **Quality Tools Installation**
+```bash
+# Install development dependencies
+pip install -e .[dev]
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run all quality checks
+pre-commit run --all-files
+
+# Run tests with coverage
+pytest --cov=monitor --cov-report=html
+```
+
+#### **Manual Quality Checks**
+```bash
+# Code formatting
+black src tests
+
+# Import sorting
+isort src tests
+
+# Linting
+flake8 src tests
+
+# Type checking
+mypy src/monitor/core/
+
+# Security scanning
+bandit -r src/
+
+# Test execution
+pytest -v
+```
+
+### 📊 Quality Metrics Dashboard
+
+Current project quality standards:
+- **Code Coverage**: >80% (target: 90%+)
+- **Type Safety**: Full mypy compliance on core modules
+- **Security**: Zero high-severity vulnerabilities
+- **Performance**: Automated benchmarking with regression detection
+- **Documentation**: Full docstring coverage on public APIs
+- **Standards**: PEP 8 compliance enforced
+
 ## CI/CD and Automation
 
 This project includes comprehensive GitHub Actions workflows for automated testing, deployment, and maintenance.

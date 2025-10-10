@@ -115,6 +115,7 @@ QUIET_CHART_MESSAGE = (
     "Charts paused during quiet hours (23:45-00:59 UTC+3; weekends for non-crypto)."
 )
 PNL_EXPECTANCY_MIN_COMPLETED = 20
+TOP_EXPECTANCY_MIN_EDGE = 0.05
 PNL_EXPECTANCY_MIN_EDGE = 0.10
 
 
@@ -1969,6 +1970,7 @@ class App(tk.Tk):
         cols = (
             "rank",
             "symbol",
+            "bins",
             "trades",
             "win_rate",
             "expectancy",
@@ -1981,6 +1983,7 @@ class App(tk.Tk):
         headings = {
             "rank": "Rank",
             "symbol": "Symbol",
+            "bins": "Bins",
             "trades": "Trades",
             "win_rate": "Win %",
             "expectancy": "Edge (R)",
@@ -1991,6 +1994,7 @@ class App(tk.Tk):
             self.top_table.heading(col, text=headings[col])
         self.top_table.column("rank", width=50, anchor=tk.CENTER)
         self.top_table.column("symbol", width=100, anchor=tk.W)
+        self.top_table.column("bins", width=110, anchor=tk.W)
         self.top_table.column("trades", width=60, anchor=tk.E)
         self.top_table.column("win_rate", width=70, anchor=tk.E)
         self.top_table.column("expectancy", width=80, anchor=tk.E)
@@ -2110,7 +2114,9 @@ class App(tk.Tk):
                         datetime.now(timezone.utc) - timedelta(hours=hours)
                     ).strftime("%Y-%m-%d %H:%M:%S")
                     sql = """
-                        SELECT s.symbol, s.proximity_to_sl, s.rrr, s.inserted_at, h.hit, h.hit_time, h.entry_price, h.hit_price, h.sl, s.direction
+                        SELECT s.symbol, s.proximity_to_sl, s.rrr, s.inserted_at,
+                               h.hit, h.hit_time, h.entry_price, h.hit_price, h.sl,
+                               s.direction, s.proximity_bin
                         FROM timelapse_setups s
                         LEFT JOIN timelapse_hits h ON h.setup_id = s.id
                         WHERE s.inserted_at >= ?
@@ -2129,6 +2135,7 @@ class App(tk.Tk):
                         hit_price,
                         sl_val,
                         direction,
+                        proximity_bin,
                     ) in raw_rows:
                         symbol_s = str(symbol) if symbol is not None else ""
                         if prox_raw is None:
@@ -2181,6 +2188,7 @@ class App(tk.Tk):
                                 "trade_r": trade_r,
                                 "inserted_at": inserted_at,
                                 "hit_time": hit_time,
+                                "proximity_bin": str(proximity_bin or "") or "",
                             }
                         )
             finally:
@@ -2191,7 +2199,41 @@ class App(tk.Tk):
         except Exception as exc:
             payload["error"] = str(exc)
 
-        payload["rows"] = rows
+        # Build expectancy per (symbol, proximity_bin) within the lookback window.
+        bin_totals: dict[tuple[str, str], dict[str, float]] = {}
+        for row in rows:
+            outcome = row.get("outcome")
+            trade_r = row.get("trade_r")
+            prox_bin = row.get("proximity_bin") or ""
+            symbol = row.get("symbol")
+            if outcome not in ["win", "loss"]:
+                continue
+            if not prox_bin or not isinstance(trade_r, (int, float)):
+                continue
+            key = (str(symbol or ""), str(prox_bin))
+            agg = bin_totals.setdefault(key, {"sum": 0.0, "count": 0.0})
+            agg["sum"] += float(trade_r)
+            agg["count"] += 1.0
+
+        expectancy_by_bin: dict[tuple[str, str], float] = {}
+        for key, agg in bin_totals.items():
+            count = agg.get("count", 0.0) or 0.0
+            if count <= 0.0:
+                continue
+            expectancy_by_bin[key] = agg.get("sum", 0.0) / count
+
+        filtered_rows: list[dict[str, object]] = []
+        for row in rows:
+            symbol = str(row.get("symbol") or "")
+            prox_bin = str(row.get("proximity_bin") or "")
+            if not prox_bin:
+                continue
+            expectancy = expectancy_by_bin.get((symbol, prox_bin))
+            if expectancy is None or expectancy <= TOP_EXPECTANCY_MIN_EDGE:
+                continue
+            filtered_rows.append(row)
+
+        payload["rows"] = filtered_rows
 
         self.after(0, lambda: self._top_apply_result(payload))
 
@@ -2261,6 +2303,7 @@ class App(tk.Tk):
             trade_r = row.get("trade_r")
             inserted_at = row.get("inserted_at")
             hit_time = row.get("hit_time")
+            prox_bin = row.get("proximity_bin")
 
             # Use hit_time for completed trades, inserted_at for pending trades
             event_time = hit_time if hit_time else inserted_at
@@ -2276,10 +2319,18 @@ class App(tk.Tk):
                     "sum_rrr_wins": 0.0,
                     "sum_trade_r": 0.0,
                     "recent_trades": [],  # For recency weighting
+                    "bins": set(),
                 },
             )
 
             stat["trades"] = int(stat["trades"]) + 1
+            try:
+                if prox_bin:
+                    stat_bins = stat.get("bins")
+                    if isinstance(stat_bins, set):
+                        stat_bins.add(str(prox_bin))
+            except Exception:
+                pass
 
             # Add to recent trades for recency calculation
             if event_time:
@@ -2363,14 +2414,9 @@ class App(tk.Tk):
                 if recent_weight > 0:
                     recency_factor = recent_score / recent_weight
 
-            # Calculate weighted score
-            score = (
-                (win_rate * 0.4)
-                + (avg_trade_r * 0.3)
-                + (avg_rrr * 0.15)
-                + (frequency_factor * 0.1)
-                + (recency_factor * 0.05)
-            )
+            # Confidence-adjusted score emphasising stable performers
+            confidence_boost = math.log1p(completed)
+            score = avg_trade_r * (1.0 + confidence_boost) + 0.1 * recency_factor
 
             results.append(
                 {
@@ -2382,12 +2428,21 @@ class App(tk.Tk):
                     "score": score,
                     "frequency_factor": frequency_factor,
                     "recency_factor": recency_factor,
+                    "bins": sorted(
+                        stat["bins"]
+                        if isinstance(stat.get("bins"), set)
+                        else []
+                    ),
                 }
             )
 
-        # Sort by score and take top 10
+        # Sort by score and filter by configured thresholds
         results.sort(key=lambda x: x["score"], reverse=True)
-        top_results = results[:10]
+        top_results = [
+            r
+            for r in results
+            if r.get("score", 0.0) > 0.35 and r.get("expectancy", 0.0) > 0.08
+        ]
 
         return {
             "top_performers": top_results,
@@ -2423,6 +2478,11 @@ class App(tk.Tk):
             for i, performer in enumerate(top_performers, 1):
                 try:
                     symbol = performer.get("symbol", "")
+                    bins = performer.get("bins") or []
+                    if isinstance(bins, (list, tuple, set)):
+                        bins_display = ", ".join(sorted(str(b) for b in bins if b))
+                    else:
+                        bins_display = str(bins)
                     trades = performer.get("trades", 0)
                     win_rate = performer.get("win_rate", 0.0)
                     expectancy = performer.get("expectancy", 0.0)
@@ -2432,6 +2492,7 @@ class App(tk.Tk):
                     row = (
                         i,
                         symbol,
+                        bins_display,
                         trades,
                         f"{win_rate * 100:.1f}%",
                         f"{expectancy:+.2f}",

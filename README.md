@@ -66,8 +66,7 @@ Supports automated setup detection, real-time TP/SL hit monitoring, database per
 ### Momentum Context
 
 - **Timelapse Momentum**: Compares current vs. prior snapshot (D1 close delta, 4H strength change); +1.0 score for aligned D1 trend, +0.8 for 4H momentum
-- **Composite Scoring**: Base = consensus count * 1.5; +0.5 for ATR% in range; spread class bonuses (-2 to +1); -0.4 penalty for late entries (prox >0.65)
-- **Timeframe Consensus Flags**: Post-analysis DB computation: 1H( score≥3.0, RRR≥1.2, prox≤0.6), 4H(≥4.5/1.4/0.45), 1D(≥6.0/1.6/0.35)
+- **Composite Scoring**: Base = aligned strength timeframe count * 1.5; +0.5 for ATR% in range; spread class bonuses (-2 to +1); -0.4 penalty for late entries (prox >0.65)
 
 ### Operational Modes
 
@@ -96,7 +95,6 @@ Supports automated setup detection, real-time TP/SL hit monitoring, database per
 
 - **SQLite Schema**: `timelapse_setups` (id, symbol, direction, price, sl, tp, rrr, score, as_of, detected_at, proximity_to_sl, proximity_bin, inserted_at); `timelapse_hits` (setup_id, hit, hit_price/time, entry_price/time)
 - **Deduplication**: ON CONFLICT DO NOTHING on (symbol, direction, as_of); open-setup gating by proximity bin
-- **Consensus Extension**: Optional `consensus` table flags 1H/4H/1D agreement based on score/RRR/prox thresholds
 - **GUI Analytics**: Queries for PnL (hits only), proximity stats (bins 0.1-wide), normalized returns (ATR/vol)
 
 ### Performance Optimizations
@@ -311,7 +309,7 @@ monitor-hits [OPTIONS]
 | sl | REAL | Stop-loss level (S1/D1 Low for Buy; R1/D1 High for Sell) |
 | tp | REAL | Take-profit level (R1/D1 High for Buy; S1/D1 Low for Sell) |
 | rrr | REAL | Reward/risk ratio (TP-entry)/(entry-SL) |
-| score | REAL | Composite score (consensus + ATR bonus + spread + momentum - late penalty) |
+| score | REAL | Composite score (strength alignment + ATR bonus + spread + momentum - late penalty) |
 | as_of | TEXT NOT NULL | Analysis timestamp (UTC naive ISO) |
 | detected_at | TEXT | Detection time (UTC+3 ISO; optional) |
 | proximity_to_sl | REAL | Entry position in SL-TP range (0.0=at SL, 1.0=at TP) |
@@ -339,7 +337,6 @@ monitor-hits [OPTIONS]
 ### Indexes & Optimizations
 - `timelapse_hits`: INDEX on (symbol), (setup_id)
 - `timelapse_setups`: UNIQUE(symbol, direction, as_of); gating via LEFT JOIN hits
-- **Consensus Table** (optional): Flags per-setup (is_1h_consensus, is_4h_consensus, is_1d_consensus) based on thresholds
 
 ## Testing
 
@@ -371,7 +368,7 @@ Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 - **`core/`**: Core business logic and utilities
   - `mt5_client.py`: MT5 wrapper; init/shutdown, symbol resolve, rates/ticks with caching (TTL per TF), server offset detection
   - `config.py`: DB path resolution (`TIMELAPSE_DB_PATH`), env defaults
-  - `db.py`: SQLite helpers; table creation, inserts with gating/dedup, consensus rebuild, hit recording
+  - `db.py`: SQLite helpers; table creation, inserts with gating/dedup, hit recording
   - `domain.py`: Dataclasses (Setup, Hit, TickFetchStats); no business logic
   - `quiet_hours.py`: Timezone-aware ranges (UTC+3 quiet 23:45-00:59; crypto weekends); iter_active/quiet
   - `symbols.py`: Heuristic classification (forex/currency pairs, crypto/*USD, indices like NAS100)
@@ -380,9 +377,9 @@ Add tests for new features; use fakes for MT5/SQLite (no live terminal needed).
 
 1. **Symbol Discovery**: MT5 MarketWatch visibles (or `--symbols`)
 2. **Data Fetch**: Cached rates (D1/H4/W1/H1/M15); live Bid/Ask/tick time; pivots from prev D1
-3. **Analysis**: Strength deltas, consensus (2/3 TFs), S/R SL/TP, RRR/prox, filters (spread/tick/quiet/distance)
-4. **Scoring & Filter**: Composite score; reject invalid/no-consensus/low-spread; dedup open setups by bin
-5. **DB Insert**: Gated by open status/prox bin; proximity_bin for stats; consensus flags post-insert
+3. **Analysis**: Strength deltas, multi-timeframe alignment (2/3 TFs), S/R SL/TP, RRR/prox, filters (spread/tick/quiet/distance)
+4. **Scoring & Filter**: Composite score; reject invalid/no-alignment/low-spread; dedup open setups by bin
+5. **DB Insert**: Gated by open status/prox bin; proximity_bin for stats
 6. **Monitoring**: `monitor-hits` polls active setups; bar-prefilter → tick scan → hit record
 7. **GUI**: Tabs query DB for results/prox/PnL; MT5 for charts; auto-pause quiet hours
 
@@ -413,7 +410,7 @@ graph TD
 
     subgraph CLI ["CLI Tools"]
         direction TB
-        TS{{🔍 monitor-setup<br/>Setup analysis, scoring,<br/>multi-TF consensus}}
+        TS{{🔍 monitor-setup<br/>Setup analysis, scoring,<br/>multi-TF alignment}}
         CH[🎯 monitor-hits<br/>TP/SL hit detection,<br/>tick scanning + filtering]
     end
 

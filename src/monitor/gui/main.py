@@ -4998,12 +4998,13 @@ class App(tk.Tk):
                 try:
                     with conn:
                         cur = conn.cursor()
-                        # Delete hit first (if exists), then setup
-                        if hit_kind in ("TP", "SL"):
-                            cur.execute(
-                                "DELETE FROM timelapse_hits WHERE setup_id=?",
-                                (setup_id,),
-                            )
+                        # Delete associated hit/state rows first, then setup
+                        cur.execute(
+                            "DELETE FROM timelapse_hits WHERE setup_id=?", (setup_id,)
+                        )
+                        cur.execute(
+                            "DELETE FROM tp_sl_setup_state WHERE setup_id=?", (setup_id,)
+                        )
                         cur.execute(
                             "DELETE FROM timelapse_setups WHERE id=?", (setup_id,)
                         )

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, time
+from unittest.mock import patch
 
 from monitor.core.quiet_hours import (
+    QuietWindow,
     UTC,
     is_quiet_time,
     iter_active_utc_ranges,
@@ -147,6 +149,32 @@ class QuietHoursTests(unittest.TestCase):
             next_quiet_transition(sunday_noon, asset_kind="crypto"),
             datetime(2024, 5, 5, 20, 45, tzinfo=UTC),
         )
+
+    def test_iter_quiet_ranges_returns_empty_for_inverted_bounds(self) -> None:
+        start = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
+        end = datetime(2024, 5, 1, 11, 0, tzinfo=UTC)
+        self.assertEqual(list(iter_quiet_utc_ranges(start, end)), [])
+
+    def test_iter_quiet_ranges_skip_zero_length_windows(self) -> None:
+        custom_window = QuietWindow(start=time(hour=12), end=time(hour=12))
+        start = datetime(2024, 5, 1, 8, 0, tzinfo=UTC)
+        end = datetime(2024, 5, 1, 10, 0, tzinfo=UTC)
+        with patch("monitor.core.quiet_hours.QUIET_WINDOWS_UTC3", (custom_window,)):
+            ranges = list(iter_quiet_utc_ranges(start, end))
+        self.assertEqual(ranges, [])
+
+    def test_iter_active_ranges_returns_empty_for_inverted_bounds(self) -> None:
+        start = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
+        end = datetime(2024, 5, 1, 11, 0, tzinfo=UTC)
+        self.assertEqual(list(iter_active_utc_ranges(start, end)), [])
+
+    def test_next_transition_without_quiet_windows(self) -> None:
+        check_time = datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
+        with patch("monitor.core.quiet_hours.QUIET_WINDOWS_UTC3", ()):
+            self.assertEqual(
+                next_quiet_transition(check_time, asset_kind="crypto"),
+                check_time,
+            )
 
 
 if __name__ == "__main__":

@@ -47,6 +47,10 @@ class ConfigHelpersTests(unittest.TestCase):
         absolute_candidate = Path(project_root(), "nested", "file.db").resolve()
         self.assertEqual(resolve_db_path(str(absolute_candidate)), absolute_candidate)
 
+    def test_resolve_db_path_defaults_when_none(self) -> None:
+        self._set_env("TIMELAPSE_DB_PATH", None)
+        self.assertEqual(resolve_db_path(None), default_db_path())
+
     def test_db_path_str_is_string_wrapper(self) -> None:
         target = resolve_db_path("timelapse.db")
         self.assertEqual(db_path_str("timelapse.db"), str(target))

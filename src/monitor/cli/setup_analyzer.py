@@ -503,6 +503,78 @@ def _pivots_from_prev_day(daily_rates) -> Tuple[Optional[float], Optional[float]
         return None, None
 
 
+def _rate_field(rate: object, name: str) -> Optional[float]:
+    try:
+        return float(rate[name])  # type: ignore[index]
+    except Exception:
+        try:
+            value = getattr(rate, name)
+        except AttributeError:
+            try:
+                value = rate[name]  # type: ignore[index]
+            except Exception:
+                value = None
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+
+def _rate_time_utc(rate: object, offset_hours: int) -> Optional[datetime]:
+    try:
+        ts = float(getattr(rate, "time", None) or rate["time"])  # type: ignore[index]
+    except Exception:
+        return None
+    try:
+        server_dt = datetime.fromtimestamp(ts, tz=UTC)
+        return server_dt - timedelta(hours=offset_hours)
+    except Exception:
+        return None
+
+
+def _pct_change_completed(
+    rates: Optional[List[object]],
+    timeframe_seconds: int,
+    now_utc: datetime,
+    offset_hours: int,
+) -> Optional[float]:
+    if rates is None or timeframe_seconds <= 0:
+        return None
+    try:
+        if len(rates) == 0:
+            return None
+    except TypeError:
+        rates = list(rates)  # type: ignore
+        if len(rates) == 0:
+            return None
+    else:
+        rates = list(rates)
+    if len(rates) < 2:
+        return None
+    closes: List[Tuple[datetime, float]] = []
+    for rate in rates:
+        ts = _rate_time_utc(rate, offset_hours)
+        if ts is None:
+            continue
+        # Skip bars that are still in progress
+        if ts + timedelta(seconds=timeframe_seconds) > now_utc:
+            continue
+        close_val = _rate_field(rate, "close")
+        if close_val is None:
+            continue
+        closes.append((ts, close_val))
+    if len(closes) < 2:
+        return None
+    closes.sort(key=lambda item: item[0])
+    prev_close = closes[-2][1]
+    last_close = closes[-1][1]
+    if prev_close == 0:
+        return None
+    return (last_close - prev_close) / prev_close * 100.0
+
+
 def read_series_mt5(
     symbols: List[str],
 ) -> Tuple[Dict[str, List[Snapshot]], Optional[str], Optional[datetime]]:
@@ -517,6 +589,11 @@ def read_series_mt5(
             mt5.symbol_select(sym, True)  # type: ignore[union-attr, reportUnknownMember]
         except Exception:
             pass
+        offset_hours = 0
+        try:
+            offset_hours = mt5_client.get_server_offset_hours(sym)
+        except Exception:
+            offset_hours = 0
         tick = None
         try:
             tick = mt5.symbol_info_tick(sym)  # type: ignore[union-attr, reportUnknownMember]
@@ -562,7 +639,7 @@ def read_series_mt5(
         d1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_D1, 20)
         h4 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H4, 4)
         w1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_W1, 4)
-        h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 1)
+        h1 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_H1, 4)
         m15 = _mt5_copy_rates_cached(sym, mt5.TIMEFRAME_M15, 1)
 
         d1_close = float(d1[-1]["close"]) if (d1 is not None and len(d1) >= 1) else None
@@ -572,20 +649,21 @@ def read_series_mt5(
             float(d1[-2]["close"]) if (d1 is not None and len(d1) >= 2) else d1_close
         )
 
-        def pct_change(arr):
-            try:
-                return (
-                    (float(arr[-1]["close"]) - float(arr[-2]["close"]))
-                    / float(arr[-2]["close"])
-                    * 100.0
-                )
-            except Exception:
-                return None
+        tf_h1 = getattr(mt5, "TIMEFRAME_H1", None)
+        tf_h4 = getattr(mt5, "TIMEFRAME_H4", None)
+        tf_d1 = getattr(mt5, "TIMEFRAME_D1", None)
+        tf_w1 = getattr(mt5, "TIMEFRAME_W1", None)
 
-        ss_1h = pct_change(h1) if (h1 is not None and len(h1) >= 2) else None
-        ss_4h = pct_change(h4) if (h4 is not None and len(h4) >= 2) else None
-        ss_1d = pct_change(d1) if (d1 is not None and len(d1) >= 2) else None
-        ss_1w = pct_change(w1) if (w1 is not None and len(w1) >= 2) else None
+        def tf_seconds(tf: Optional[int]) -> int:
+            try:
+                return mt5_client.timeframe_seconds(int(tf)) if tf is not None else 0
+            except Exception:
+                return 0
+
+        ss_1h = _pct_change_completed(h1, tf_seconds(tf_h1), now_utc, offset_hours)
+        ss_4h = _pct_change_completed(h4, tf_seconds(tf_h4), now_utc, offset_hours)
+        ss_1d = _pct_change_completed(d1, tf_seconds(tf_d1), now_utc, offset_hours)
+        ss_1w = _pct_change_completed(w1, tf_seconds(tf_w1), now_utc, offset_hours)
         ss_4h_prev = None
         if h4 is not None and len(h4) >= 3:
             try:
@@ -1275,6 +1353,9 @@ def analyze(
                 "tp": tp_out if tp_out is not None else tp,
                 "rrr": rrr_out,
                 "score": score_out if score_out is not None else score,
+                "strength_1h": ss1h,
+                "strength_4h": ss4,
+                "strength_1d": ss1d,
                 "as_of": as_of_value,
                 "proximity_to_sl": prox_out if prox_out is not None else prox,
                 # Meta for logging; not used for DB schema
@@ -1329,6 +1410,9 @@ def insert_results_to_db(
                 tp REAL,
                 rrr REAL,
                 score REAL,
+                strength_1h REAL,
+                strength_4h REAL,
+                strength_1d REAL,
                 as_of TEXT NOT NULL,
                 detected_at TEXT,
                 proximity_to_sl REAL,
@@ -1384,6 +1468,9 @@ def insert_results_to_db(
             cols = {str(r[1]) for r in (cur.fetchall() or [])}
             has_detected = "detected_at" in cols
             has_prox_bin = "proximity_bin" in cols
+            has_strength_1h = "strength_1h" in cols
+            has_strength_4h = "strength_4h" in cols
+            has_strength_1d = "strength_1d" in cols
             # Try to migrate by adding detected_at if missing
             if not has_detected:
                 try:
@@ -1397,6 +1484,24 @@ def insert_results_to_db(
                     has_prox_bin = True
                 except Exception:
                     has_prox_bin = False
+            if not has_strength_1h:
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN strength_1h REAL")
+                    has_strength_1h = True
+                except Exception:
+                    has_strength_1h = False
+            if not has_strength_4h:
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN strength_4h REAL")
+                    has_strength_4h = True
+                except Exception:
+                    has_strength_4h = False
+            if not has_strength_1d:
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN strength_1d REAL")
+                    has_strength_1d = True
+                except Exception:
+                    has_strength_1d = False
 
             column_list = [
                 "symbol",
@@ -1406,8 +1511,14 @@ def insert_results_to_db(
                 "tp",
                 "rrr",
                 "score",
-                "as_of",
             ]
+            if has_strength_1h:
+                column_list.append("strength_1h")
+            if has_strength_4h:
+                column_list.append("strength_4h")
+            if has_strength_1d:
+                column_list.append("strength_1d")
+            column_list.append("as_of")
             if has_detected:
                 column_list.append("detected_at")
             column_list.append("proximity_to_sl")
@@ -1465,8 +1576,14 @@ def insert_results_to_db(
                     r.get("tp"),
                     r.get("rrr"),  # Already rounded in the results dict
                     r.get("score"),
-                    as_of_val,
                 ]
+                if has_strength_1h:
+                    row_values.append(r.get("strength_1h"))
+                if has_strength_4h:
+                    row_values.append(r.get("strength_4h"))
+                if has_strength_1d:
+                    row_values.append(r.get("strength_1d"))
+                row_values.append(as_of_val)
                 if has_detected:
                     row_values.append(detected_at_val)
                 row_values.append(proximity_val)

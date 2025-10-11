@@ -5338,13 +5338,12 @@ class App(tk.Tk):
                     ask = None
             if bid is None and ask is None:
                 continue
-            price = (
-                bid
-                if (direction or "").lower() == "buy"
-                else ask
-                if ask is not None
-                else bid
-            )
+            if (direction or "").lower() == "buy":
+                price = bid
+            elif ask is not None:
+                price = ask
+            else:
+                price = bid
             if price is None:
                 continue
             try:

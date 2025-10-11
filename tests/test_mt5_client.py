@@ -5,7 +5,6 @@ from monitor.core.mt5_client import earliest_hit_from_ticks
 
 
 class EarliestHitFromTicksTests(unittest.TestCase):
-
     def setUp(self) -> None:
         self.epoch = datetime(2025, 9, 26, 12, 4, 8, tzinfo=timezone.utc).timestamp()
 

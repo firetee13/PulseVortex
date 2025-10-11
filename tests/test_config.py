@@ -11,7 +11,6 @@ from monitor.core.config import (
 
 
 class ConfigHelpersTests(unittest.TestCase):
-
     def _set_env(self, key: str, value):
         original = os.environ.get(key)
 

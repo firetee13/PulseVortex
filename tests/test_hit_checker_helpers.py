@@ -17,7 +17,9 @@ def test_parse_ids_parses_integers():
 
 
 def test_parse_ids_rejects_invalid(capsys, monkeypatch):
-    monkeypatch.setattr(hc.sys, "exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    monkeypatch.setattr(
+        hc.sys, "exit", lambda code: (_ for _ in ()).throw(SystemExit(code))
+    )
 
     with pytest.raises(SystemExit) as excinfo:
         hc._parse_ids("1,abc")
@@ -32,7 +34,9 @@ def test_parse_symbols_handles_none():
 
 
 def test_resolve_timeframe_falls_back(monkeypatch):
-    monkeypatch.setattr(hc, "timeframe_from_code", lambda code: 42 if code == "M42" else None)
+    monkeypatch.setattr(
+        hc, "timeframe_from_code", lambda code: 42 if code == "M42" else None
+    )
     monkeypatch.setattr(hc, "timeframe_m1", lambda: 1)
     assert hc._resolve_timeframe("M42") == 42
     assert hc._resolve_timeframe(None) == 1
@@ -53,7 +57,9 @@ def test_rate_helpers_extract_values():
 def test_rates_to_bars_filters_bad_records():
     valid_rate = {"time": 1_700_000_000, "low": 1.0, "high": 2.0}
     missing = {"time": None, "low": 1.0, "high": 2.0}
-    bars = hc._rates_to_bars([valid_rate, missing], timeframe_seconds=60, offset_hours=0)
+    bars = hc._rates_to_bars(
+        [valid_rate, missing], timeframe_seconds=60, offset_hours=0
+    )
     assert len(bars) == 1
     assert isinstance(bars[0], hc.RateBar)
     assert bars[0].end_utc - bars[0].start_utc == timedelta(seconds=60)
@@ -106,7 +112,9 @@ def test_evaluate_setup_records_hit(monkeypatch):
     )
 
     hit_time = as_of + timedelta(minutes=1, seconds=30)
-    fake_stats = TickFetchStats(pages=1, total_ticks=10, elapsed_s=0.1, fetch_s=0.05, early_stop=True)
+    fake_stats = TickFetchStats(
+        pages=1, total_ticks=10, elapsed_s=0.1, fetch_s=0.05, early_stop=True
+    )
 
     def fake_scan(**kwargs):
         return Hit(kind="TP", time_utc=hit_time, price=2.0), fake_stats, 1
@@ -150,7 +158,9 @@ def test_evaluate_setup_ignored_hit_when_before_as_of(monkeypatch):
         high=1.2,
     )
 
-    fake_stats = TickFetchStats(pages=1, total_ticks=5, elapsed_s=0.05, fetch_s=0.02, early_stop=True)
+    fake_stats = TickFetchStats(
+        pages=1, total_ticks=5, elapsed_s=0.05, fetch_s=0.02, early_stop=True
+    )
     hit_time = as_of
 
     def fake_scan(**kwargs):
@@ -185,7 +195,9 @@ def test_evaluate_setup_ignored_hit_when_before_as_of(monkeypatch):
 def test_scan_for_hit_with_chunks_aggregates(monkeypatch):
     start_utc = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     end_utc = start_utc + timedelta(minutes=30)
-    stats = TickFetchStats(pages=1, total_ticks=20, elapsed_s=0.05, fetch_s=0.02, early_stop=False)
+    stats = TickFetchStats(
+        pages=1, total_ticks=20, elapsed_s=0.05, fetch_s=0.02, early_stop=False
+    )
 
     call_counter = {"count": 0}
 

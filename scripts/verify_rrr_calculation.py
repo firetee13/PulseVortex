@@ -9,6 +9,7 @@ from decimal import Decimal, getcontext
 # Set precision for decimal calculations
 getcontext().prec = 10
 
+
 def calculate_rrr(price, sl, tp, direction):
     """
     Calculate RRR (Risk Reward Ratio) based on price, SL, TP and direction
@@ -16,7 +17,7 @@ def calculate_rrr(price, sl, tp, direction):
     RRR = |TP - entry| / |SL - entry|
     """
     try:
-        if direction.lower() == 'buy':
+        if direction.lower() == "buy":
             risk = price - sl
             reward = tp - price
         else:  # sell
@@ -31,19 +32,22 @@ def calculate_rrr(price, sl, tp, direction):
     except (TypeError, ZeroDivisionError):
         return None
 
+
 def verify_rrr_values():
     """Verify RRR calculations in the database"""
 
     # Connect to database
-    conn = sqlite3.connect('timelapse.db')
+    conn = sqlite3.connect("timelapse.db")
     cursor = conn.cursor()
 
     # Get all records from timelapse_setups
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT rowid, symbol, direction, price, sl, tp, rrr
         FROM timelapse_setups
         WHERE price IS NOT NULL AND sl IS NOT NULL AND tp IS NOT NULL
-    """)
+    """
+    )
 
     records = cursor.fetchall()
     print(f"Checking {len(records)} records for RRR calculation accuracy...\n")
@@ -72,17 +76,19 @@ def verify_rrr_values():
 
                 if abs(calculated_rrr - stored_rrr) > tolerance:
                     mismatched_count += 1
-                    mismatched_records.append({
-                        'rowid': rowid,
-                        'symbol': symbol,
-                        'direction': direction,
-                        'price': float(price),
-                        'sl': float(sl),
-                        'tp': float(tp),
-                        'stored_rrr': stored_rrr,
-                        'calculated_rrr': calculated_rrr,
-                        'difference': abs(calculated_rrr - stored_rrr)
-                    })
+                    mismatched_records.append(
+                        {
+                            "rowid": rowid,
+                            "symbol": symbol,
+                            "direction": direction,
+                            "price": float(price),
+                            "sl": float(sl),
+                            "tp": float(tp),
+                            "stored_rrr": stored_rrr,
+                            "calculated_rrr": calculated_rrr,
+                            "difference": abs(calculated_rrr - stored_rrr),
+                        }
+                    )
 
     # Print results
     if mismatched_count == 0:
@@ -101,10 +107,13 @@ def verify_rrr_values():
             print(f"  Difference: {record['difference']:.6f}\n")
 
         if mismatched_count > 10:
-            print(f"... and {mismatched_count - 10} more records with incorrect RRR values")
+            print(
+                f"... and {mismatched_count - 10} more records with incorrect RRR values"
+            )
 
     conn.close()
     return mismatched_count == 0
+
 
 if __name__ == "__main__":
     is_correct = verify_rrr_values()

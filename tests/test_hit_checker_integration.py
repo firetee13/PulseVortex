@@ -1,20 +1,18 @@
 """Integration tests for hit checker to improve coverage."""
+
 from __future__ import annotations
 
-import argparse
 import os
-import sqlite3
-import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 from monitor.cli.hit_checker import (
-    parse_args,
-    db_path_from_args,
     _env_bool,
+    db_path_from_args,
     main,
+    parse_args,
     run_once,
 )
 from monitor.core.domain import Setup
@@ -25,7 +23,7 @@ UTC = timezone.utc
 class HitCheckerArgparseTests(unittest.TestCase):
     """Test argument parsing functionality."""
 
-    @patch('sys.argv', ['script.py'])
+    @patch("sys.argv", ["script.py"])
     def test_parse_args_defaults(self):
         args = parse_args()
         self.assertEqual(args.since_hours, None)
@@ -42,7 +40,34 @@ class HitCheckerArgparseTests(unittest.TestCase):
         self.assertFalse(args.verbose)
         self.assertFalse(args.watch)
 
-    @patch('sys.argv', ['script.py', '--since-hours', '12', '--symbols', 'EURUSD,BTCUSD', '--max-mins', '60', '--mt5-timeout', '120', '--mt5-retries', '3', '--watch', '--interval', '30', '--bar-timeframe', 'M5', '--bar-backtrack', '5', '--tick-padding', '2.5', '--dry-run', '--verbose', '--trace-pages'])
+    @patch(
+        "sys.argv",
+        [
+            "script.py",
+            "--since-hours",
+            "12",
+            "--symbols",
+            "EURUSD,BTCUSD",
+            "--max-mins",
+            "60",
+            "--mt5-timeout",
+            "120",
+            "--mt5-retries",
+            "3",
+            "--watch",
+            "--interval",
+            "30",
+            "--bar-timeframe",
+            "M5",
+            "--bar-backtrack",
+            "5",
+            "--tick-padding",
+            "2.5",
+            "--dry-run",
+            "--verbose",
+            "--trace-pages",
+        ],
+    )
     def test_parse_args_with_values(self):
         args = parse_args()
         self.assertEqual(args.since_hours, 12)
@@ -59,7 +84,7 @@ class HitCheckerArgparseTests(unittest.TestCase):
         self.assertTrue(args.verbose)
         self.assertTrue(args.trace_pages)
 
-    @patch('sys.argv', ['script.py', '--ids', '1,2,3'])
+    @patch("sys.argv", ["script.py", "--ids", "1,2,3"])
     def test_parse_args_ids_mutually_exclusive(self):
         # Should not raise error when only --ids is provided
         args = parse_args()
@@ -73,32 +98,32 @@ class HitCheckerArgparseTests(unittest.TestCase):
 
     def test_env_bool_parsing(self):
         # Test with environment variable set
-        with patch.dict(os.environ, {'TEST_VAR': '1'}):
-            self.assertTrue(_env_bool('TEST_VAR', False))
+        with patch.dict(os.environ, {"TEST_VAR": "1"}):
+            self.assertTrue(_env_bool("TEST_VAR", False))
 
-        with patch.dict(os.environ, {'TEST_VAR': 'true'}):
-            self.assertTrue(_env_bool('TEST_VAR', False))
+        with patch.dict(os.environ, {"TEST_VAR": "true"}):
+            self.assertTrue(_env_bool("TEST_VAR", False))
 
-        with patch.dict(os.environ, {'TEST_VAR': 'yes'}):
-            self.assertTrue(_env_bool('TEST_VAR', False))
+        with patch.dict(os.environ, {"TEST_VAR": "yes"}):
+            self.assertTrue(_env_bool("TEST_VAR", False))
 
-        with patch.dict(os.environ, {'TEST_VAR': 'on'}):
-            self.assertTrue(_env_bool('TEST_VAR', False))
+        with patch.dict(os.environ, {"TEST_VAR": "on"}):
+            self.assertTrue(_env_bool("TEST_VAR", False))
 
-        with patch.dict(os.environ, {'TEST_VAR': '0'}):
-            self.assertFalse(_env_bool('TEST_VAR', True))
+        with patch.dict(os.environ, {"TEST_VAR": "0"}):
+            self.assertFalse(_env_bool("TEST_VAR", True))
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(_env_bool('MISSING_VAR', False))
-            self.assertTrue(_env_bool('MISSING_VAR', True))
+            self.assertFalse(_env_bool("MISSING_VAR", False))
+            self.assertTrue(_env_bool("MISSING_VAR", True))
 
 
 class HitCheckerMainFunctionTests(unittest.TestCase):
     """Test main() function coverage."""
 
-    @patch('monitor.cli.hit_checker.run_once')
-    @patch('monitor.cli.hit_checker.time.sleep')
-    @patch('monitor.cli.hit_checker.parse_args')
+    @patch("monitor.cli.hit_checker.run_once")
+    @patch("monitor.cli.hit_checker.time.sleep")
+    @patch("monitor.cli.hit_checker.parse_args")
     def test_main_watch_mode(self, mock_parse_args, mock_sleep, mock_run_once):
         # Setup mock args for watch mode
         mock_args = SimpleNamespace(watch=True, interval=1)
@@ -113,8 +138,8 @@ class HitCheckerMainFunctionTests(unittest.TestCase):
         # Verify run_once was called once
         mock_run_once.assert_called_once_with(mock_args)
 
-    @patch('monitor.cli.hit_checker.run_once')
-    @patch('monitor.cli.hit_checker.parse_args')
+    @patch("monitor.cli.hit_checker.run_once")
+    @patch("monitor.cli.hit_checker.parse_args")
     def test_main_single_run(self, mock_parse_args, mock_run_once):
         # Setup mock args for single run
         mock_args = SimpleNamespace(watch=False)
@@ -132,14 +157,20 @@ class HitCheckerRunOnceTests(unittest.TestCase):
 
     # Note: sqlite3 availability test removed since it's a core dependency
 
-    @patch('sys.argv', ['script.py'])
-    @patch('monitor.cli.hit_checker.ensure_hits_table_sqlite')
-    @patch('monitor.cli.hit_checker.ensure_tp_sl_setup_state_sqlite')
-    @patch('monitor.cli.hit_checker.backfill_hit_columns_sqlite')
-    @patch('monitor.cli.hit_checker.load_setups_sqlite')
-    @patch('monitor.cli.hit_checker.sqlite3.connect')
-    def test_run_once_no_setups(self, mock_connect, mock_load_setups,
-                               mock_backfill, mock_ensure_state, mock_ensure_hits):
+    @patch("sys.argv", ["script.py"])
+    @patch("monitor.cli.hit_checker.ensure_hits_table_sqlite")
+    @patch("monitor.cli.hit_checker.ensure_tp_sl_setup_state_sqlite")
+    @patch("monitor.cli.hit_checker.backfill_hit_columns_sqlite")
+    @patch("monitor.cli.hit_checker.load_setups_sqlite")
+    @patch("monitor.cli.hit_checker.sqlite3.connect")
+    def test_run_once_no_setups(
+        self,
+        mock_connect,
+        mock_load_setups,
+        mock_backfill,
+        mock_ensure_state,
+        mock_ensure_hits,
+    ):
         # Setup mocks
         mock_conn = MagicMock()
         mock_connect.return_value = mock_conn
@@ -153,22 +184,36 @@ class HitCheckerRunOnceTests(unittest.TestCase):
         # Verify setup loading was called
         mock_load_setups.assert_called_once()
 
-    @patch('sys.argv', ['script.py'])
-    @patch('monitor.cli.hit_checker.ensure_hits_table_sqlite')
-    @patch('monitor.cli.hit_checker.ensure_tp_sl_setup_state_sqlite')
-    @patch('monitor.cli.hit_checker.backfill_hit_columns_sqlite')
-    @patch('monitor.cli.hit_checker.load_setups_sqlite')
-    @patch('monitor.cli.hit_checker.sqlite3.connect')
-    @patch('monitor.cli.hit_checker.init_mt5')
-    @patch('monitor.cli.hit_checker.shutdown_mt5')
-    def test_run_once_mt5_init_failure(self, mock_shutdown, mock_init,
-                                      mock_connect, mock_load_setups,
-                                      mock_backfill, mock_ensure_state, mock_ensure_hits):
+    @patch("sys.argv", ["script.py"])
+    @patch("monitor.cli.hit_checker.ensure_hits_table_sqlite")
+    @patch("monitor.cli.hit_checker.ensure_tp_sl_setup_state_sqlite")
+    @patch("monitor.cli.hit_checker.backfill_hit_columns_sqlite")
+    @patch("monitor.cli.hit_checker.load_setups_sqlite")
+    @patch("monitor.cli.hit_checker.sqlite3.connect")
+    @patch("monitor.cli.hit_checker.init_mt5")
+    @patch("monitor.cli.hit_checker.shutdown_mt5")
+    def test_run_once_mt5_init_failure(
+        self,
+        mock_shutdown,
+        mock_init,
+        mock_connect,
+        mock_load_setups,
+        mock_backfill,
+        mock_ensure_state,
+        mock_ensure_hits,
+    ):
         # Setup mocks
         mock_conn = MagicMock()
         mock_connect.return_value = mock_conn
-        mock_setup = Setup(id=1, symbol="EURUSD", direction="buy", sl=1.0, tp=2.0,
-                          entry_price=None, as_of_utc=datetime.now(UTC))
+        mock_setup = Setup(
+            id=1,
+            symbol="EURUSD",
+            direction="buy",
+            sl=1.0,
+            tp=2.0,
+            entry_price=None,
+            as_of_utc=datetime.now(UTC),
+        )
         mock_load_setups.return_value = [mock_setup]
         mock_init.side_effect = RuntimeError("MT5 connection failed")
 
@@ -181,38 +226,60 @@ class HitCheckerRunOnceTests(unittest.TestCase):
         mock_init.assert_called_once()
         # shutdown_mt5 may not be called if init fails early
 
-    @patch('sys.argv', ['script.py'])
-    @patch('monitor.cli.hit_checker.ensure_hits_table_sqlite')
-    @patch('monitor.cli.hit_checker.ensure_tp_sl_setup_state_sqlite')
-    @patch('monitor.cli.hit_checker.backfill_hit_columns_sqlite')
-    @patch('monitor.cli.hit_checker.load_setups_sqlite')
-    @patch('monitor.cli.hit_checker.sqlite3.connect')
-    @patch('monitor.cli.hit_checker.init_mt5')
-    @patch('monitor.cli.hit_checker.shutdown_mt5')
-    @patch('monitor.cli.hit_checker.load_recorded_ids_sqlite')
-    @patch('monitor.cli.hit_checker.load_tp_sl_setup_state_sqlite')
-    @patch('monitor.cli.hit_checker.persist_tp_sl_setup_state_sqlite')
-    def test_run_once_with_pending_setups(self, mock_persist, mock_load_state,
-                                         mock_load_recorded, mock_shutdown, mock_init,
-                                         mock_connect, mock_load_setups,
-                                         mock_backfill, mock_ensure_state, mock_ensure_hits):
+    @patch("sys.argv", ["script.py"])
+    @patch("monitor.cli.hit_checker.ensure_hits_table_sqlite")
+    @patch("monitor.cli.hit_checker.ensure_tp_sl_setup_state_sqlite")
+    @patch("monitor.cli.hit_checker.backfill_hit_columns_sqlite")
+    @patch("monitor.cli.hit_checker.load_setups_sqlite")
+    @patch("monitor.cli.hit_checker.sqlite3.connect")
+    @patch("monitor.cli.hit_checker.init_mt5")
+    @patch("monitor.cli.hit_checker.shutdown_mt5")
+    @patch("monitor.cli.hit_checker.load_recorded_ids_sqlite")
+    @patch("monitor.cli.hit_checker.load_tp_sl_setup_state_sqlite")
+    @patch("monitor.cli.hit_checker.persist_tp_sl_setup_state_sqlite")
+    def test_run_once_with_pending_setups(
+        self,
+        mock_persist,
+        mock_load_state,
+        mock_load_recorded,
+        mock_shutdown,
+        mock_init,
+        mock_connect,
+        mock_load_setups,
+        mock_backfill,
+        mock_ensure_state,
+        mock_ensure_hits,
+    ):
         # Setup mocks
         mock_conn = MagicMock()
         mock_connect.return_value = mock_conn
-        mock_setup = Setup(id=1, symbol="EURUSD", direction="buy", sl=1.0, tp=2.0,
-                          entry_price=None, as_of_utc=datetime.now(UTC))
+        mock_setup = Setup(
+            id=1,
+            symbol="EURUSD",
+            direction="buy",
+            sl=1.0,
+            tp=2.0,
+            entry_price=None,
+            as_of_utc=datetime.now(UTC),
+        )
         mock_load_setups.return_value = [mock_setup]
         mock_load_recorded.return_value = set()  # No recorded IDs
         mock_load_state.return_value = {}  # No state
 
         # Mock MT5 and symbol resolution
-        with patch('monitor.cli.hit_checker.resolve_symbol', return_value='EURUSD'), \
-             patch('monitor.cli.hit_checker.get_server_offset_hours', return_value=0), \
-             patch('monitor.cli.hit_checker._compute_spread_guard', return_value=0.0), \
-             patch('monitor.cli.hit_checker.rates_range_utc', return_value=[]), \
-             patch('monitor.cli.hit_checker.classify_symbol', return_value='forex'), \
-             patch('monitor.cli.hit_checker.iter_active_utc_ranges', return_value=[]):
-
+        with patch(
+            "monitor.cli.hit_checker.resolve_symbol", return_value="EURUSD"
+        ), patch(
+            "monitor.cli.hit_checker.get_server_offset_hours", return_value=0
+        ), patch(
+            "monitor.cli.hit_checker._compute_spread_guard", return_value=0.0
+        ), patch(
+            "monitor.cli.hit_checker.rates_range_utc", return_value=[]
+        ), patch(
+            "monitor.cli.hit_checker.classify_symbol", return_value="forex"
+        ), patch(
+            "monitor.cli.hit_checker.iter_active_utc_ranges", return_value=[]
+        ):
             args = parse_args()
 
             # Call run_once
@@ -225,7 +292,7 @@ class HitCheckerRunOnceTests(unittest.TestCase):
 class HitCheckerEdgeCaseTests(unittest.TestCase):
     """Test edge cases and error conditions."""
 
-    @patch('monitor.cli.hit_checker.sys.exit')
+    @patch("monitor.cli.hit_checker.sys.exit")
     def test_parse_ids_invalid_format(self, mock_exit):
         from monitor.cli.hit_checker import _parse_ids
 
@@ -264,7 +331,7 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         # Test None
         self.assertIsNone(_parse_symbols(None))
 
-    @patch('monitor.cli.hit_checker.get_symbol_info')
+    @patch("monitor.cli.hit_checker.get_symbol_info")
     def test_compute_spread_guard_edge_cases(self, mock_get_symbol_info):
         from monitor.cli.hit_checker import _compute_spread_guard
 

@@ -5,7 +5,9 @@ that are not present in timelapse_hits table.
 """
 
 import sqlite3
+
 from monitor.core.config import default_db_path
+
 
 def find_missing_hits():
     """Find setups that don't have corresponding hits."""
@@ -19,7 +21,7 @@ def find_missing_hits():
         # First check if proximity_bin column exists
         cursor.execute("PRAGMA table_info(timelapse_setups)")
         columns = [row[1] for row in cursor.fetchall()]
-        has_proximity_bin = 'proximity_bin' in columns
+        has_proximity_bin = "proximity_bin" in columns
 
         if not has_proximity_bin:
             print("proximity_bin column does not exist in timelapse_setups table")
@@ -45,14 +47,20 @@ def find_missing_hits():
         results = cursor.fetchall()
 
         if not results:
-            print("No groups of setups with same symbol and proximity_bin found without hits.")
+            print(
+                "No groups of setups with same symbol and proximity_bin found without hits."
+            )
             return
 
-        print(f"Found {len(results)} groups of setups with same symbol and proximity_bin without hits:\n")
+        print(
+            f"Found {len(results)} groups of setups with same symbol and proximity_bin without hits:\n"
+        )
 
         for row in results:
             setup_id, symbol, direction, proximity_bin, count = row
-            print(f"Symbol: {symbol}, Direction: {direction}, Proximity Bin: {proximity_bin or 'NULL'}, Count: {count}")
+            print(
+                f"Symbol: {symbol}, Direction: {direction}, Proximity Bin: {proximity_bin or 'NULL'}, Count: {count}"
+            )
 
             # Get the actual setup IDs for this group
             detail_query = """
@@ -68,7 +76,9 @@ def find_missing_hits():
 
             for detail in details:
                 detail_id, as_of, price, sl, tp, rrr = detail
-                print(f"  ID: {detail_id}, Date: {as_of}, Price: {price}, SL: {sl}, TP: {tp}, RRR: {rrr}")
+                print(
+                    f"  ID: {detail_id}, Date: {as_of}, Price: {price}, SL: {sl}, TP: {tp}, RRR: {rrr}"
+                )
             print()
 
         # Also show a summary by symbol
@@ -89,13 +99,16 @@ def find_missing_hits():
         summary = cursor.fetchall()
 
         for symbol, total, bins in summary:
-            print(f"  {symbol}: {total} setups without hits across {bins} proximity bins")
+            print(
+                f"  {symbol}: {total} setups without hits across {bins} proximity bins"
+            )
 
     except sqlite3.Error as e:
         print(f"Database error: {e}")
     finally:
         if conn:
             conn.close()
+
 
 if __name__ == "__main__":
     find_missing_hits()

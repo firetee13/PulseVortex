@@ -10,7 +10,6 @@ UTC = timezone.utc
 
 
 class BarCrossesPriceGapTests(unittest.TestCase):
-
     def setUp(self) -> None:
         start = datetime(2025, 9, 26, 12, 4, tzinfo=UTC)
         self.bar = RateBar(
@@ -62,7 +61,6 @@ class BarCrossesPriceGapTests(unittest.TestCase):
 
 
 class EvaluateSetupQuietHoursTests(unittest.TestCase):
-
     def test_evaluate_setup_skips_quiet_hours_ranges(self) -> None:
         setup = Setup(
             id=1,

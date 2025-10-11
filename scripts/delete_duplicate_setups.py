@@ -1,17 +1,19 @@
 import sqlite3
 from datetime import datetime
 
+
 def delete_duplicate_setups():
     """Delete duplicate setups, keeping only the earliest one for each group"""
 
     # Connect to the database
-    conn = sqlite3.connect('timelapse.db')
+    conn = sqlite3.connect("timelapse.db")
     cursor = conn.cursor()
 
     print("Finding and deleting duplicate setups...")
 
     # First, let's see what we're going to delete (for verification)
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT
             t1.id,
             t1.symbol,
@@ -42,7 +44,8 @@ def delete_duplicate_setups():
         WHERE h.setup_id IS NULL
         AND t1.as_of != t2.earliest_as_of
         ORDER BY t1.symbol, t1.direction, t1.proximity_bin, t1.as_of
-    """)
+    """
+    )
 
     duplicates_to_delete = cursor.fetchall()
 
@@ -57,19 +60,22 @@ def delete_duplicate_setups():
     print("-" * 100)
 
     for record in duplicates_to_delete:
-        print(f"{record[0]}\t{record[1]}\t{record[2]}\t{record[3]}\t{record[4]}\t{record[5]}\t{record[6]}\t{record[7]}\t{record[8]:.4f}\t{record[9]:.4f}")
+        print(
+            f"{record[0]}\t{record[1]}\t{record[2]}\t{record[3]}\t{record[4]}\t{record[5]}\t{record[6]}\t{record[7]}\t{record[8]:.4f}\t{record[9]:.4f}"
+        )
 
     # Confirm before deletion
     print(f"\nWARNING: About to delete {len(duplicates_to_delete)} records.")
     response = input("Do you want to proceed? (y/n): ")
 
-    if response.lower() != 'y':
+    if response.lower() != "y":
         print("Deletion cancelled.")
         conn.close()
         return
 
     # Delete the duplicates (keep only the earliest one)
-    cursor.execute("""
+    cursor.execute(
+        """
         DELETE FROM timelapse_setups
         WHERE id IN (
             SELECT t1.id
@@ -92,7 +98,8 @@ def delete_duplicate_setups():
             WHERE h.setup_id IS NULL
             AND t1.as_of != t2.earliest_as_of
         )
-    """)
+    """
+    )
 
     deleted_count = cursor.rowcount
     conn.commit()
@@ -100,7 +107,8 @@ def delete_duplicate_setups():
     print(f"\nSuccessfully deleted {deleted_count} duplicate records.")
 
     # Verify the remaining duplicates
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT
             t.symbol,
             t.direction,
@@ -115,18 +123,22 @@ def delete_duplicate_setups():
         GROUP BY t.symbol, t.direction, t.proximity_bin
         HAVING COUNT(*) > 1
         ORDER BY t.symbol, t.direction, t.proximity_bin
-    """)
+    """
+    )
 
     remaining_duplicates = cursor.fetchall()
 
     if remaining_duplicates:
         print(f"\nWarning: {len(remaining_duplicates)} duplicate groups still remain:")
         for record in remaining_duplicates:
-            print(f"  {record[0]} {record[1]} Bin {record[2]}: {record[3]} records (IDs: {record[4]})")
+            print(
+                f"  {record[0]} {record[1]} Bin {record[2]}: {record[3]} records (IDs: {record[4]})"
+            )
     else:
         print("\nSuccess! No duplicate setups remain.")
 
     conn.close()
+
 
 if __name__ == "__main__":
     delete_duplicate_setups()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -24,10 +24,14 @@ def test_candidate_terminal_paths_deduplicates(monkeypatch, tmp_path):
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
     monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path))
     monkeypatch.setattr(
-        mt5_client.glob, "glob", lambda pattern: [fake_paths[0], fake_paths[0], fake_paths[1]]
+        mt5_client.glob,
+        "glob",
+        lambda pattern: [fake_paths[0], fake_paths[0], fake_paths[1]],
     )
     monkeypatch.setattr(
-        mt5_client.os.path, "isfile", lambda path: path in {fake_paths[0], fake_paths[1]}
+        mt5_client.os.path,
+        "isfile",
+        lambda path: path in {fake_paths[0], fake_paths[1]},
     )
 
     result = mt5_client._candidate_terminal_paths("C:\\Custom\\terminal64.exe")
@@ -152,9 +156,7 @@ def test_get_server_offset_hours(monkeypatch):
         def __init__(self, dt):
             self.time_msc = int(dt.timestamp() * 1000)
 
-    fake_mt5 = SimpleNamespace(
-        symbol_info_tick=lambda symbol: Tick(three_hours_ahead)
-    )
+    fake_mt5 = SimpleNamespace(symbol_info_tick=lambda symbol: Tick(three_hours_ahead))
 
     monkeypatch.setattr(mt5_client, "mt5", fake_mt5)
     monkeypatch.setattr(mt5_client, "datetime", FixedDateTime)

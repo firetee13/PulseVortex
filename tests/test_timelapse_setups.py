@@ -105,7 +105,6 @@ class HelperFunctionsTests(unittest.TestCase):
         with patch.object(tls, "_MT5_IMPORTED", True), patch.object(
             tls, "_mt5_ensure_init", return_value=True
         ), patch.object(tls, "mt5") as mock_mt5:
-
             # Mock symbol_info with digits
             mock_info = SimpleNamespace()
             mock_info.digits = 3

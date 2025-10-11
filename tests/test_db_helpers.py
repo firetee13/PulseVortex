@@ -15,7 +15,6 @@ UTC = timezone.utc
 
 
 class DbHelpersTests(unittest.TestCase):
-
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
         self.conn.execute("PRAGMA foreign_keys = ON")

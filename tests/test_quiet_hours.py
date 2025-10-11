@@ -5,8 +5,8 @@ from datetime import datetime, time
 from unittest.mock import patch
 
 from monitor.core.quiet_hours import (
-    QuietWindow,
     UTC,
+    QuietWindow,
     is_quiet_time,
     iter_active_utc_ranges,
     iter_quiet_utc_ranges,

@@ -5,7 +5,9 @@ This shows which symbols have multiple setups in the same proximity bin.
 """
 
 import sqlite3
+
 from monitor.core.config import default_db_path
+
 
 def find_duplicated_bins():
     """Find symbols with duplicated proximity bins without hits."""
@@ -19,7 +21,7 @@ def find_duplicated_bins():
         # First check if proximity_bin column exists
         cursor.execute("PRAGMA table_info(timelapse_setups)")
         columns = [row[1] for row in cursor.fetchall()]
-        has_proximity_bin = 'proximity_bin' in columns
+        has_proximity_bin = "proximity_bin" in columns
 
         if not has_proximity_bin:
             print("proximity_bin column does not exist in timelapse_setups table")
@@ -58,20 +60,24 @@ def find_duplicated_bins():
             symbol, direction, proximity_bin, count, setup_ids, earliest, latest = row
             if symbol not in symbols:
                 symbols[symbol] = []
-            symbols[symbol].append({
-                'direction': direction,
-                'proximity_bin': proximity_bin,
-                'count': count,
-                'setup_ids': setup_ids,
-                'earliest': earliest,
-                'latest': latest
-            })
+            symbols[symbol].append(
+                {
+                    "direction": direction,
+                    "proximity_bin": proximity_bin,
+                    "count": count,
+                    "setup_ids": setup_ids,
+                    "earliest": earliest,
+                    "latest": latest,
+                }
+            )
 
         # Display results grouped by symbol
         for symbol, bins in sorted(symbols.items()):
             print(f"Symbol: {symbol}")
             for bin_info in bins:
-                print(f"  Direction: {bin_info['direction']}, Proximity Bin: {bin_info['proximity_bin'] or 'NULL'}")
+                print(
+                    f"  Direction: {bin_info['direction']}, Proximity Bin: {bin_info['proximity_bin'] or 'NULL'}"
+                )
                 print(f"    Count: {bin_info['count']} setups")
                 print(f"    Setup IDs: {bin_info['setup_ids']}")
                 print(f"    Date range: {bin_info['earliest']} to {bin_info['latest']}")
@@ -110,6 +116,7 @@ def find_duplicated_bins():
     finally:
         if conn:
             conn.close()
+
 
 if __name__ == "__main__":
     find_duplicated_bins()

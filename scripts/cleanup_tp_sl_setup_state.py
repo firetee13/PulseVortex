@@ -1,10 +1,11 @@
 import sqlite3
 
+
 def cleanup_tp_sl_setup_state():
     """Delete orphaned records from tp_sl_setup_state that reference deleted setup IDs"""
 
     # Connect to the database
-    conn = sqlite3.connect('timelapse.db')
+    conn = sqlite3.connect("timelapse.db")
     cursor = conn.cursor()
 
     print("Checking for orphaned records in tp_sl_setup_state...")
@@ -20,12 +21,14 @@ def cleanup_tp_sl_setup_state():
         return
 
     # Find records in tp_sl_setup_state that reference non-existent setup IDs
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT tps.setup_id, tps.last_checked_utc
         FROM tp_sl_setup_state tps
         LEFT JOIN timelapse_setups ts ON tps.setup_id = ts.id
         WHERE ts.id IS NULL
-    """)
+    """
+    )
 
     orphaned_records = cursor.fetchall()
 
@@ -42,42 +45,52 @@ def cleanup_tp_sl_setup_state():
         print(f"{record[0]}\t{record[1]}")
 
     # Confirm before deletion
-    print(f"\nWARNING: About to delete {len(orphaned_records)} orphaned records from tp_sl_setup_state.")
+    print(
+        f"\nWARNING: About to delete {len(orphaned_records)} orphaned records from tp_sl_setup_state."
+    )
     response = input("Do you want to proceed? (y/n): ")
 
-    if response.lower() != 'y':
+    if response.lower() != "y":
         print("Deletion cancelled.")
         conn.close()
         return
 
     # Delete the orphaned records
-    cursor.execute("""
+    cursor.execute(
+        """
         DELETE FROM tp_sl_setup_state
         WHERE setup_id NOT IN (
             SELECT id FROM timelapse_setups
         )
-    """)
+    """
+    )
 
     deleted_count = cursor.rowcount
     conn.commit()
 
-    print(f"\nSuccessfully deleted {deleted_count} orphaned records from tp_sl_setup_state.")
+    print(
+        f"\nSuccessfully deleted {deleted_count} orphaned records from tp_sl_setup_state."
+    )
 
     # Verify the cleanup
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT COUNT(*) FROM tp_sl_setup_state
-    """)
+    """
+    )
     remaining_records = cursor.fetchone()[0]
 
     print(f"Remaining records in tp_sl_setup_state: {remaining_records}")
 
     # Double-check for any remaining orphaned records
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT COUNT(*)
         FROM tp_sl_setup_state tps
         LEFT JOIN timelapse_setups ts ON tps.setup_id = ts.id
         WHERE ts.id IS NULL
-    """)
+    """
+    )
 
     remaining_orphans = cursor.fetchone()[0]
 
@@ -87,6 +100,7 @@ def cleanup_tp_sl_setup_state():
         print(f"⚠ Warning: {remaining_orphans} orphaned records still remain.")
 
     conn.close()
+
 
 if __name__ == "__main__":
     cleanup_tp_sl_setup_state()

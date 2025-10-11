@@ -12,13 +12,13 @@ Usage:
 """
 
 import argparse
+import os
 import sqlite3
 import sys
-import os
 from typing import Optional, Tuple
 
 # Add monitor directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'monitor'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "monitor"))
 
 from monitor.core.config import default_db_path
 
@@ -32,6 +32,7 @@ def _infer_decimals_from_price(price: Optional[float]) -> int:
         if price is None:
             return 5
         import math
+
         value = float(price)
         if not math.isfinite(value):
             return 5
@@ -53,10 +54,11 @@ def _symbol_digits(symbol: str, price: Optional[float]) -> int:
     try:
         # Try to infer from symbol pattern first (without MT5 dependency)
         import re
-        sym = (symbol or '').upper()
+
+        sym = (symbol or "").upper()
         if re.fullmatch(r"[A-Z]{6}", sym):
             quote = sym[3:]
-            return 3 if quote == 'JPY' else 5
+            return 3 if quote == "JPY" else 5
         if re.fullmatch(r"XA[UG][A-Z]{3}", sym):
             return 2
     except Exception:
@@ -91,7 +93,9 @@ def get_precision_digits(symbol: str, price: Optional[float]) -> int:
     return precision_digits
 
 
-def round_restore_values(conn: sqlite3.Connection, dry_run: bool = False) -> Tuple[int, int]:
+def round_restore_values(
+    conn: sqlite3.Connection, dry_run: bool = False
+) -> Tuple[int, int]:
     """
     Round values in the restore table to match timelapse_setups precision.
 
@@ -107,7 +111,9 @@ def round_restore_values(conn: sqlite3.Connection, dry_run: bool = False) -> Tup
         return 0, 0
 
     # Get all records from restore table
-    cur.execute("SELECT id, symbol, price, sl, tp, rrr, score, proximity_to_sl FROM restore")
+    cur.execute(
+        "SELECT id, symbol, price, sl, tp, rrr, score, proximity_to_sl FROM restore"
+    )
     records = cur.fetchall()
 
     if not records:
@@ -142,11 +148,11 @@ def round_restore_values(conn: sqlite3.Connection, dry_run: bool = False) -> Tup
 
             # Check if any values need updating
             needs_update = (
-                sl_out != sl or
-                tp_out != tp or
-                rrr_out != rrr or
-                score_out != score or
-                prox_out != proximity_to_sl
+                sl_out != sl
+                or tp_out != tp
+                or rrr_out != rrr
+                or score_out != score
+                or prox_out != proximity_to_sl
             )
 
             if needs_update:
@@ -164,7 +170,7 @@ def round_restore_values(conn: sqlite3.Connection, dry_run: bool = False) -> Tup
                         SET sl = ?, tp = ?, rrr = ?, score = ?, proximity_to_sl = ?
                         WHERE id = ?
                         """,
-                        (sl_out, tp_out, rrr_out, score_out, prox_out, record_id)
+                        (sl_out, tp_out, rrr_out, score_out, prox_out, record_id),
                     )
                     print(f"Updated record {record_id} ({symbol})")
 
@@ -184,9 +190,17 @@ def round_restore_values(conn: sqlite3.Connection, dry_run: bool = False) -> Tup
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Round decimals in restore table to match timelapse_setups precision")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be updated without making changes")
-    parser.add_argument("--db", default=str(default_db_path()), help="Path to SQLite database file")
+    parser = argparse.ArgumentParser(
+        description="Round decimals in restore table to match timelapse_setups precision"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be updated without making changes",
+    )
+    parser.add_argument(
+        "--db", default=str(default_db_path()), help="Path to SQLite database file"
+    )
 
     args = parser.parse_args()
 

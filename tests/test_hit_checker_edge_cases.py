@@ -1,17 +1,18 @@
 """Edge case tests for hit checker functions to improve coverage."""
+
 from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from monitor.cli.hit_checker import (
-    RateBar,
     CandidateWindow,
+    RateBar,
     _bar_crosses_price,
-    _merge_windows,
     _evaluate_setup,
+    _merge_windows,
     _rates_to_bars,
     _resolve_timeframe,
     scan_for_hit_with_chunks,
@@ -78,7 +79,9 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         self.assertTrue(_bar_crosses_price(bar, setup_buy_exact, spread_guard=0.0))
 
         # Test with spread guard - let's test with larger range to ensure crossing
-        setup_buy_spread = SimpleNamespace(direction="buy", sl=0.9, tp=1.8)  # Within range
+        setup_buy_spread = SimpleNamespace(
+            direction="buy", sl=0.9, tp=1.8
+        )  # Within range
         self.assertTrue(_bar_crosses_price(bar, setup_buy_spread, spread_guard=0.0))
 
     def test_rates_to_bars_with_invalid_data(self):
@@ -92,13 +95,18 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         valid_rate = {"time": 1_700_000_000, "low": 1.0, "high": 2.0}
         invalid_time = {"time": None, "low": 1.1, "high": 2.1}
         invalid_low = {"time": 1_700_000_001, "low": None, "high": 2.2}
-        bars = _rates_to_bars([valid_rate, invalid_time, invalid_low], timeframe_seconds=60, offset_hours=0)
+        bars = _rates_to_bars(
+            [valid_rate, invalid_time, invalid_low],
+            timeframe_seconds=60,
+            offset_hours=0,
+        )
         self.assertEqual(len(bars), 1)
 
     def test_resolve_timeframe_with_invalid_codes(self):
         """Test _resolve_timeframe with various inputs."""
-        with patch('monitor.cli.hit_checker.timeframe_from_code', return_value=None), \
-             patch('monitor.cli.hit_checker.timeframe_m1', return_value=164):
+        with patch(
+            "monitor.cli.hit_checker.timeframe_from_code", return_value=None
+        ), patch("monitor.cli.hit_checker.timeframe_m1", return_value=164):
             # Test with None code
             self.assertEqual(_resolve_timeframe(None), 164)
 
@@ -127,11 +135,19 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         self.assertEqual(chunks, 0)
 
         # Test with chunk_minutes = 0
-        with patch('monitor.cli.hit_checker.ticks_range_all') as mock_ticks, \
-             patch('monitor.cli.hit_checker.earliest_hit_from_ticks') as mock_hit:
-            mock_ticks.return_value = ([], TickFetchStats(
-                pages=1, total_ticks=0, elapsed_s=0.1, fetch_s=0.05, early_stop=False
-            ))
+        with patch("monitor.cli.hit_checker.ticks_range_all") as mock_ticks, patch(
+            "monitor.cli.hit_checker.earliest_hit_from_ticks"
+        ) as mock_hit:
+            mock_ticks.return_value = (
+                [],
+                TickFetchStats(
+                    pages=1,
+                    total_ticks=0,
+                    elapsed_s=0.1,
+                    fetch_s=0.05,
+                    early_stop=False,
+                ),
+            )
             mock_hit.return_value = None
 
             hit, stats, chunks = scan_for_hit_with_chunks(
@@ -165,10 +181,14 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         def mock_earliest_hit(ticks, direction, sl, tp, offset_hours):
             return None
 
-        with patch('monitor.cli.hit_checker.ticks_range_all', side_effect=mock_ticks_range_all), \
-             patch('monitor.cli.hit_checker.earliest_hit_from_ticks', side_effect=mock_earliest_hit), \
-             patch('monitor.cli.hit_checker.to_server_naive', return_value=start_utc):
-
+        with patch(
+            "monitor.cli.hit_checker.ticks_range_all", side_effect=mock_ticks_range_all
+        ), patch(
+            "monitor.cli.hit_checker.earliest_hit_from_ticks",
+            side_effect=mock_earliest_hit,
+        ), patch(
+            "monitor.cli.hit_checker.to_server_naive", return_value=start_utc
+        ):
             hit, stats, chunks = scan_for_hit_with_chunks(
                 symbol="EURUSD",
                 direction="buy",
@@ -201,16 +221,23 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
 
         # Mock a hit during quiet hours
         hit_time = datetime(2024, 1, 1, 23, 0, tzinfo=UTC)
-        fake_stats = TickFetchStats(pages=1, total_ticks=10, elapsed_s=0.1, fetch_s=0.05, early_stop=True)
+        fake_stats = TickFetchStats(
+            pages=1, total_ticks=10, elapsed_s=0.1, fetch_s=0.05, early_stop=True
+        )
 
         def fake_scan(**kwargs):
             return Hit(kind="TP", time_utc=hit_time, price=2.0), fake_stats, 1
 
-        with patch('monitor.cli.hit_checker.scan_for_hit_with_chunks', side_effect=fake_scan), \
-             patch('monitor.cli.hit_checker.classify_symbol', return_value='forex'), \
-             patch('monitor.cli.hit_checker.iter_active_utc_ranges', return_value=[(setup.as_of_utc, now_utc)]), \
-             patch('monitor.cli.hit_checker.is_quiet_time', return_value=True):
-
+        with patch(
+            "monitor.cli.hit_checker.scan_for_hit_with_chunks", side_effect=fake_scan
+        ), patch(
+            "monitor.cli.hit_checker.classify_symbol", return_value="forex"
+        ), patch(
+            "monitor.cli.hit_checker.iter_active_utc_ranges",
+            return_value=[(setup.as_of_utc, now_utc)],
+        ), patch(
+            "monitor.cli.hit_checker.is_quiet_time", return_value=True
+        ):
             result = _evaluate_setup(
                 setup=setup,
                 last_checked_utc=setup.as_of_utc,
@@ -241,13 +268,19 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         )
         now_utc = datetime(2024, 1, 1, 12, 30, tzinfo=UTC)
 
-        with patch('monitor.cli.hit_checker.scan_for_hit_with_chunks') as mock_scan, \
-             patch('monitor.cli.hit_checker.classify_symbol', return_value='forex'), \
-             patch('monitor.cli.hit_checker.iter_active_utc_ranges', return_value=[(setup.as_of_utc, now_utc)]):
-
+        with patch(
+            "monitor.cli.hit_checker.scan_for_hit_with_chunks"
+        ) as mock_scan, patch(
+            "monitor.cli.hit_checker.classify_symbol", return_value="forex"
+        ), patch(
+            "monitor.cli.hit_checker.iter_active_utc_ranges",
+            return_value=[(setup.as_of_utc, now_utc)],
+        ):
             mock_scan.return_value = (
                 None,
-                TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False),
+                TickFetchStats(
+                    pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+                ),
                 0,
             )
 
@@ -288,13 +321,19 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
         )
 
         # Test with negative tick padding (should be treated as 0)
-        with patch('monitor.cli.hit_checker.scan_for_hit_with_chunks') as mock_scan, \
-             patch('monitor.cli.hit_checker.classify_symbol', return_value='forex'), \
-             patch('monitor.cli.hit_checker.iter_active_utc_ranges', return_value=[(setup.as_of_utc, now_utc)]):
-
+        with patch(
+            "monitor.cli.hit_checker.scan_for_hit_with_chunks"
+        ) as mock_scan, patch(
+            "monitor.cli.hit_checker.classify_symbol", return_value="forex"
+        ), patch(
+            "monitor.cli.hit_checker.iter_active_utc_ranges",
+            return_value=[(setup.as_of_utc, now_utc)],
+        ):
             mock_scan.return_value = (
                 None,
-                TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False),
+                TickFetchStats(
+                    pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+                ),
                 0,
             )
 
@@ -333,17 +372,42 @@ class HitCheckerEdgeCaseTests(unittest.TestCase):
             high=2.1,
         )
 
-        with patch('monitor.cli.hit_checker.scan_for_hit_with_chunks') as mock_scan, \
-             patch('monitor.cli.hit_checker.classify_symbol', return_value='forex'), \
-             patch('monitor.cli.hit_checker.iter_active_utc_ranges', return_value=[(setup.as_of_utc, now_utc)]):
+        with patch(
+            "monitor.cli.hit_checker.scan_for_hit_with_chunks"
+        ) as mock_scan, patch(
+            "monitor.cli.hit_checker.classify_symbol", return_value="forex"
+        ), patch(
+            "monitor.cli.hit_checker.iter_active_utc_ranges",
+            return_value=[(setup.as_of_utc, now_utc)],
+        ):
 
             def mock_scan_with_time_adjustment(**kwargs):
                 # Simulate case where window_end <= window_start after padding
                 start, end = kwargs["start_utc"], kwargs["end_utc"]
                 if end <= start:
                     # Return empty result
-                    return None, TickFetchStats(pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False), 0
-                return None, TickFetchStats(pages=1, total_ticks=0, elapsed_s=0.1, fetch_s=0.05, early_stop=False), 1
+                    return (
+                        None,
+                        TickFetchStats(
+                            pages=0,
+                            total_ticks=0,
+                            elapsed_s=0.0,
+                            fetch_s=0.0,
+                            early_stop=False,
+                        ),
+                        0,
+                    )
+                return (
+                    None,
+                    TickFetchStats(
+                        pages=1,
+                        total_ticks=0,
+                        elapsed_s=0.1,
+                        fetch_s=0.05,
+                        early_stop=False,
+                    ),
+                    1,
+                )
 
             mock_scan.side_effect = mock_scan_with_time_adjustment
 

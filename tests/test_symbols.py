@@ -6,7 +6,6 @@ from monitor.core.symbols import classify_symbol, is_crypto_symbol
 
 
 class SymbolClassificationTests(unittest.TestCase):
-
     def test_crypto_detection_by_token(self) -> None:
         self.assertEqual(classify_symbol("BTCUSD"), "crypto")
         self.assertTrue(is_crypto_symbol("DOGEUSD"))

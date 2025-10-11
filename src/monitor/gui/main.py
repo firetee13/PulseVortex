@@ -2429,9 +2429,7 @@ class App(tk.Tk):
                     "frequency_factor": frequency_factor,
                     "recency_factor": recency_factor,
                     "bins": sorted(
-                        stat["bins"]
-                        if isinstance(stat.get("bins"), set)
-                        else []
+                        stat["bins"] if isinstance(stat.get("bins"), set) else []
                     ),
                 }
             )
@@ -3932,7 +3930,7 @@ class App(tk.Tk):
         positive_bins = {}
         kept = 0
         dropped = 0
-        filter_applied = False
+        # filter_applied = False  # Reserved for future use
         bins_available = False
         if isinstance(filter_info, dict):
             positive_bins = filter_info.get("positive_bins") or {}
@@ -3944,7 +3942,7 @@ class App(tk.Tk):
                 dropped = int(filter_info.get("dropped", 0))
             except Exception:
                 dropped = 0
-            filter_applied = bool(filter_info.get("filter_applied"))
+            # filter_applied = bool(filter_info.get("filter_applied"))  # Reserved for future use
             bins_available = bool(filter_info.get("bins_available"))
         if not isinstance(positive_bins, dict):
             positive_bins = {}
@@ -3995,9 +3993,7 @@ class App(tk.Tk):
                             bins_bits.append(f"{cat}: {', '.join(labels)}")
                         if bins_bits:
                             listing = "; ".join(bins_bits)
-                            bins_text = (
-                                f"positive bins ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R: {listing}"
-                            )
+                            bins_text = f"positive bins ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R: {listing}"
                         elif bins_available:
                             bins_text = (
                                 "positive bins: none meet "
@@ -4954,7 +4950,8 @@ class App(tk.Tk):
                             "DELETE FROM timelapse_hits WHERE setup_id=?", (setup_id,)
                         )
                         cur.execute(
-                            "DELETE FROM tp_sl_setup_state WHERE setup_id=?", (setup_id,)
+                            "DELETE FROM tp_sl_setup_state WHERE setup_id=?",
+                            (setup_id,),
                         )
                         cur.execute(
                             "DELETE FROM timelapse_setups WHERE id=?", (setup_id,)
@@ -5344,7 +5341,9 @@ class App(tk.Tk):
             price = (
                 bid
                 if (direction or "").lower() == "buy"
-                else ask if ask is not None else bid
+                else ask
+                if ask is not None
+                else bid
             )
             if price is None:
                 continue

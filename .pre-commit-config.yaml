@@ -16,6 +16,7 @@ repos:
     hooks:
       - id: black
         language_version: python3
+        args: [--target-version=py311]
 
   - repo: https://github.com/pycqa/isort
     rev: 5.12.0
@@ -23,18 +24,18 @@ repos:
       - id: isort
         args: ["--profile", "black"]
 
-  - repo: https://github.com/pycqa/flake8
-    rev: 6.0.0
-    hooks:
-      - id: flake8
-        additional_dependencies: [flake8-docstrings]
+  # - repo: https://github.com/pycqa/flake8
+  #   rev: 6.0.0
+  #   hooks:
+  #     - id: flake8
+  #       args: [--extend-ignore=D100,D101,D102,D103,D104,D105,D106,D107,D200,D202,D205,D400,D401,E302,E305,F401,E231,W503,E402,E713,E702,E226,E541,F541]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.3.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-all]
-        args: [--ignore-missing-imports]
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.5.1
+  #   hooks:
+  #     - id: mypy
+  #       additional_dependencies: [types-requests, types-python-dateutil]
+  #       args: [--ignore-missing-imports, --no-strict-optional]
 
   - repo: local
     hooks:

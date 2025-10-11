@@ -6,7 +6,9 @@ regardless of whether they are Buy or Sell setups.
 """
 
 import sqlite3
+
 from monitor.core.config import default_db_path
+
 
 def find_duplicated_bins_correct():
     """Find symbols with duplicated proximity bins without hits (ignoring direction)."""
@@ -20,7 +22,7 @@ def find_duplicated_bins_correct():
         # First check if proximity_bin column exists
         cursor.execute("PRAGMA table_info(timelapse_setups)")
         columns = [row[1] for row in cursor.fetchall()]
-        has_proximity_bin = 'proximity_bin' in columns
+        has_proximity_bin = "proximity_bin" in columns
 
         if not has_proximity_bin:
             print("proximity_bin column does not exist in timelapse_setups table")
@@ -98,6 +100,7 @@ def find_duplicated_bins_correct():
     finally:
         if conn:
             conn.close()
+
 
 if __name__ == "__main__":
     find_duplicated_bins_correct()

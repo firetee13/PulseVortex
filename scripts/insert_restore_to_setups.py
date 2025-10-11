@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+
 def get_db_path():
     """Get the path to the timelapse.db file"""
     db_path = Path("timelapse.db")
@@ -15,6 +16,7 @@ def get_db_path():
         print(f"Error: Database file not found at {db_path}")
         sys.exit(1)
     return str(db_path)
+
 
 def insert_restore_to_setups(dry_run=False, replace_existing=False):
     """
@@ -50,42 +52,67 @@ def insert_restore_to_setups(dry_run=False, replace_existing=False):
 
             # Convert text values to appropriate types
             try:
-                symbol = record_dict['symbol']
-                direction = record_dict['direction']
-                price = float(record_dict['price']) if record_dict['price'] else None
-                sl = float(record_dict['sl']) if record_dict['sl'] else None
-                tp = float(record_dict['tp']) if record_dict['tp'] else None
-                rrr = float(record_dict['rrr']) if record_dict['rrr'] else None
-                score = float(record_dict['score']) if record_dict['score'] else None
-                as_of = record_dict['as_of']
-                detected_at = record_dict['detected_at']
-                proximity_to_sl = float(record_dict['proximity_to_sl']) if record_dict['proximity_to_sl'] else None
-                proximity_bin = record_dict['proximity_bin']
-                inserted_at = record_dict['inserted_at']
+                symbol = record_dict["symbol"]
+                direction = record_dict["direction"]
+                price = float(record_dict["price"]) if record_dict["price"] else None
+                sl = float(record_dict["sl"]) if record_dict["sl"] else None
+                tp = float(record_dict["tp"]) if record_dict["tp"] else None
+                rrr = float(record_dict["rrr"]) if record_dict["rrr"] else None
+                score = float(record_dict["score"]) if record_dict["score"] else None
+                as_of = record_dict["as_of"]
+                detected_at = record_dict["detected_at"]
+                proximity_to_sl = (
+                    float(record_dict["proximity_to_sl"])
+                    if record_dict["proximity_to_sl"]
+                    else None
+                )
+                proximity_bin = record_dict["proximity_bin"]
+                inserted_at = record_dict["inserted_at"]
 
                 # Check if record already exists
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT id FROM timelapse_setups
                     WHERE symbol = ? AND direction = ? AND as_of = ?
-                """, (symbol, direction, as_of))
+                """,
+                    (symbol, direction, as_of),
+                )
 
                 existing_record = cursor.fetchone()
 
                 if existing_record:
                     if replace_existing:
                         # Replace existing record
-                        cursor.execute("""
+                        cursor.execute(
+                            """
                             DELETE FROM timelapse_setups
                             WHERE symbol = ? AND direction = ? AND as_of = ?
-                        """, (symbol, direction, as_of))
+                        """,
+                            (symbol, direction, as_of),
+                        )
 
-                        cursor.execute("""
+                        cursor.execute(
+                            """
                             INSERT INTO timelapse_setups
                             (symbol, direction, price, sl, tp, rrr, score, as_of,
                              detected_at, proximity_to_sl, proximity_bin, inserted_at)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (symbol, direction, price, sl, tp, rrr, score, as_of,
-                              detected_at, proximity_to_sl, proximity_bin, inserted_at))
+                        """,
+                            (
+                                symbol,
+                                direction,
+                                price,
+                                sl,
+                                tp,
+                                rrr,
+                                score,
+                                as_of,
+                                detected_at,
+                                proximity_to_sl,
+                                proximity_bin,
+                                inserted_at,
+                            ),
+                        )
 
                         replaced_count += 1
                         if dry_run:
@@ -98,13 +125,28 @@ def insert_restore_to_setups(dry_run=False, replace_existing=False):
                             print(f"Would skip (exists): {symbol} {direction} {as_of}")
                 else:
                     # Insert new record
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         INSERT INTO timelapse_setups
                         (symbol, direction, price, sl, tp, rrr, score, as_of,
                          detected_at, proximity_to_sl, proximity_bin, inserted_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (symbol, direction, price, sl, tp, rrr, score, as_of,
-                          detected_at, proximity_to_sl, proximity_bin, inserted_at))
+                    """,
+                        (
+                            symbol,
+                            direction,
+                            price,
+                            sl,
+                            tp,
+                            rrr,
+                            score,
+                            as_of,
+                            detected_at,
+                            proximity_to_sl,
+                            proximity_bin,
+                            inserted_at,
+                        ),
+                    )
 
                     inserted_count += 1
                     if dry_run:
@@ -113,7 +155,9 @@ def insert_restore_to_setups(dry_run=False, replace_existing=False):
                         print(f"Inserted: {symbol} {direction} {as_of}")
 
             except (ValueError, TypeError) as e:
-                print(f"Error converting record {record_dict.get('id', 'unknown')}: {e}")
+                print(
+                    f"Error converting record {record_dict.get('id', 'unknown')}: {e}"
+                )
                 continue
 
         if not dry_run:
@@ -138,14 +182,23 @@ def insert_restore_to_setups(dry_run=False, replace_existing=False):
 
     return True
 
+
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description='Insert data from restore table into timelapse_setups table')
-    parser.add_argument('--dry-run', action='store_true',
-                       help='Show what would be inserted without actually doing it')
-    parser.add_argument('--replace', action='store_true',
-                       help='Replace existing records with same symbol/direction/as_of')
+    parser = argparse.ArgumentParser(
+        description="Insert data from restore table into timelapse_setups table"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be inserted without actually doing it",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace existing records with same symbol/direction/as_of",
+    )
 
     args = parser.parse_args()
 
@@ -155,13 +208,16 @@ def main():
     if args.replace:
         print("REPLACE MODE - Existing records will be replaced")
 
-    success = insert_restore_to_setups(dry_run=args.dry_run, replace_existing=args.replace)
+    success = insert_restore_to_setups(
+        dry_run=args.dry_run, replace_existing=args.replace
+    )
 
     if success:
         print("Operation completed successfully")
     else:
         print("Operation failed")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

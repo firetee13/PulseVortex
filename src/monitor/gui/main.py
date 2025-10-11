@@ -2462,7 +2462,7 @@ class App(tk.Tk):
 
         # Update status
         try:
-            status_text = f"Top {len(top_performers)} profitable performers from {total_symbols} symbols (last {since_hours}h, min {min_trades} trades, positive R only)"
+            status_text = f"Top {len(top_performers)} profitable performers from {total_symbols} symbols (last {since_hours}h, min {min_trades} trades)"
             self.top_status.config(text=status_text)
         except Exception:
             pass
@@ -3660,53 +3660,17 @@ class App(tk.Tk):
             error = str(e)
 
         positive_bins: Optional[dict[str, set[str]]] = None
-        bins_success = False
-        kept = 0
+        bins_available = False
+        kept = len(rows)
         dropped = 0
         try:
             positive_bins = self._positive_expectancy_bins(
                 hours, min_completed=PNL_EXPECTANCY_MIN_COMPLETED
             )
-            bins_success = positive_bins is not None
+            bins_available = positive_bins is not None
         except Exception:
             positive_bins = None
-            bins_success = False
-        if bins_success:
-            bin_map = positive_bins or {}
-            filtered_rows: list[tuple] = []
-            for (
-                event_time,
-                hit,
-                symbol,
-                entry_price,
-                hit_price,
-                sl,
-                direction,
-                prox_bin,
-            ) in rows:
-                category = self._classify_symbol(str(symbol or ""))
-                allowed = bin_map.get(category)
-                if not allowed or prox_bin not in allowed:
-                    dropped += 1
-                    continue
-                filtered_rows.append(
-                    (
-                        event_time,
-                        hit,
-                        symbol,
-                        entry_price,
-                        hit_price,
-                        sl,
-                        direction,
-                        prox_bin,
-                    )
-                )
-            kept = len(filtered_rows)
-            dropped = len(rows) - kept
-            rows = filtered_rows
-        else:
-            kept = len(rows)
-            dropped = 0
+            bins_available = False
 
         # Compute ATR per symbol (D1, period 14-ish) for normalized P/L,
         # while also preparing contract specs for 10k-notional scaling.
@@ -3913,7 +3877,8 @@ class App(tk.Tk):
             "positive_bins": positive_bins,
             "kept": kept,
             "dropped": dropped,
-            "filter_applied": bins_success,
+            "filter_applied": False,
+            "bins_available": bins_available,
         }
         self.after(
             0,
@@ -3968,6 +3933,7 @@ class App(tk.Tk):
         kept = 0
         dropped = 0
         filter_applied = False
+        bins_available = False
         if isinstance(filter_info, dict):
             positive_bins = filter_info.get("positive_bins") or {}
             try:
@@ -3979,6 +3945,7 @@ class App(tk.Tk):
             except Exception:
                 dropped = 0
             filter_applied = bool(filter_info.get("filter_applied"))
+            bins_available = bool(filter_info.get("bins_available"))
         if not isinstance(positive_bins, dict):
             positive_bins = {}
         self._pnl_positive_bins = {k: set(v) for k, v in positive_bins.items()}
@@ -4026,19 +3993,22 @@ class App(tk.Tk):
                             if not labels:
                                 continue
                             bins_bits.append(f"{cat}: {', '.join(labels)}")
-                        if not filter_applied:
-                            bins_text = "expectancy filter unavailable"
+                        if bins_bits:
+                            listing = "; ".join(bins_bits)
+                            bins_text = (
+                                f"positive bins ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R: {listing}"
+                            )
+                        elif bins_available:
+                            bins_text = (
+                                "positive bins: none meet "
+                                f"edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R and ≥ {PNL_EXPECTANCY_MIN_COMPLETED} trades"
+                            )
                         else:
-                            if bins_bits:
-                                listing = "; ".join(bins_bits)
-                                bins_text = f"{listing} (edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R)"
-                            else:
-                                bins_text = (
-                                    f"no bins ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R "
-                                    f"with ≥ {PNL_EXPECTANCY_MIN_COMPLETED} trades"
-                                )
+                            bins_text = "positive-bin stats unavailable"
                         self.pnl_status.config(
-                            text=f"Rendered PnL: {kept_str}; bins={bins_text}"
+                            text=(
+                                f"Rendered PnL: {kept_str}; all trades included; {bins_text}"
+                            )
                         )
                     except Exception:
                         pass
@@ -4052,26 +4022,7 @@ class App(tk.Tk):
                     pass
             try:
                 if self.pnl_status is not None:
-                    if filter_applied:
-                        bins_bits = []
-                        for cat in sorted(self._pnl_positive_bins):
-                            labels = sorted(self._pnl_positive_bins[cat])
-                            if not labels:
-                                continue
-                            bins_bits.append(f"{cat}: {', '.join(labels)}")
-                        if bins_bits:
-                            bins_text = "; ".join(bins_bits)
-                            msg = (
-                                f"No trades match expectancy filter "
-                                f"(bins={bins_text}, edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R)."
-                            )
-                        else:
-                            msg = (
-                                "No trades: no proximity bins meet "
-                                f"edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R and ≥ {PNL_EXPECTANCY_MIN_COMPLETED} trades."
-                            )
-                    else:
-                        msg = "No normalized PnL trades available."
+                    msg = "No normalized PnL trades available."
                     self.pnl_status.config(text=msg)
             except Exception:
                 pass

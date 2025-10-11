@@ -288,6 +288,7 @@ class App(tk.Tk):
         # Top Performers tab variables
         self.var_top_since_hours = tk.IntVar(value=168)
         self.var_top_min_trades = tk.IntVar(value=10)
+        self.var_top_min_trades_per_bin = tk.IntVar(value=3)
         self.var_top_auto = tk.BooleanVar(value=True)
         self.var_top_interval = tk.IntVar(value=300)
         # Load persisted settings (if any) before building controls
@@ -306,6 +307,13 @@ class App(tk.Tk):
             self.var_prox_min_trades.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_since_hours.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_interval.trace_add("write", self._on_prox_setting_changed)
+            # Top Performers settings
+            self.var_top_since_hours.trace_add("write", self._on_top_setting_changed)
+            self.var_top_min_trades.trace_add("write", self._on_top_setting_changed)
+            self.var_top_min_trades_per_bin.trace_add(
+                "write", self._on_top_setting_changed
+            )
+            self.var_top_interval.trace_add("write", self._on_top_setting_changed)
         except Exception:
             pass
 
@@ -1951,6 +1959,10 @@ class App(tk.Tk):
         ttk.Spinbox(
             row1, from_=1, to=500, textvariable=self.var_top_min_trades, width=4
         ).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(row1, text="Min trades/bin:").pack(side=tk.LEFT)
+        ttk.Spinbox(
+            row1, from_=1, to=50, textvariable=self.var_top_min_trades_per_bin, width=4
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Button(row1, text="Refresh", command=self._top_refresh).pack(side=tk.LEFT)
         ttk.Checkbutton(
             row1, text="Auto", variable=self.var_top_auto, command=self._top_auto_toggle
@@ -2075,11 +2087,13 @@ class App(tk.Tk):
         dbname = self.var_db_name.get().strip()
         hours = max(1, int(self.var_top_since_hours.get()))
         min_trades = max(1, int(self.var_top_min_trades.get()))
+        min_trades_per_bin = max(1, int(self.var_top_min_trades_per_bin.get()))
 
         payload: dict[str, object] = {
             "error": None,
             "since_hours": hours,
             "min_trades": min_trades,
+            "min_trades_per_bin": min_trades_per_bin,
         }
         rows: list[dict[str, object]] = []
 
@@ -2216,11 +2230,21 @@ class App(tk.Tk):
             agg["count"] += 1.0
 
         expectancy_by_bin: dict[tuple[str, str], float] = {}
+        valid_bins: set[tuple[str, str]] = set()
+        min_trades_per_bin = payload.get("min_trades_per_bin", 1)
+
         for key, agg in bin_totals.items():
             count = agg.get("count", 0.0) or 0.0
             if count <= 0.0:
                 continue
-            expectancy_by_bin[key] = agg.get("sum", 0.0) / count
+            # Apply minimum trades per bin filter
+            if count < min_trades_per_bin:
+                continue
+            expectancy = agg.get("sum", 0.0) / count
+            # Only include bins with positive expectancy
+            if expectancy > TOP_EXPECTANCY_MIN_EDGE:
+                expectancy_by_bin[key] = expectancy
+                valid_bins.add(key)
 
         filtered_rows: list[dict[str, object]] = []
         for row in rows:
@@ -2228,10 +2252,11 @@ class App(tk.Tk):
             prox_bin = str(row.get("proximity_bin") or "")
             if not prox_bin:
                 continue
-            expectancy = expectancy_by_bin.get((symbol, prox_bin))
-            if expectancy is None or expectancy <= TOP_EXPECTANCY_MIN_EDGE:
-                continue
-            filtered_rows.append(row)
+            key = (symbol, prox_bin)
+            # Only include rows from bins that meet both criteria
+            if key in valid_bins:
+                row["bin_expectancy"] = expectancy_by_bin[key]
+                filtered_rows.append(row)
 
         payload["rows"] = filtered_rows
 
@@ -2289,12 +2314,16 @@ class App(tk.Tk):
     ) -> dict[str, object]:
         hours = payload.get("since_hours", 0)
         min_trades = payload.get("min_trades", 1)
+        min_trades_per_bin = payload.get("min_trades_per_bin", 1)
         try:
             min_trades_int = max(1, int(min_trades))
+            min_trades_per_bin_int = max(1, int(min_trades_per_bin))
         except Exception:
             min_trades_int = 1
+            min_trades_per_bin_int = 1
 
         symbol_stats: dict[str, dict[str, object]] = {}
+        bin_stats: dict[tuple[str, str], dict[str, object]] = {}
 
         for row in rows:
             symbol = str(row.get("symbol") or "")
@@ -2332,6 +2361,33 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+            # Track per-bin statistics for filtering
+            if prox_bin:
+                bin_key = (symbol, str(prox_bin))
+                bin_stat = bin_stats.setdefault(
+                    bin_key,
+                    {
+                        "symbol": symbol,
+                        "bin": str(prox_bin),
+                        "trades": 0,
+                        "completed": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "sum_trade_r": 0.0,
+                    },
+                )
+                bin_stat["trades"] += 1
+
+                if outcome in ["win", "loss"]:
+                    bin_stat["completed"] += 1
+                    if outcome == "win":
+                        bin_stat["wins"] += 1
+                    else:
+                        bin_stat["losses"] += 1
+
+                    if trade_r is not None:
+                        bin_stat["sum_trade_r"] += float(trade_r)
+
             # Add to recent trades for recency calculation
             if event_time:
                 stat["recent_trades"].append(
@@ -2352,11 +2408,22 @@ class App(tk.Tk):
                 if trade_r is not None:
                     stat["sum_trade_r"] = float(stat.get("sum_trade_r", 0.0)) + trade_r
 
+        # Filter bins by minimum trades per bin requirement
+        valid_bins_by_symbol: dict[str, set[str]] = {}
+        for (symbol, bin_name), bin_stat in bin_stats.items():
+            if bin_stat["completed"] >= min_trades_per_bin_int:
+                if symbol not in valid_bins_by_symbol:
+                    valid_bins_by_symbol[symbol] = set()
+                valid_bins_by_symbol[symbol].add(bin_name)
+
         # Calculate metrics and scores for each symbol
         results = []
         now = datetime.now(timezone.utc)
 
         for symbol, stat in symbol_stats.items():
+            # Skip symbols that have no bins meeting the minimum trades per bin requirement
+            if symbol not in valid_bins_by_symbol:
+                continue
             completed = int(stat["completed"])
             wins = int(stat["wins"])
 
@@ -2428,9 +2495,7 @@ class App(tk.Tk):
                     "score": score,
                     "frequency_factor": frequency_factor,
                     "recency_factor": recency_factor,
-                    "bins": sorted(
-                        stat["bins"] if isinstance(stat.get("bins"), set) else []
-                    ),
+                    "bins": sorted(valid_bins_by_symbol.get(symbol, set())),
                 }
             )
 
@@ -2447,6 +2512,7 @@ class App(tk.Tk):
             "total_symbols": len(symbol_stats),
             "since_hours": hours,
             "min_trades": min_trades_int,
+            "min_trades_per_bin": min_trades_per_bin_int,
         }
 
     def _top_render(self, data: dict[str, object]) -> None:
@@ -2457,10 +2523,11 @@ class App(tk.Tk):
         total_symbols = data.get("total_symbols", 0)
         since_hours = data.get("since_hours", 0)
         min_trades = data.get("min_trades", 1)
+        min_trades_per_bin = data.get("min_trades_per_bin", 1)
 
         # Update status
         try:
-            status_text = f"Top {len(top_performers)} profitable performers from {total_symbols} symbols (last {since_hours}h, min {min_trades} trades)"
+            status_text = f"Top {len(top_performers)} profitable performers from {total_symbols} symbols (last {since_hours}h, min {min_trades} trades, {min_trades_per_bin} trades/bin)"
             self.top_status.config(text=status_text)
         except Exception:
             pass
@@ -6158,6 +6225,36 @@ class App(tk.Tk):
                 self.var_prox_interval.set(prox_interval)
             except Exception:
                 pass
+        top_since_hours = data.get("top_since_hours")
+        if isinstance(top_since_hours, int):
+            try:
+                self.var_top_since_hours.set(top_since_hours)
+            except Exception:
+                pass
+        top_min_trades = data.get("top_min_trades")
+        if isinstance(top_min_trades, int):
+            try:
+                self.var_top_min_trades.set(top_min_trades)
+            except Exception:
+                pass
+        top_min_trades_per_bin = data.get("top_min_trades_per_bin")
+        if isinstance(top_min_trades_per_bin, int):
+            try:
+                self.var_top_min_trades_per_bin.set(top_min_trades_per_bin)
+            except Exception:
+                pass
+        top_auto = data.get("top_auto")
+        if isinstance(top_auto, bool):
+            try:
+                self.var_top_auto.set(top_auto)
+            except Exception:
+                pass
+        top_interval = data.get("top_interval")
+        if isinstance(top_interval, int):
+            try:
+                self.var_top_interval.set(top_interval)
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         data = {
@@ -6215,6 +6312,29 @@ class App(tk.Tk):
                 if self.var_prox_interval is not None
                 else 300
             ),
+            "top_since_hours": (
+                self.var_top_since_hours.get()
+                if self.var_top_since_hours is not None
+                else 168
+            ),
+            "top_min_trades": (
+                self.var_top_min_trades.get()
+                if self.var_top_min_trades is not None
+                else 10
+            ),
+            "top_min_trades_per_bin": (
+                self.var_top_min_trades_per_bin.get()
+                if self.var_top_min_trades_per_bin is not None
+                else 3
+            ),
+            "top_auto": (
+                bool(self.var_top_auto.get()) if self.var_top_auto is not None else True
+            ),
+            "top_interval": (
+                self.var_top_interval.get()
+                if self.var_top_interval is not None
+                else 300
+            ),
         }
         try:
             with open(self._settings_path(), "w", encoding="utf-8") as f:
@@ -6234,6 +6354,13 @@ class App(tk.Tk):
         except Exception:
             pass
         self._schedule_prox_refresh()
+
+    def _on_top_setting_changed(self, *args) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        self._schedule_top_refresh()
 
     def _on_filter_changed(self, *args) -> None:
         """Trigger refresh when filter values change."""

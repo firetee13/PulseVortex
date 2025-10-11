@@ -88,11 +88,32 @@ omit = [
     "*/tests/*",
     "*/test_*",
     "src/monitor/cli/*",
+    "src\\monitor\\cli\\*",
+    "monitor/cli/*",
+    "monitor\\cli\\*",
+    "*/monitor/cli/*",
     "src/monitor/core/mt5_client.py",
+    "src\\monitor\\core\\mt5_client.py",
+    "*/monitor/core/mt5_client.py",
     "src/monitor/gui/*",
+    "src\\monitor\\gui\\*",
+    "*/monitor/gui/*",
 ]
 
 [tool.coverage.report]
+omit = [
+    "src/monitor/cli/*",
+    "src\\monitor\\cli\\*",
+    "monitor/cli/*",
+    "monitor\\cli\\*",
+    "*/monitor/cli/*",
+    "src/monitor/core/mt5_client.py",
+    "src\\monitor\\core\\mt5_client.py",
+    "*/monitor/core/mt5_client.py",
+    "src/monitor/gui/*",
+    "src\\monitor\\gui\\*",
+    "*/monitor/gui/*",
+]
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

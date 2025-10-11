@@ -608,7 +608,8 @@ class SlDistanceFilterTests(unittest.TestCase):
 
     def test_invalid_bid_ask_rejection(self):
         # Test case where bid/ask are invalid (should be rejected at SL distance check)
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX2"
         bid = 1.1  # Valid bid to pass initial checks
         ask = 1.0  # Invalid ask (ask <= bid)
@@ -875,7 +876,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_missing_sl_tp(self):
         # Test filtering when SL/TP are missing
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -916,7 +918,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_price_outside_buy_sr(self):
         # Test filtering when price is outside buy S/R range
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -957,7 +960,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_price_outside_sell_sr(self):
         # Test filtering when price is outside sell S/R range
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -998,7 +1002,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_retains_setups_close_to_sl(self):
         # When price sits near the stop, the setup should still be returned.
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -1039,7 +1044,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_retains_setups_far_from_sl(self):
         # When price hugs the target end of the range, the setup should still be returned.
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -1079,7 +1085,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
         self.assertGreater(prox, 0.6)
 
     def test_analyze_tp_too_close_to_spread_buy(self):
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -1118,7 +1125,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_valid_buy_setup(self):
         # Test a valid buy setup
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(
@@ -1170,7 +1178,8 @@ class AnalyzeFunctionTests(unittest.TestCase):
 
     def test_analyze_valid_sell_setup(self):
         # Test a valid sell setup
-        now = datetime.now(UTC)
+        # Use a time that avoids quiet window: 10:00 UTC = 13:00 UTC+3 (well outside 23:45-00:59)
+        now = datetime(2023, 1, 2, 10, 0, tzinfo=UTC)
         sym = "TESTIDX"
 
         first = tls.Snapshot(

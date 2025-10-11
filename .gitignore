@@ -136,9 +136,6 @@ dmypy.json
 # Ruff
 .ruff_cache/
 
-# Bandit
-.bandit
-
 # Safety
 .safety
 
@@ -184,6 +181,7 @@ logs/
 # Documentation
 *en.md
 *ts.md
+*de.md
 
 # Trading/Financial specific
 *.csv

@@ -623,7 +623,7 @@ monitor-hits --verbose --trace-pages
 1. Fork/clone repo; create feature branch (`feat(gui): add bin filter`)
 2. Install deps: `pip install -e .[dev]` (installs package in editable mode with dev dependencies)
 3. Add tests in `tests/` (mirror existing; ≥90% coverage)
-4. Run suite: `pytest -v` or `python -m unittest discover -s tests -v`
+4. Run suite: `pytest`
 5. Validate: Manual MT5 session (symbols visible), GUI screenshots, DB queries
 6. Commit/PR: Conventional messages; link issues; flag DB schema changes (backup timelapse.db)
 
@@ -707,12 +707,6 @@ Our CI/CD pipeline enforces the following quality standards:
   - Strict type checking enabled
   - Unimported modules ignored for external dependencies
   - Coverage: Core business logic modules
-
-#### **Security Analysis**
-- **bandit** (`bandit>=1.7.0`): Security vulnerability scanner
-  - Common security issue detection
-  - Zero high-severity security issues
-  - Excludes test files from scanning
 
 - **safety** (`safety>=2.0.0`): Dependency vulnerability checking
   - Automated dependency security scans
@@ -830,9 +824,6 @@ flake8 src tests
 # Type checking
 mypy src/monitor/core/
 
-# Security scanning
-bandit -r src/
-
 # Test execution
 pytest -v
 ```
@@ -877,14 +868,13 @@ pre-commit install
 pre-commit run --all-files
 
 # Run tests with coverage
-pytest --cov=monitor --cov-report=html
+pytest
 ```
 
 ### 📊 Quality Metrics
 
 - **Code Coverage**: 83 tests passing, >80% coverage
 - **Type Checking**: Full mypy compliance on core modules
-- **Security**: Bandit and safety scanning with zero high-severity issues
 - **Performance**: Automated benchmarking and regression detection
 
 ## License

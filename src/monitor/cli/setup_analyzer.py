@@ -509,7 +509,7 @@ def _rate_field(rate: object, name: str) -> Optional[float]:
     except Exception:
         try:
             value = getattr(rate, name)
-        except AttributeError:
+        except Exception:  # Catch all exceptions from getattr, not just AttributeError
             try:
                 value = rate[name]  # type: ignore[index]
             except Exception:

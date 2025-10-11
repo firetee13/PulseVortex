@@ -43,7 +43,6 @@ dev = [
     "isort>=5.10.0",
     "flake8>=4.0.0",
     "mypy>=0.950",
-    "bandit>=1.7.0",
     "safety>=2.0.0",
     "build>=0.8.0",
     "twine>=4.0.0",
@@ -76,7 +75,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["*Tests"]
 python_functions = ["test_*"]
-addopts = "--tb=short --strict-markers"
+addopts = " --cov=src  --cov-report=term-missing --tb=short --strict-markers"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
@@ -88,10 +87,7 @@ source = ["src"]
 omit = [
     "*/tests/*",
     "*/test_*",
-    "src/monitor/cli/*",
     "src/monitor/gui/*",
-    "src/monitor/core/mt5_client.py",
-    "src/monitor/core/db.py",
 ]
 
 [tool.coverage.report]

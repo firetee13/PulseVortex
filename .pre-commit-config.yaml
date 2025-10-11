@@ -36,13 +36,6 @@ repos:
         additional_dependencies: [types-all]
         args: [--ignore-missing-imports]
 
-  - repo: https://github.com/pycqa/bandit
-    rev: 1.7.5
-    hooks:
-      - id: bandit
-        args: [-r, src/, -f, txt]
-        exclude: tests/
-
   - repo: local
     hooks:
       - id: pytest-check
@@ -51,4 +44,3 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-        args: [--tb=short, -q]

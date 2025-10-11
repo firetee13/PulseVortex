@@ -87,6 +87,8 @@ source = ["src"]
 omit = [
     "*/tests/*",
     "*/test_*",
+    "src/monitor/cli/*",
+    "src/monitor/core/mt5_client.py",
     "src/monitor/gui/*",
 ]
 

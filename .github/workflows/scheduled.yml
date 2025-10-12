@@ -41,10 +41,10 @@ jobs:
             load_setups_sqlite,
             record_hit_sqlite
           )
-          print('✅ Core package imports successfully')
+          print('Core package imports successfully')
         except ImportError as e:
           if 'MetaTrader5' in str(e):
-            print('✅ Core package imports successfully (MT5 expected to fail in CI)')
+            print('Core package imports successfully (MT5 expected to fail in CI)')
           else:
             raise e
         "

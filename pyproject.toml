@@ -177,30 +177,9 @@ ignore_missing_imports = true
 [tool.flake8]
 max-line-length = 88
 extend-ignore = [
-    "E203",
-    "E501",
-    "D100",
-    "D101",
-    "D102",
-    "D103",
-    "D104",
-    "D105",
-    "D106",
-    "D107",
-    "D200",
-    "D202",
-    "D205",
-    "D400",
-    "D401",
-    "E302",
-    "E305",
-    "F401",
-    "E231",
-    "W503",
-    "E402",
-    "E713",
-    "E702",
-    "E226",
-    "E541",
-    "F541",
+    "E203",  # whitespace before ':' (Black compatibility)
+    "E501",  # line too long (handled by Black)
+]
+per-file-ignores = [
+    "src/monitor/__init__.py:E501",  # Allow long lines in __init__.py
 ]

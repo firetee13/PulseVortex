@@ -9,7 +9,7 @@ _DEFAULT_DB_FILENAME = "timelapse.db"
 
 
 def project_root() -> Path:
-    """Return the project root directory (one level above the monitor package)."""
+    """Return the project root directory (one level above monitor package)."""
     return _PROJECT_ROOT
 
 
@@ -21,7 +21,7 @@ def _resolve_path(value: str) -> Path:
 
 
 def default_db_path() -> Path:
-    """Resolve the default SQLite database path, honoring TIMELAPSE_DB_PATH if set."""
+    """Resolve default SQLite DB path, honoring TIMELAPSE_DB_PATH if set."""
     env_override = os.environ.get("TIMELAPSE_DB_PATH")
     if env_override:
         return _resolve_path(env_override)
@@ -36,5 +36,5 @@ def resolve_db_path(candidate: Optional[str]) -> Path:
 
 
 def db_path_str(candidate: Optional[str] = None) -> str:
-    """Return the resolved database path as a string for sqlite3.connect and CLI args."""
+    """Return resolved DB path as string for sqlite3.connect and CLI args."""
     return str(resolve_db_path(candidate))

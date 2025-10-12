@@ -114,16 +114,22 @@ def timeframe_from_code(code: str) -> Optional[int]:
         return None
 
 
-def _candidate_terminal_paths(user_hint: Optional[str]) -> List[Optional[str]]:
-    """Return candidate terminal64.exe paths to try. Includes None (auto) first."""
+def _candidate_terminal_paths(
+    user_hint: Optional[str],
+) -> List[Optional[str]]:
+    """Return candidate terminal64.exe paths to try.
+
+    Includes None (auto) first.
+    """
     candidates: List[Optional[str]] = [None]
     if user_hint:
         candidates.append(user_hint)
     if os.name == "nt":
         pf = os.environ.get("PROGRAMFILES") or r"C:\\Program Files"
         pfx = os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)"
+        base_path = os.path.expanduser("~")
         roaming = os.path.join(
-            os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal"
+            base_path, "AppData", "Roaming", "MetaQuotes", "Terminal"
         )
         patterns = [
             os.path.join(pf, "MetaTrader 5", "terminal64.exe"),
@@ -168,7 +174,8 @@ def init_mt5(
             if verbose:
                 where = cand or "<auto>"
                 print(
-                    f"[mt5] initialize attempt {attempt} path={where} timeout={timeout}s portable={portable}"
+                    f"[mt5] initialize attempt {attempt} path={where} "
+                    f"timeout={timeout}s portable={portable}"
                 )
             ok = False
             try:
@@ -199,7 +206,10 @@ def init_mt5(
             except Exception:
                 last_err = None
             if verbose and last_err:
-                print(f"[mt5] initialize failed at path={cand or '<auto>'}: {last_err}")
+                print(
+                    f"[mt5] initialize failed at path={cand or '<auto>'}: "
+                    f"{last_err}"
+                )
             if last_err and last_err[0] in (-10004, -10005, -10006):
                 time.sleep(1.0)
             try:
@@ -313,7 +323,8 @@ def rates_range_utc(
     if trace:
         count = 0 if rates is None else len(rates)
         print(
-            f"    [rates-range] {symbol} tf={timeframe} bars={count} in {elapsed*1000:.1f} ms"
+            f"    [rates-range] {symbol} tf={timeframe} bars={count} "
+            f"in {elapsed * 1000:.1f} ms"
         )
     return [] if rates is None else list(rates)
 
@@ -329,7 +340,11 @@ def ticks_paged(
     """Fetch ticks from start..end (server-local naive) using copy_ticks_from."""
     if mt5 is None:
         return [], TickFetchStats(
-            pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+            pages=0,
+            total_ticks=0,
+            elapsed_s=0.0,
+            fetch_s=0.0,
+            early_stop=False,
         )
     t0 = perf_counter()
     all_ticks: List[object] = []
@@ -345,7 +360,8 @@ def ticks_paged(
         if trace:
             cur_str = cur.isoformat(sep=" ", timespec="seconds")
             print(
-                f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms"
+                f"    [ticks] page {pages+1} start={cur_str} -> "
+                f"got {n} ticks in {call_dt * 1000:.1f} ms"
             )
         if chunk is None or n == 0:
             break
@@ -391,7 +407,11 @@ def ticks_range_all(
     """Fetch all ticks for [start, end] using copy_ticks_range."""
     if mt5 is None:
         return [], TickFetchStats(
-            pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+            pages=0,
+            total_ticks=0,
+            elapsed_s=0.0,
+            fetch_s=0.0,
+            early_stop=False,
         )
     t0 = perf_counter()
     call_t0 = perf_counter()
@@ -401,12 +421,16 @@ def ticks_range_all(
     call_dt = perf_counter() - call_t0
     n = 0 if ticks is None else len(ticks)
     if trace:
-        print(f"    [ticks-range] {n} ticks in {call_dt*1000:.1f} ms")
+        print(f"    [ticks-range] {n} ticks in {call_dt * 1000:.1f} ms")
     elapsed = perf_counter() - t0
     ticks_out = ticks if ticks is not None else []
     pages = 1 if n > 0 else 0
     return ticks_out, TickFetchStats(
-        pages=pages, total_ticks=n, elapsed_s=elapsed, fetch_s=call_dt, early_stop=False
+        pages=pages,
+        total_ticks=n,
+        elapsed_s=elapsed,
+        fetch_s=call_dt,
+        early_stop=False,
     )
 
 
@@ -424,7 +448,11 @@ def scan_ticks_paged_for_hit(
     """Fetch ticks page-by-page and stop as soon as a hit is detected."""
     if mt5 is None:
         return None, TickFetchStats(
-            pages=0, total_ticks=0, elapsed_s=0.0, fetch_s=0.0, early_stop=False
+            pages=0,
+            total_ticks=0,
+            elapsed_s=0.0,
+            fetch_s=0.0,
+            early_stop=False,
         )
     pages = 0
     total_ticks = 0
@@ -440,7 +468,8 @@ def scan_ticks_paged_for_hit(
         if trace:
             cur_str = cur.isoformat(sep=" ", timespec="seconds")
             print(
-                f"    [ticks] page {pages+1} start={cur_str} -> got {n} ticks in {call_dt*1000:.1f} ms"
+                f"    [ticks] page {pages+1} start={cur_str} -> "
+                f"got {n} ticks in {call_dt * 1000:.1f} ms"
             )
         if chunk is None or n == 0:
             break

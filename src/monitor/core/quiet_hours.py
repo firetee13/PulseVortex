@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Utilities for recurring quiet-trading windows (UTC+3) shared by CLI and GUI."""
+"""Utilities for recurring quiet-trading windows (UTC+3) shared by CLI & GUI."""
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -59,7 +59,9 @@ def _daily_quiet_intervals(
     if weekend_quiet and day_local.weekday() == WEEKEND_START_WEEKDAY:
         weekend_start_local = datetime.combine(day_local, time.min, tzinfo=UTC_PLUS_3)
         weekend_end_local = datetime.combine(
-            day_local + timedelta(days=2), time(hour=0, minute=59), tzinfo=UTC_PLUS_3
+            day_local + timedelta(days=2),
+            time(hour=0, minute=59),
+            tzinfo=UTC_PLUS_3,
         )
         intervals.append(
             (weekend_start_local.astimezone(UTC), weekend_end_local.astimezone(UTC))
@@ -157,7 +159,7 @@ def is_quiet_time(
     asset_kind: str | None = None,
     symbol: str | None = None,
 ) -> bool:
-    """Return True when ``dt`` is inside a quiet window for the given asset kind."""
+    """Return True when ``dt`` is inside quiet window for the given asset kind."""
 
     dt_utc = _as_utc(dt)
     dt_local = dt_utc.astimezone(UTC_PLUS_3)

@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Analyze MT5 symbols for trade setups based on symbol strength, price momentum, ATR/ATR%, and S1/R1 proximity.
+Analyze MT5 symbols for trade setups based on symbol strength, price momentum,
+ATR/ATR%, and S1/R1 proximity.
 
 Usage:
   python timelapse_setups.py [--min-rrr 1.0] [--top N] [--brief]
                               [--watch] [--interval 5]
 
 Notes:
-  - Strength: -50..+50; ATR in pips on D1. For crypto, uses D1 Close delta for momentum.
+  - Strength: -50..+50; ATR in pips on D1. For crypto, uses D1 Close delta
+    for momentum.
   - Spread filter: Only spreads <0.3% accepted, others filtered out.
-  - SL/TP logic: Buy -> SL=S1 or D1 Low, TP=R1 or D1 High; Sell -> SL=R1 or D1 High, TP=S1 or D1 Low. Price must lie between SL and TP.
-  - SL distance filter: Stop loss must be at least 10x the current spread away from entry price (Buy: bid-SL >= 10x spread, Sell: SL-ask >= 10x spread).
-  - TP distance filter: Take profit must also be at least 10x the current spread away from entry (Buy: TP-bid >= 10x spread, Sell: ask-TP >= 10x spread).
-  - Current price and RRR use Bid/Ask at signal timestamp (Buy: Ask, Sell: Bid).
-  - ATR(%) effect: adds +0.5 score bonus when within [60, 150] (for informational purposes).
+  - SL/TP logic: Buy -> SL=S1 or D1 Low, TP=R1 or D1 High; Sell -> SL=R1 or
+    D1 High, TP=S1 or D1 Low. Price must lie between SL and TP.
+  - SL distance filter: Stop loss must be at least 10x the current spread away
+    from entry price (Buy: bid-SL >= 10x spread, Sell: SL-ask >= 10x spread).
+  - TP distance filter: Take profit must also be at least 10x the current
+    spread away from entry (Buy: TP-bid >= 10x spread, Sell: ask-TP >= 10x
+    spread).
+  - Current price and RRR use Bid/Ask at signal timestamp
+    (Buy: Ask, Sell: Bid).
+  - ATR(%) effect: adds +0.5 score bonus when within [60, 150] (for
+    informational purposes).
   - Timelapse: simulated from previous values in MT5 data for momentum context.
-  - Crypto adaptation: No Delta FXP or volume; uses Strength consensus + D1 Close trend.
+  - Crypto adaptation: No Delta FXP or volume; uses Strength consensus + D1
+    Close trend.
 """
 
 from __future__ import annotations
@@ -86,7 +95,9 @@ def _symbol_digits(symbol: str, price: Optional[float]) -> int:
     try:
         if _MT5_IMPORTED and _mt5_ensure_init():
             try:
-                info = mt5.symbol_info(symbol)  # type: ignore[union-attr, reportUnknownMember]
+                info = mt5.symbol_info(  # type: ignore[union-attr,
+                    symbol
+                )  # reportUnknownMember]
                 if info is not None:
                     d = int(getattr(info, "digits", 0) or 0)
                     if 0 <= d <= 10:
@@ -107,7 +118,7 @@ CANONICAL_KEYS: Dict[str, str] = {}
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Analyze MT5 symbols for trade setups (MT5 is the only source)"
+        description="Analyze MT5 symbols for trade setups " "(MT5 is the only source)"
     )
     p.add_argument(
         "--symbols",
@@ -118,7 +129,8 @@ def parse_args() -> argparse.Namespace:
         "--min-rrr",
         type=float,
         default=1.0,
-        help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: No longer used for filtering",
+        help="Minimum risk-reward ratio for sorting (default: 1.0) - NOTE: "
+        "No longer used for filtering",
     )
     p.add_argument(
         "--top", type=int, default=None, help="Limit to top N setups (after filtering)"
@@ -133,7 +145,7 @@ def parse_args() -> argparse.Namespace:
         "--interval",
         type=float,
         default=1.0,
-        help="Polling interval in seconds when --watch is used (default: 1)",
+        help=("Polling interval in seconds when --watch is used (default: 1)"),
     )
     p.add_argument(
         "--debug", action="store_true", help="Print filtering diagnostics and counts"
@@ -141,20 +153,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--exclude",
         default="",
-        help="Comma-separated symbols to exclude (e.g., GLMUSD,BCHUSD)",
+        help=("Comma-separated symbols to exclude (e.g., GLMUSD,BCHUSD)"),
     )
     return p.parse_args()
 
 
 PROXIMITY_BIN_BUCKET = 0.1
-# Multiplier for minimum SL/TP distance in spread units (default 10x; override via TIMELAPSE_SPREAD_MULT)
+# Multiplier for minimum SL/TP distance in spread units (default 10x;
+# override via TIMELAPSE_SPREAD_MULT)
 SPREAD_MULTIPLIER = float(os.environ.get("TIMELAPSE_SPREAD_MULT", "10"))
 
 
 def _proximity_bin_label(
     proximity: Optional[float], bucket: float = PROXIMITY_BIN_BUCKET
 ) -> Optional[str]:
-    """Return the proximity bucket label (e.g., '0.4-0.5') used for gating/stats."""
+    """Return the proximity bucket label (e.g., '0.4-0.5') used for gating."""
     try:
         if proximity is None:
             return None
@@ -260,7 +273,8 @@ _RATE_TTL_SECONDS = {
 
 
 def to_input_tz(dt: datetime) -> datetime:
-    """Convert a datetime to input timezone (UTC+2). If naive, assume it is input_tz local time.
+    """Convert a datetime to input timezone (UTC+2). If naive, assume it is
+    input_tz local time.
 
     - If `dt` has no tzinfo, attach input_tz tzinfo without shifting the clock.
     - If `dt` is timezone-aware, convert to input_tz.
@@ -289,11 +303,13 @@ def _mt5_ensure_init() -> bool:
         return False
     if _MT5_READY:
         return True
-    timeout = int(
-        os.environ.get("TIMELAPSE_MT5_TIMEOUT", os.environ.get("MT5_TIMEOUT", "30"))
+    timeout_env = os.environ.get(
+        "TIMELAPSE_MT5_TIMEOUT", os.environ.get("MT5_TIMEOUT", "30")
     )
+    timeout = int(timeout_env)
     retries = int(os.environ.get("TIMELAPSE_MT5_RETRIES", "1"))
-    portable = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower() in {
+    portable_str = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower()
+    portable = portable_str in {
         "1",
         "true",
         "yes",
@@ -320,7 +336,9 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
         if 0.0 <= age <= ttl:
             return cached[1]
     try:
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)  # type: ignore[union-attr, reportUnknownMember]
+        rates = mt5.copy_rates_from_pos(
+            symbol, timeframe, 0, count
+        )  # type: ignore[union-attr, reportUnknownMember]
     except Exception:
         rates = None
     if rates is not None:
@@ -331,7 +349,8 @@ def _mt5_copy_rates_cached(symbol: str, timeframe: int, count: int) -> Any:
 
 
 def canonicalize_key(s: Optional[str]) -> str:
-    """Canonicalize CSV header / lookup keys for case-insensitive, punctuation-robust matching.
+    """Canonicalize CSV header / lookup keys for case-insensitive,
+    punctuation-robust matching.
 
     Examples:
         "ATR (%) D1" -> "atr percent d1"
@@ -344,7 +363,8 @@ def canonicalize_key(s: Optional[str]) -> str:
     # strip BOM and surrounding whitespace, lowercase
     orig_s = s
     s = s.lstrip("\ufeff").strip().lower()
-    # normalize percent sign to word "percent" so variants like '%' and 'percent' match
+    # normalize percent sign to word "percent" so variants like '%'
+    # and 'percent' match
     s = s.replace("%", " percent ")
     # replace any non-alphanumeric characters with space
     s = re.sub(r"[^a-z0-9\s]", " ", s)
@@ -361,7 +381,8 @@ def fnum(v: Optional[str]) -> Optional[float]:
       - trailing/leading units like '%', 'pips', 'pip'
       - comma as decimal separator (common in some exports)
       - thousands separators (commas or dots depending on locale)
-      - returns the first numeric token found as float, or None if not parseable
+      - returns the first numeric token found as float,
+        or None if not parseable
     """
     if v is None:
         return None
@@ -1386,7 +1407,8 @@ def insert_results_to_db(
 
     - Creates the table if it does not exist.
     - Deduplicates by (symbol, direction, as_of) using ON CONFLICT DO NOTHING.
-    - Gating: insert only if there is no currently unsettled (no TP/SL hit) setup for the same symbol.
+    - Gating: insert only if there is no currently unsettled (no TP/SL hit) setup
+      for the same symbol.
     """
     if sqlite3 is None:
         print("[DB] sqlite3 not available; cannot insert.")
@@ -1426,7 +1448,8 @@ def insert_results_to_db(
             cur.execute(f"PRAGMA table_info({table})")
             cols = {str(r[1]) for r in (cur.fetchall() or [])}
             if "proximity_to_sl" not in cols:
-                cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_to_sl REAL")
+                alter_sql = f"ALTER TABLE {table} ADD COLUMN proximity_to_sl REAL"
+                cur.execute(alter_sql)
         except Exception as e:
             print(f"[DB] Warning: Could not add proximity_to_sl column: {e}")
         # Ensure hits table exists for open/settled gating
@@ -1451,12 +1474,16 @@ def insert_results_to_db(
                 """
             )
             # Add indexes for performance
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_timelapse_hits_symbol ON timelapse_hits (symbol)"
+            index_sql1 = (
+                "CREATE INDEX IF NOT EXISTS idx_timelapse_hits_symbol "
+                "ON timelapse_hits (symbol)"
             )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_timelapse_hits_setup_id ON timelapse_hits (setup_id)"
+            cur.execute(index_sql1)
+            index_sql2 = (
+                "CREATE INDEX IF NOT EXISTS idx_timelapse_hits_setup_id "
+                "ON timelapse_hits (setup_id)"
             )
+            cur.execute(index_sql2)
         except Exception:
             # If creation fails, we'll proceed without gating
             pass
@@ -1474,31 +1501,36 @@ def insert_results_to_db(
             # Try to migrate by adding detected_at if missing
             if not has_detected:
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN detected_at TEXT")
+                    alter_sql = f"ALTER TABLE {table} ADD COLUMN detected_at TEXT"
+                    cur.execute(alter_sql)
                     has_detected = True
                 except Exception:
                     has_detected = False
             if not has_prox_bin:
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN proximity_bin TEXT")
+                    alter_sql = f"ALTER TABLE {table} ADD COLUMN proximity_bin TEXT"
+                    cur.execute(alter_sql)
                     has_prox_bin = True
                 except Exception:
                     has_prox_bin = False
             if not has_strength_1h:
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN strength_1h REAL")
+                    alter_sql = f"ALTER TABLE {table} ADD COLUMN strength_1h REAL"
+                    cur.execute(alter_sql)
                     has_strength_1h = True
                 except Exception:
                     has_strength_1h = False
             if not has_strength_4h:
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN strength_4h REAL")
+                    alter_sql = f"ALTER TABLE {table} ADD COLUMN strength_4h REAL"
+                    cur.execute(alter_sql)
                     has_strength_4h = True
                 except Exception:
                     has_strength_4h = False
             if not has_strength_1d:
                 try:
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN strength_1d REAL")
+                    alter_sql = f"ALTER TABLE {table} ADD COLUMN strength_1d REAL"
+                    cur.execute(alter_sql)
                     has_strength_1d = True
                 except Exception:
                     has_strength_1d = False
@@ -1606,7 +1638,8 @@ def insert_results_to_db(
 
         if inserted > 0:
             try:
-                # Build detailed lines per result with tick time (UTC+3), bid/ask, and source
+                # Build detailed lines per result with tick time (UTC+3), bid/ask, and
+                # source
                 lines = []
                 for r in results or []:
                     sym = str(r.get("symbol") or "")
@@ -1618,7 +1651,8 @@ def insert_results_to_db(
                     t_disp = "N/A"
                     try:
                         if t:
-                            # tick_utc is like 'YYYY-MM-DD HH:MM:SS' in UTC naive
+                            # tick_utc is like 'YYYY-MM-DD HH:MM:SS' in UTC
+                            # naive
                             dt = datetime.strptime(t, "%Y-%m-%d %H:%M:%S").replace(
                                 tzinfo=UTC
                             )
@@ -1633,10 +1667,12 @@ def insert_results_to_db(
                         except Exception:
                             return "N/A"
 
-                    line = (
+                    line_parts = [
                         f"{sym} | tick time {t_disp} | bid {f(bid)} | ask {f(ask)}"
-                        + (f" | source {src}" if src else "")
-                    )
+                    ]
+                    if src:
+                        line_parts.append(f" | source {src}")
+                    line = "".join(line_parts)
                     if sym:
                         lines.append(line)
                 if lines:
@@ -1647,7 +1683,8 @@ def insert_results_to_db(
                     # Fallback to symbol list only
                     syms = [str(r.get("symbol")) for r in (results or [])]
                     uniq = sorted({s for s in syms if s})
-                    print(f"[DB] Inserted {inserted} new setup(s): {', '.join(uniq)}")
+                    symbols_str = ", ".join(uniq)
+                    print(f"[DB] Inserted {inserted} new setup(s): {symbols_str}")
             except Exception:
                 print(f"[DB] Inserted {inserted} new setup(s)")
 
@@ -1674,7 +1711,9 @@ def main() -> None:
             # Default to visible MarketWatch symbols
             if _mt5_ensure_init():
                 try:
-                    infos = mt5.symbols_get()  # type: ignore[union-attr, reportUnknownMember]
+                    infos = (
+                        mt5.symbols_get()  # type: ignore[union-attr,
+                    )  # reportUnknownMember]
                 except Exception:
                     infos = []
                 for info in infos or []:
@@ -1716,7 +1755,8 @@ if __name__ == "__main__":
 
 
 class _TimelapseModule(types.ModuleType):
-    """Custom module wrapper to ensure global DB connection closes on reassignment."""
+    """Custom module wrapper to ensure global DB connection closes on
+    reassignment."""
 
     def __setattr__(self, name: str, value: object) -> None:
         if name == "_DB_CONN":

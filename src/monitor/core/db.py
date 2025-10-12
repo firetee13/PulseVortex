@@ -10,7 +10,7 @@ UTC = timezone.utc
 
 
 def ensure_hits_table_sqlite(conn) -> None:
-    """Ensure the timelapse_hits table exists in the target SQLite connection."""
+    """Ensure the timelapse_hits table exists in the target SQLite conn."""
     with conn:
         cur = conn.cursor()
         cur.execute(
@@ -35,7 +35,7 @@ def ensure_hits_table_sqlite(conn) -> None:
 
 
 def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) -> None:
-    """Populate denormalised columns on timelapse_hits based on the setups table."""
+    """Populate denormalised columns on timelapse_hits based on setups."""
     with conn:
         cur = conn.cursor()
         cur.execute(
@@ -48,8 +48,10 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
                 f"""
                 UPDATE timelapse_hits
                 SET entry_time_utc3 = (
-                    SELECT strftime('%Y-%m-%d %H:%M:%S', s.as_of, '+{utc3_hours} hours')
-                    FROM {setups_table} s WHERE s.id = timelapse_hits.setup_id
+                    SELECT strftime('%Y-%m-%d %H:%M:%S', s.as_of,
+                                   '+{utc3_hours} hours')
+                    FROM {setups_table} s
+                    WHERE s.id = timelapse_hits.setup_id
                 )
                 WHERE entry_time_utc3 IS NULL
                 """
@@ -57,7 +59,8 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
         cur.execute(
             f"""
             UPDATE timelapse_hits
-            SET hit_time_utc3 = strftime('%Y-%m-%d %H:%M:%S', hit_time, '+{utc3_hours} hours')
+            SET hit_time_utc3 = strftime('%Y-%m-%d %H:%M:%S', hit_time,
+                                         '+{utc3_hours} hours')
             WHERE hit_time_utc3 IS NULL AND hit_time IS NOT NULL
             """
         )
@@ -66,7 +69,8 @@ def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) ->
                 f"""
                 UPDATE timelapse_hits
                 SET entry_price = (
-                    SELECT s.price FROM {setups_table} s WHERE s.id = timelapse_hits.setup_id
+                    SELECT s.price FROM {setups_table} s
+                    WHERE s.id = timelapse_hits.setup_id
                 )
                 WHERE entry_price IS NULL
                 """
@@ -99,7 +103,8 @@ def load_tp_sl_setup_state_sqlite(
     placeholder = ",".join(["?"] * len(ids))
     cur = conn.cursor()
     cur.execute(
-        f"SELECT setup_id, last_checked_utc FROM tp_sl_setup_state WHERE setup_id IN ({placeholder})",
+        f"SELECT setup_id, last_checked_utc FROM tp_sl_setup_state "
+        f"WHERE setup_id IN ({placeholder})",
         ids,
     )
     rows = cur.fetchall() or []
@@ -137,7 +142,8 @@ def persist_tp_sl_setup_state_sqlite(conn, entries: Dict[int, datetime]) -> None
             """
             INSERT INTO tp_sl_setup_state (setup_id, last_checked_utc)
             VALUES (?, ?)
-            ON CONFLICT(setup_id) DO UPDATE SET last_checked_utc = excluded.last_checked_utc
+            ON CONFLICT(setup_id) DO UPDATE SET
+                last_checked_utc = excluded.last_checked_utc
             """,
             records,
         )
@@ -182,9 +188,8 @@ def load_setups_sqlite(
         where.append(f"id IN ({placeholders})")
         params.extend([int(x) for x in ids])
     elif since_hours is not None:
-        threshold = (datetime.now(UTC) - timedelta(hours=since_hours)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        threshold_time = datetime.now(UTC) - timedelta(hours=since_hours)
+        threshold = threshold_time.strftime("%Y-%m-%d %H:%M:%S")
         where.append("inserted_at >= ?")
         params.append(threshold)
     if symbols:
@@ -193,7 +198,10 @@ def load_setups_sqlite(
         params.extend(list(symbols))
 
     where_clause = (" WHERE " + " AND ".join(where)) if where else ""
-    sql = f"SELECT id, symbol, direction, sl, tp, price, as_of FROM {table}{where_clause} ORDER BY id"
+    sql = (
+        f"SELECT id, symbol, direction, sl, tp, price, as_of FROM {table}"
+        f"{where_clause} ORDER BY id"
+    )
     rows: List[Setup] = []
     cur.execute(sql, params)
     for sid, sym, direction, sl, tp, price, as_of in cur.fetchall() or []:
@@ -203,7 +211,8 @@ def load_setups_sqlite(
             try:
                 as_naive = datetime.fromisoformat(as_of)
             except Exception:
-                as_naive = datetime.strptime(as_of.split(".")[0], "%Y-%m-%d %H:%M:%S")
+                date_part = as_of.split(".")[0]
+                as_naive = datetime.strptime(date_part, "%Y-%m-%d %H:%M:%S")
         else:
             as_naive = as_of
         as_of_utc = as_naive.replace(tzinfo=UTC)
@@ -252,9 +261,8 @@ def record_hit_sqlite(
         digits = infer_decimals_from_price(ref_price)
         return max(0, min(10, digits)) or 5
 
-    digits = instrument_digits(
-        setup.symbol, setup.entry_price if setup.entry_price is not None else hit.price
-    )
+    price_for_digits = setup.entry_price if setup.entry_price is not None else hit.price
+    digits = instrument_digits(setup.symbol, price_for_digits)
 
     def r(value: Optional[float]) -> Optional[float]:
         try:
@@ -294,8 +302,8 @@ def record_hit_sqlite(
         cur.execute(
             """
             INSERT INTO timelapse_hits (
-                setup_id, symbol, direction, sl, tp, hit, hit_price, hit_time, hit_time_utc3,
-                entry_time_utc3, entry_price
+                setup_id, symbol, direction, sl, tp, hit, hit_price,
+                hit_time, hit_time_utc3, entry_time_utc3, entry_price
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(setup_id) DO UPDATE SET
@@ -330,7 +338,11 @@ def load_recorded_ids_sqlite(conn, setup_ids: Sequence[int]) -> set[int]:
     cur = conn.cursor()
     placeholders = ",".join(["?"] * len(setup_ids))
     cur.execute(
-        f"SELECT setup_id FROM timelapse_hits WHERE setup_id IN ({placeholders})",
+        f"SELECT setup_id FROM timelapse_hits " f"WHERE setup_id IN ({placeholders})",
         tuple(setup_ids),
     )
-    return {int(row[0]) for row in (cur.fetchall() or []) if row and row[0] is not None}
+    result_set = set()
+    for row in cur.fetchall() or []:
+        if row and row[0] is not None:
+            result_set.add(int(row[0]))
+    return result_set

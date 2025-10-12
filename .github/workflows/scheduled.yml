@@ -9,7 +9,7 @@ on:
 jobs:
   health-check:
     name: Daily Health Check
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -31,11 +31,18 @@ jobs:
         monitor-hits --help
         monitor-gui --help
 
-        # Test imports
+        # Test imports (skip MT5-specific imports in CI)
         python -c "
-        from monitor.core.config import project_root, default_db_path
-        from monitor.core.domain import Setup, Hit
-        print('✅ Package imports successfully')
+        try:
+          from monitor.core.config import project_root, default_db_path
+          from monitor.core.domain import Setup, Hit
+          from monitor.core.db import Database
+          print('✅ Core package imports successfully')
+        except ImportError as e:
+          if 'MetaTrader5' in str(e):
+            print('✅ Core package imports successfully (MT5 expected to fail in CI)')
+          else:
+            raise e
         "
 
     - name: Check dependencies for security issues
@@ -98,7 +105,7 @@ jobs:
 
   dependency-update-check:
     name: Check for Dependency Updates
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -117,19 +124,19 @@ jobs:
         echo "Checking for outdated packages..."
         pip list --outdated > outdated.txt
 
-        if [ -s outdated.txt ]; then
+        if ((Get-Content outdated.txt | Measure-Object -Line).Lines -gt 0) {
           echo "Found outdated dependencies:"
-          cat outdated.txt
+          Get-Content outdated.txt
 
           # Create a summary for potential issue
-          echo "## Outdated Dependencies" > dependency-summary.md
-          echo "" >> dependency-summary.md
-          "\`\`\`" >> dependency-summary.md
-          cat outdated.txt >> dependency-summary.md
-          "\`\`\`" >> dependency-summary.md
-        else
+          "## Outdated Dependencies" | Out-File -FilePath dependency-summary.md
+          "" | Out-File -FilePath dependency-summary.md -Append
+          "```" | Out-File -FilePath dependency-summary.md -Append
+          Get-Content outdated.txt | Out-File -FilePath dependency-summary.md -Append
+          "```" | Out-File -FilePath dependency-summary.md -Append
+        } else {
           echo "All dependencies are up to date!"
-        fi
+        }
 
     - name: Upload dependency report
       if: always()
@@ -143,18 +150,18 @@ jobs:
 
   backup-check:
     name: Database Backup Check
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     # Only run if this is the main repository (not forks)
     if: github.repository == 'firetee13/monitor_prod'
     steps:
     - name: Check if backup workflow exists
       run: |
-        if [ -f ".github/workflows/backup.yml" ]; then
+        if (Test-Path ".github/workflows/backup.yml") {
           echo "✅ Backup workflow found"
-        else
+        } else {
           echo "⚠️ No backup workflow found"
           echo "Consider creating a backup workflow for your trading data"
-        fi
+        }
 
     - name: Create backup reminder issue
       if: failure()

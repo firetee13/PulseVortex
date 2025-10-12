@@ -3,6 +3,6 @@
 # - monitor-hits: uses MetaTrader5 to fetch ticks/bars
 # - monitor-gui: uses matplotlib for chart rendering in Tkinter
 
-MetaTrader5>=5.0.45
+MetaTrader5>=5.0.50
 matplotlib>=3.5.0
 numpy>=1.21.0

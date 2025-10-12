@@ -36,7 +36,11 @@ jobs:
         try:
           from monitor.core.config import project_root, default_db_path
           from monitor.core.domain import Setup, Hit
-          from monitor.core.db import Database
+          from monitor.core.db import (
+            ensure_hits_table_sqlite,
+            load_setups_sqlite,
+            record_hit_sqlite
+          )
           print('✅ Core package imports successfully')
         except ImportError as e:
           if 'MetaTrader5' in str(e):
@@ -131,9 +135,9 @@ jobs:
           # Create a summary for potential issue
           "## Outdated Dependencies" | Out-File -FilePath dependency-summary.md
           "" | Out-File -FilePath dependency-summary.md -Append
-          "```" | Out-File -FilePath dependency-summary.md -Append
+          "``````" | Out-File -FilePath dependency-summary.md -Append
           Get-Content outdated.txt | Out-File -FilePath dependency-summary.md -Append
-          "```" | Out-File -FilePath dependency-summary.md -Append
+          "``````" | Out-File -FilePath dependency-summary.md -Append
         } else {
           echo "All dependencies are up to date!"
         }

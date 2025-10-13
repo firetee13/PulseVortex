@@ -116,6 +116,9 @@ QUIET_CHART_MESSAGE = (
 )
 PNL_EXPECTANCY_MIN_COMPLETED = 20
 TOP_EXPECTANCY_MIN_EDGE = 0.05
+TOP_SCORE_MIN = 0.35
+WORST_EXPECTANCY_MAX_EDGE = -TOP_EXPECTANCY_MIN_EDGE
+WORST_SCORE_MAX = -0.1
 PNL_EXPECTANCY_MIN_EDGE = 0.10
 
 
@@ -289,6 +292,7 @@ class App(tk.Tk):
         self.var_top_since_hours = tk.IntVar(value=168)
         self.var_top_min_trades = tk.IntVar(value=10)
         self.var_top_min_trades_per_bin = tk.IntVar(value=3)
+        self.var_top_view = tk.StringVar(value="Top performers")
         self.var_top_auto = tk.BooleanVar(value=True)
         self.var_top_interval = tk.IntVar(value=300)
         # Load persisted settings (if any) before building controls
@@ -314,6 +318,7 @@ class App(tk.Tk):
                 "write", self._on_top_setting_changed
             )
             self.var_top_interval.trace_add("write", self._on_top_setting_changed)
+            self.var_top_view.trace_add("write", self._on_top_view_changed)
         except Exception:
             pass
 
@@ -743,6 +748,7 @@ class App(tk.Tk):
         self.top_status = None
         self.top_table = None
         self.top_chart_frame = None
+        self._top_last_data: dict[str, object] | None = None
         self._top_auto_job: str | None = None
         self._top_refresh_job: str | None = None
 
@@ -1963,6 +1969,14 @@ class App(tk.Tk):
         ttk.Spinbox(
             row1, from_=1, to=50, textvariable=self.var_top_min_trades_per_bin, width=4
         ).pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(row1, text="View:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            row1,
+            textvariable=self.var_top_view,
+            values=("Top performers", "Worst performers"),
+            state="readonly",
+            width=16,
+        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Button(row1, text="Refresh", command=self._top_refresh).pack(side=tk.LEFT)
         ttk.Checkbutton(
             row1, text="Auto", variable=self.var_top_auto, command=self._top_auto_toggle
@@ -2230,7 +2244,7 @@ class App(tk.Tk):
             agg["count"] += 1.0
 
         expectancy_by_bin: dict[tuple[str, str], float] = {}
-        valid_bins: set[tuple[str, str]] = set()
+        eligible_bins: set[tuple[str, str]] = set()
         min_trades_per_bin = payload.get("min_trades_per_bin", 1)
 
         for key, agg in bin_totals.items():
@@ -2241,10 +2255,8 @@ class App(tk.Tk):
             if count < min_trades_per_bin:
                 continue
             expectancy = agg.get("sum", 0.0) / count
-            # Only include bins with positive expectancy
-            if expectancy > TOP_EXPECTANCY_MIN_EDGE:
-                expectancy_by_bin[key] = expectancy
-                valid_bins.add(key)
+            expectancy_by_bin[key] = expectancy
+            eligible_bins.add(key)
 
         filtered_rows: list[dict[str, object]] = []
         for row in rows:
@@ -2254,8 +2266,8 @@ class App(tk.Tk):
                 continue
             key = (symbol, prox_bin)
             # Only include rows from bins that meet both criteria
-            if key in valid_bins:
-                row["bin_expectancy"] = expectancy_by_bin[key]
+            if key in eligible_bins:
+                row["bin_expectancy"] = expectancy_by_bin.get(key)
                 filtered_rows.append(row)
 
         payload["rows"] = filtered_rows
@@ -2289,6 +2301,8 @@ class App(tk.Tk):
             print(f"[top_apply_result] compute error: {exc}", file=sys.stderr)
             self._top_schedule_next()
             return
+
+        self._top_last_data = processed
 
         try:
             self._top_render(processed)
@@ -2439,11 +2453,6 @@ class App(tk.Tk):
                 if completed > 0
                 else 0.0
             )
-
-            # Skip symbols with negative expectancy (losing symbols)
-            if avg_trade_r <= 0:
-                continue
-
             # Average RRR (15% weight)
             avg_rrr = float(stat.get("sum_rrr_wins", 0.0)) / wins if wins > 0 else 0.0
 
@@ -2500,15 +2509,29 @@ class App(tk.Tk):
             )
 
         # Sort by score and filter by configured thresholds
-        results.sort(key=lambda x: x["score"], reverse=True)
+        results_desc = sorted(results, key=lambda x: x["score"], reverse=True)
         top_results = [
             r
-            for r in results
-            if r.get("score", 0.0) > 0.35 and r.get("expectancy", 0.0) > 0.08
+            for r in results_desc
+            if r.get("score", 0.0) > TOP_SCORE_MIN
+            and r.get("expectancy", 0.0) > TOP_EXPECTANCY_MIN_EDGE
         ]
+        worst_candidates = [
+            r
+            for r in results
+            if r.get("score", 0.0) < WORST_SCORE_MAX
+            and r.get("expectancy", 0.0) < WORST_EXPECTANCY_MAX_EDGE
+        ]
+        worst_results = sorted(worst_candidates, key=lambda x: x["score"])[:25]
+        if not worst_results:
+            fallback = [r for r in results if r.get("score", 0.0) <= 0.0]
+            if not fallback:
+                fallback = [r for r in results if r.get("expectancy", 0.0) < 0.0]
+            worst_results = sorted(fallback, key=lambda x: x["score"])[:25]
 
         return {
             "top_performers": top_results,
+            "worst_performers": list(worst_results),
             "total_symbols": len(symbol_stats),
             "since_hours": hours,
             "min_trades": min_trades_int,
@@ -2519,7 +2542,20 @@ class App(tk.Tk):
         if self.top_status is None:
             return
 
-        top_performers = data.get("top_performers", [])
+        view_value = (self.var_top_view.get() or "Top performers").strip().lower()
+        if view_value.startswith("worst"):
+            performers = data.get("worst_performers", [])
+            label = "Worst"
+            descriptor = "lagging performers"
+            view_kind = "worst"
+        else:
+            performers = data.get("top_performers", [])
+            label = "Top"
+            descriptor = "profitable performers"
+            view_kind = "top"
+
+        if not isinstance(performers, list):
+            performers = list(performers) if performers else []
         total_symbols = data.get("total_symbols", 0)
         since_hours = data.get("since_hours", 0)
         min_trades = data.get("min_trades", 1)
@@ -2527,7 +2563,10 @@ class App(tk.Tk):
 
         # Update status
         try:
-            status_text = f"Top {len(top_performers)} profitable performers from {total_symbols} symbols (last {since_hours}h, min {min_trades} trades, {min_trades_per_bin} trades/bin)"
+            status_text = (
+                f"{label} {len(performers)} {descriptor} from {total_symbols} symbols "
+                f"(last {since_hours}h, min {min_trades} trades, {min_trades_per_bin} trades/bin)"
+            )
             self.top_status.config(text=status_text)
         except Exception:
             pass
@@ -2540,7 +2579,7 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-            for i, performer in enumerate(top_performers, 1):
+            for i, performer in enumerate(performers, 1):
                 try:
                     symbol = performer.get("symbol", "")
                     bins = performer.get("bins") or []
@@ -2570,9 +2609,11 @@ class App(tk.Tk):
 
         # Render chart if matplotlib is available
         if FigureCanvasTkAgg is not None and Figure is not None:
-            self._top_render_chart(data)
+            self._top_render_chart(performers, view_kind)
 
-    def _top_render_chart(self, data: dict[str, object]) -> None:
+    def _top_render_chart(
+        self, performers: list[dict[str, object]], view_kind: str
+    ) -> None:
         if self.top_chart_frame is None:
             return
 
@@ -2586,8 +2627,11 @@ class App(tk.Tk):
         ax = self._top_ax
         ax.clear()
 
-        top_performers = data.get("top_performers", [])
-        if not top_performers:
+        if isinstance(performers, list):
+            performers_list = performers[:10]
+        else:
+            performers_list = list(performers)[:10]
+        if not performers_list:
             ax.text(
                 0.5,
                 0.5,
@@ -2602,9 +2646,9 @@ class App(tk.Tk):
             return
 
         # Prepare data for chart
-        symbols = [p.get("symbol", "") for p in top_performers]
-        scores = [p.get("score", 0.0) for p in top_performers]
-        win_rates = [p.get("win_rate", 0.0) for p in top_performers]
+        symbols = [p.get("symbol", "") for p in performers_list]
+        scores = [float(p.get("score", 0.0) or 0.0) for p in performers_list]
+        win_rates = [float(p.get("win_rate", 0.0) or 0.0) for p in performers_list]
 
         # Create horizontal bar chart
         y_pos = range(len(symbols))
@@ -2612,32 +2656,51 @@ class App(tk.Tk):
 
         # Color bars based on win rate
         for i, (bar, win_rate) in enumerate(zip(bars, win_rates)):
-            if win_rate >= 0.7:
-                bar.set_color("#2ca02c")  # Green for high win rate
-            elif win_rate >= 0.5:
-                bar.set_color("#ff7f0e")  # Orange for medium win rate
+            if view_kind == "worst":
+                bar.set_color("#d62728")  # Red for underperformers
             else:
-                bar.set_color("#d62728")  # Red for low win rate
+                if win_rate >= 0.7:
+                    bar.set_color("#2ca02c")  # Green for high win rate
+                elif win_rate >= 0.5:
+                    bar.set_color("#ff7f0e")  # Orange for medium win rate
+                else:
+                    bar.set_color("#d62728")  # Red for low win rate
 
         ax.set_yticks(y_pos)
         ax.set_yticklabels(symbols)
         ax.set_xlabel("Performance Score")
-        ax.set_title("Top 10 Performing Symbols")
+        if view_kind == "worst":
+            ax.set_title("Worst 10 Performing Symbols")
+        else:
+            ax.set_title("Top 10 Performing Symbols")
         ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+        ax.axvline(0, color="#999999", linewidth=1, linestyle="--", alpha=0.6)
 
         # Add score labels on bars
         for i, (bar, score) in enumerate(zip(bars, scores)):
             width = bar.get_width()
+            if width >= 0:
+                x_text = width + max(abs(width) * 0.05, 0.01)
+                ha = "left"
+            else:
+                x_text = width - max(abs(width) * 0.05, 0.01)
+                ha = "right"
             ax.text(
-                width + 0.01,
+                x_text,
                 bar.get_y() + bar.get_height() / 2,
                 f"{score:.3f}",
-                ha="left",
+                ha=ha,
                 va="center",
                 fontsize=9,
             )
 
-        ax.set_xlim(0, max(scores) * 1.15 if scores else 1.0)
+        if view_kind == "worst":
+            min_score = min(scores) if scores else -1.0
+            if min_score >= 0:
+                min_score = -1.0
+            ax.set_xlim(min_score * 1.15, 0)
+        else:
+            ax.set_xlim(0, max(scores) * 1.15 if scores else 1.0)
 
         try:
             if self._top_fig is not None:
@@ -6255,6 +6318,12 @@ class App(tk.Tk):
                 self.var_top_interval.set(top_interval)
             except Exception:
                 pass
+        top_view = data.get("top_view")
+        if isinstance(top_view, str):
+            try:
+                self.var_top_view.set(top_view)
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         data = {
@@ -6335,6 +6404,11 @@ class App(tk.Tk):
                 if self.var_top_interval is not None
                 else 300
             ),
+            "top_view": (
+                self.var_top_view.get()
+                if self.var_top_view is not None
+                else "Top performers"
+            ),
         }
         try:
             with open(self._settings_path(), "w", encoding="utf-8") as f:
@@ -6361,6 +6435,19 @@ class App(tk.Tk):
         except Exception:
             pass
         self._schedule_top_refresh()
+
+    def _on_top_view_changed(self, *args) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        if self._top_last_data is not None:
+            try:
+                self._top_render(self._top_last_data)
+            except Exception:
+                pass
+        else:
+            self._schedule_top_refresh()
 
     def _on_filter_changed(self, *args) -> None:
         """Trigger refresh when filter values change."""

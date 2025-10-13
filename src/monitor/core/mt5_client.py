@@ -522,6 +522,7 @@ def earliest_hit_from_ticks(
     sl: float,
     tp: float,
     server_offset_hours: int,
+    entry_price: Optional[float] = None,
 ) -> Optional[Hit]:
     if ticks is None:
         return None
@@ -536,6 +537,28 @@ def earliest_hit_from_ticks(
         return None
     last_bid: Optional[float] = None
     last_ask: Optional[float] = None
+    adverse_price: Optional[float] = entry_price
+
+    def _calc_drawdown(
+        hit_direction: str,
+        entry: Optional[float],
+        adverse: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        if entry is None or adverse is None:
+            return None, None
+        try:
+            if hit_direction.lower() == "buy":
+                adverse_move = max(0.0, float(entry) - float(adverse))
+                target_span = max(0.0, float(tp) - float(entry))
+            else:
+                adverse_move = max(0.0, float(adverse) - float(entry))
+                target_span = max(0.0, float(entry) - float(tp))
+        except Exception:
+            return None, None
+        if target_span <= 0.0:
+            return adverse_move, None
+        return adverse_move, adverse_move / target_span
+
     for i in range(n):
         tk = ticks[i]
         bid = getattr(tk, "bid", None)
@@ -592,15 +615,65 @@ def earliest_hit_from_ticks(
         if lower_direction == "buy":
             if bid_val is None:
                 continue
+            if adverse_price is None:
+                baseline = entry_price if entry_price is not None else bid_val
+                adverse_price = min(baseline, bid_val)
+            else:
+                adverse_price = min(adverse_price, bid_val)
             if bid_val <= sl:
-                return Hit(kind="SL", time_utc=dt_utc, price=bid_val)
+                adverse_move, drawdown_ratio = _calc_drawdown(
+                    lower_direction, entry_price, adverse_price
+                )
+                return Hit(
+                    kind="SL",
+                    time_utc=dt_utc,
+                    price=bid_val,
+                    adverse_price=adverse_price,
+                    adverse_move=adverse_move,
+                    drawdown_to_target=drawdown_ratio,
+                )
             if bid_val >= tp:
-                return Hit(kind="TP", time_utc=dt_utc, price=bid_val)
+                adverse_move, drawdown_ratio = _calc_drawdown(
+                    lower_direction, entry_price, adverse_price
+                )
+                return Hit(
+                    kind="TP",
+                    time_utc=dt_utc,
+                    price=bid_val,
+                    adverse_price=adverse_price,
+                    adverse_move=adverse_move,
+                    drawdown_to_target=drawdown_ratio,
+                )
         else:
             if ask_val is None:
                 continue
+            if adverse_price is None:
+                baseline = entry_price if entry_price is not None else ask_val
+                adverse_price = max(baseline, ask_val)
+            else:
+                adverse_price = max(adverse_price, ask_val)
             if ask_val >= sl:
-                return Hit(kind="SL", time_utc=dt_utc, price=ask_val)
+                adverse_move, drawdown_ratio = _calc_drawdown(
+                    lower_direction, entry_price, adverse_price
+                )
+                return Hit(
+                    kind="SL",
+                    time_utc=dt_utc,
+                    price=ask_val,
+                    adverse_price=adverse_price,
+                    adverse_move=adverse_move,
+                    drawdown_to_target=drawdown_ratio,
+                )
             if ask_val <= tp:
-                return Hit(kind="TP", time_utc=dt_utc, price=ask_val)
+                adverse_move, drawdown_ratio = _calc_drawdown(
+                    lower_direction, entry_price, adverse_price
+                )
+                return Hit(
+                    kind="TP",
+                    time_utc=dt_utc,
+                    price=ask_val,
+                    adverse_price=adverse_price,
+                    adverse_move=adverse_move,
+                    drawdown_to_target=drawdown_ratio,
+                )
     return None

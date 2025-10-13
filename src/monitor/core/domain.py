@@ -25,6 +25,9 @@ class Hit:
     kind: str  # 'TP' or 'SL'
     time_utc: datetime
     price: float
+    adverse_price: Optional[float] = None
+    adverse_move: Optional[float] = None
+    drawdown_to_target: Optional[float] = None
 
 
 @dataclass

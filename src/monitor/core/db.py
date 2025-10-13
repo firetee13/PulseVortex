@@ -28,10 +28,21 @@ def ensure_hits_table_sqlite(conn) -> None:
                 hit_time_utc3 TEXT,
                 entry_time_utc3 TEXT,
                 entry_price REAL,
+                adverse_price REAL,
+                adverse_move REAL,
+                drawdown_to_target REAL,
                 checked_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
             """
         )
+        cur.execute("PRAGMA table_info(timelapse_hits)")
+        existing_cols = {row[1] for row in cur.fetchall() or []}
+        if "adverse_price" not in existing_cols:
+            cur.execute("ALTER TABLE timelapse_hits ADD COLUMN adverse_price REAL")
+        if "adverse_move" not in existing_cols:
+            cur.execute("ALTER TABLE timelapse_hits ADD COLUMN adverse_move REAL")
+        if "drawdown_to_target" not in existing_cols:
+            cur.execute("ALTER TABLE timelapse_hits ADD COLUMN drawdown_to_target REAL")
 
 
 def backfill_hit_columns_sqlite(conn, setups_table: str, utc3_hours: int = 3) -> None:
@@ -275,6 +286,52 @@ def record_hit_sqlite(
     rounded_hit_price = r(hit.price)
     rounded_entry_price = r(setup.entry_price)
 
+    adverse_price_raw = hit.adverse_price
+    adverse_move = hit.adverse_move
+    drawdown_ratio = hit.drawdown_to_target
+
+    entry_val = None
+    try:
+        entry_val = float(setup.entry_price) if setup.entry_price is not None else None
+    except Exception:
+        entry_val = None
+    adverse_price_val = None
+    try:
+        adverse_price_val = (
+            float(adverse_price_raw) if adverse_price_raw is not None else None
+        )
+    except Exception:
+        adverse_price_val = None
+
+    if entry_val is not None and adverse_price_val is not None:
+        try:
+            if setup.direction.lower() == "buy":
+                computed_move = max(0.0, entry_val - adverse_price_val)
+                target_span = max(0.0, float(setup.tp) - entry_val)
+            else:
+                computed_move = max(0.0, adverse_price_val - entry_val)
+                target_span = max(0.0, entry_val - float(setup.tp))
+        except Exception:
+            computed_move = None
+            target_span = None
+        if computed_move is not None:
+            if adverse_move is None:
+                adverse_move = computed_move
+            if drawdown_ratio is None and target_span is not None and target_span > 0.0:
+                drawdown_ratio = computed_move / target_span
+
+    def r_ratio(value: Optional[float]) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return round(float(value), 6)
+        except Exception:
+            return value
+
+    rounded_adverse_price = r(adverse_price_raw)
+    rounded_adverse_move = r(adverse_move)
+    rounded_drawdown = r_ratio(drawdown_ratio)
+
     if verbose:
         print(
             "[HIT] #{} {} {} -> {} at {:.6f} on {}".format(
@@ -303,9 +360,10 @@ def record_hit_sqlite(
             """
             INSERT INTO timelapse_hits (
                 setup_id, symbol, direction, sl, tp, hit, hit_price,
-                hit_time, hit_time_utc3, entry_time_utc3, entry_price
+                hit_time, hit_time_utc3, entry_time_utc3, entry_price,
+                adverse_price, adverse_move, drawdown_to_target
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(setup_id) DO UPDATE SET
                 sl=excluded.sl,
                 tp=excluded.tp,
@@ -313,6 +371,9 @@ def record_hit_sqlite(
                 hit_time_utc3=excluded.hit_time_utc3,
                 entry_time_utc3=excluded.entry_time_utc3,
                 entry_price=excluded.entry_price,
+                adverse_price=excluded.adverse_price,
+                adverse_move=excluded.adverse_move,
+                drawdown_to_target=excluded.drawdown_to_target,
                 checked_at=CURRENT_TIMESTAMP
             """,
             (
@@ -327,6 +388,9 @@ def record_hit_sqlite(
                 hit_time_utc3,
                 entry_time_utc3,
                 rounded_entry_price,
+                rounded_adverse_price,
+                rounded_adverse_move,
+                rounded_drawdown,
             ),
         )
 

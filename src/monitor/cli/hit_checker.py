@@ -463,6 +463,7 @@ def _evaluate_setup(
                 sl=setup.sl,
                 tp=setup.tp,
                 offset_hours=offset_hours,
+                entry_price=getattr(setup, "entry_price", None),
                 start_utc=active_start,
                 end_utc=active_end,
                 chunk_minutes=chunk_minutes,
@@ -517,6 +518,7 @@ def scan_for_hit_with_chunks(
     start_utc: datetime,
     end_utc: datetime,
     chunk_minutes: Optional[int],
+    entry_price: Optional[float] = None,
     trace: bool = False,
 ) -> Tuple[Optional[Hit], TickFetchStats, int]:
     """Fetch ticks in bounded chunks until hit found or range exhausted."""
@@ -564,7 +566,17 @@ def scan_for_hit_with_chunks(
         total_ticks += stats.total_ticks
         total_pages += stats.pages
         scan_start = perf_counter()
-        candidate = earliest_hit_from_ticks(ticks, direction, sl, tp, offset_hours)
+        hit_kwargs = {}
+        if entry_price is not None:
+            hit_kwargs["entry_price"] = entry_price
+        candidate = earliest_hit_from_ticks(
+            ticks,
+            direction,
+            sl,
+            tp,
+            offset_hours,
+            **hit_kwargs,
+        )
         total_scan_s += perf_counter() - scan_start
         if candidate is not None:
             hit = candidate

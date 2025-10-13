@@ -4,6 +4,7 @@
 [![Code Quality](https://github.com/firetee13/trader/actions/workflows/code-quality.yml/badge.svg)](https://github.com/firetee13/trader/actions/workflows/code-quality.yml)
 [![Issue Automation](https://github.com/firetee13/trader/actions/workflows/issue-automation.yml/badge.svg)](https://github.com/firetee13/trader/actions/workflows/issue-automation.yml)
 [![Dependabot Updates](https://github.com/firetee13/trader/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/firetee13/trader/actions/workflows/dependabot/dependabot-updates)
+[![Scheduled Tasks](https://github.com/firetee13/PulseVortex/actions/workflows/scheduled.yml/badge.svg)](https://github.com/firetee13/PulseVortex/actions/workflows/scheduled.yml)
 [![Coverage: >80%](https://img.shields.io/badge/coverage-%3E80%25-brightgreen)](https://github.com/firetee13/monitor#testing)
 [![Python 3.12](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000)](https://github.com/psf/black)

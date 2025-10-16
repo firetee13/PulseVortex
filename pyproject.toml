@@ -87,11 +87,6 @@ source = ["src"]
 omit = [
     "*/tests/*",
     "*/test_*",
-    "src/monitor/cli/*",
-    "src\\monitor\\cli\\*",
-    "monitor/cli/*",
-    "monitor\\cli\\*",
-    "*/monitor/cli/*",
     "src/monitor/core/mt5_client.py",
     "src\\monitor\\core\\mt5_client.py",
     "*/monitor/core/mt5_client.py",
@@ -102,11 +97,6 @@ omit = [
 
 [tool.coverage.report]
 omit = [
-    "src/monitor/cli/*",
-    "src\\monitor\\cli\\*",
-    "monitor/cli/*",
-    "monitor\\cli\\*",
-    "*/monitor/cli/*",
     "src/monitor/core/mt5_client.py",
     "src\\monitor\\core\\mt5_client.py",
     "*/monitor/core/mt5_client.py",

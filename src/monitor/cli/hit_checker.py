@@ -56,6 +56,7 @@ from monitor.core.mt5_client import (
     get_server_offset_hours,
     get_symbol_info,
     init_mt5,
+    normalize_terminal_path,
     rates_range_utc,
     resolve_symbol,
     shutdown_mt5,
@@ -126,8 +127,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mt5-path",
         dest="mt5_path",
-        default=os.environ.get("MT5_TERMINAL_PATH"),
-        help="Path to terminal64.exe (env: MT5_TERMINAL_PATH)",
+        default=(
+            os.environ.get("TIMELAPSE_MT5_TERMINAL_PATH")
+            or os.environ.get("MT5_TERMINAL_PATH")
+        ),
+        help=(
+            "Path to terminal64.exe "
+            "(env: TIMELAPSE_MT5_TERMINAL_PATH or MT5_TERMINAL_PATH)"
+        ),
     )
     parser.add_argument(
         "--mt5-timeout",
@@ -628,7 +635,7 @@ def run_once(args: argparse.Namespace) -> None:
         t2 = perf_counter()
         try:
             init_mt5(
-                path=getattr(args, "mt5_path", None),
+                path=normalize_terminal_path(getattr(args, "mt5_path", None)),
                 timeout=int(getattr(args, "mt5_timeout", 90)),
                 retries=int(getattr(args, "mt5_retries", 2)),
                 portable=bool(getattr(args, "mt5_portable", False)),

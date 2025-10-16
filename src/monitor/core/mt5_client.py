@@ -114,16 +114,32 @@ def timeframe_from_code(code: str) -> Optional[int]:
         return None
 
 
-def _candidate_terminal_paths(
-    user_hint: Optional[str],
-) -> List[Optional[str]]:
-    """Return candidate terminal64.exe paths to try.
+def normalize_terminal_path(raw: Optional[str]) -> Optional[str]:
+    """Return a cleaned terminal path or None when unusable."""
+    if not raw:
+        return None
+    cleaned = str(raw).strip().strip("\"' ")
+    if not cleaned:
+        return None
+    try:
+        return os.path.normpath(os.path.expanduser(cleaned))
+    except Exception:
+        return cleaned
 
-    Includes None (auto) first.
-    """
-    candidates: List[Optional[str]] = [None]
-    if user_hint:
-        candidates.append(user_hint)
+
+def _candidate_terminal_paths(user_hint: Optional[str]) -> List[Optional[str]]:
+    """Return ordered terminal64.exe paths to try, prioritising overrides."""
+    env_hints = [
+        user_hint,
+        os.environ.get("TIMELAPSE_MT5_TERMINAL_PATH"),
+        os.environ.get("MT5_TERMINAL_PATH"),
+    ]
+    candidates: List[Optional[str]] = []
+    for hint in env_hints:
+        normalized = normalize_terminal_path(hint)
+        if normalized:
+            candidates.append(normalized)
+    candidates.append(None)
     if os.name == "nt":
         pf = os.environ.get("PROGRAMFILES") or r"C:\\Program Files"
         pfx = os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)"

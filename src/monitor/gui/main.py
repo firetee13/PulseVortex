@@ -36,6 +36,8 @@ from typing import Optional, Sequence
 
 from monitor.core.config import db_path_str, default_db_path
 from monitor.core.mt5_client import get_server_offset_hours as _GET_OFFS
+from monitor.core.mt5_client import init_mt5 as _INIT_MT5
+from monitor.core.mt5_client import normalize_terminal_path as _NORMALIZE_MT5_PATH
 from monitor.core.mt5_client import rates_range_utc as _RATES_RANGE
 from monitor.core.mt5_client import resolve_symbol as _RESOLVE
 from monitor.core.mt5_client import timeframe_m1 as _TIMEFRAME_M1
@@ -66,6 +68,10 @@ except Exception:
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+_MT5_PATH_OVERRIDE = _NORMALIZE_MT5_PATH(
+    os.environ.get("TIMELAPSE_MT5_TERMINAL_PATH") or os.environ.get("MT5_TERMINAL_PATH")
+)
 
 
 def _as_float(value: object | None) -> float | None:
@@ -369,14 +375,19 @@ class App(tk.Tk):
         self.log_q: queue.Queue[tuple[str, str]] = queue.Queue()
         self.after(50, self._drain_log)
 
+        setup_cmd = ["monitor-setup", "--watch"]
+        hits_cmd = ["monitor-hits", "--watch", "--interval", "1"]
+        if _MT5_PATH_OVERRIDE:
+            setup_cmd += ["--mt5-path", _MT5_PATH_OVERRIDE]
+            hits_cmd += ["--mt5-path", _MT5_PATH_OVERRIDE]
         self.timelapse = ProcController(
             name="timelapse",
-            cmd=["monitor-setup", "--watch"],
+            cmd=setup_cmd,
             log_put=self._enqueue_log,
         )
         self.hits = ProcController(
             name="hits",
-            cmd=["monitor-hits", "--watch", "--interval", "1"],
+            cmd=hits_cmd,
             log_put=self._enqueue_log,
         )
 
@@ -5287,8 +5298,27 @@ class App(tk.Tk):
         try:
             # If not initialized, initialize now
             if not self._mt5_inited:
-                if not mt5.initialize():
-                    return False, f"mt5.initialize failed: {mt5.last_error()}"
+                timeout_env = os.environ.get(
+                    "TIMELAPSE_MT5_TIMEOUT", os.environ.get("MT5_TIMEOUT", "30")
+                )
+                retries_env = os.environ.get(
+                    "TIMELAPSE_MT5_RETRIES", os.environ.get("MT5_RETRIES", "1")
+                )
+                portable = str(os.environ.get("MT5_PORTABLE", "0")).strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                try:
+                    _INIT_MT5(
+                        path=_MT5_PATH_OVERRIDE,
+                        timeout=int(timeout_env),
+                        retries=int(retries_env),
+                        portable=portable,
+                    )
+                except RuntimeError as exc:
+                    return False, f"MT5 init error: {exc}"
                 self._mt5_inited = True
         except Exception as e:
             return False, f"MT5 init error: {e}"
@@ -6054,6 +6084,8 @@ class App(tk.Tk):
     def _start_timelapse(self) -> None:
         # Build command dynamically to include exclude list and prox sl if provided
         cmd = ["monitor-setup", "--watch"]
+        if _MT5_PATH_OVERRIDE:
+            cmd += ["--mt5-path", _MT5_PATH_OVERRIDE]
         try:
             ex = (self.var_exclude_symbols.get() or "").strip()
         except Exception:

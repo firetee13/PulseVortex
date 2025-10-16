@@ -115,6 +115,11 @@ HEADER_SYMBOL = "symbol"
 # Cache for canonicalized keys to speed up repeated lookups
 CANONICAL_KEYS: Dict[str, str] = {}
 
+# Optional override for MT5 terminal path (CLI/env)
+_MT5_PATH_OVERRIDE: Optional[str] = mt5_client.normalize_terminal_path(
+    os.environ.get("TIMELAPSE_MT5_TERMINAL_PATH") or os.environ.get("MT5_TERMINAL_PATH")
+)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -154,6 +159,18 @@ def parse_args() -> argparse.Namespace:
         "--exclude",
         default="",
         help=("Comma-separated symbols to exclude (e.g., GLMUSD,BCHUSD)"),
+    )
+    p.add_argument(
+        "--mt5-path",
+        default=(
+            os.environ.get("TIMELAPSE_MT5_TERMINAL_PATH")
+            or os.environ.get("MT5_TERMINAL_PATH")
+            or ""
+        ),
+        help=(
+            "Explicit terminal64.exe path (overrides autodiscovery). "
+            "Defaults to TIMELAPSE_MT5_TERMINAL_PATH/MT5_TERMINAL_PATH when set."
+        ),
     )
     return p.parse_args()
 
@@ -316,7 +333,12 @@ def _mt5_ensure_init() -> bool:
         "on",
     }
     try:
-        mt5_client.init_mt5(timeout=timeout, retries=retries, portable=portable)
+        mt5_client.init_mt5(
+            path=_MT5_PATH_OVERRIDE,
+            timeout=timeout,
+            retries=retries,
+            portable=portable,
+        )
         global mt5
         mt5 = mt5_client.mt5
         _MT5_READY = True
@@ -1691,6 +1713,16 @@ def insert_results_to_db(
 
 def main() -> None:
     args = parse_args()
+    global _MT5_PATH_OVERRIDE
+    try:
+        override_raw = getattr(args, "mt5_path", None)
+    except Exception:
+        override_raw = None
+    override_clean = mt5_client.normalize_terminal_path(override_raw)
+    if override_clean:
+        _MT5_PATH_OVERRIDE = override_clean
+    elif not _MT5_PATH_OVERRIDE:
+        _MT5_PATH_OVERRIDE = None
     # Normalize exclude list to uppercase symbols set
     exclude_set: Optional[Set[str]] = None
     try:

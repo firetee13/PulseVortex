@@ -34,10 +34,12 @@ def test_candidate_terminal_paths_deduplicates(monkeypatch, tmp_path):
         lambda path: path in {fake_paths[0], fake_paths[1]},
     )
 
-    result = mt5_client._candidate_terminal_paths("C:\\Custom\\terminal64.exe")
+    custom_path = "C:\\Custom\\terminal64.exe"
+    result = mt5_client._candidate_terminal_paths(custom_path)
 
-    assert result[0] is None  # auto probe first
-    assert "C:\\Custom\\terminal64.exe" in result
+    # Explicit hints take priority before auto-probing
+    assert result[0] == mt5_client.normalize_terminal_path(custom_path)
+    assert None in result  # auto discovery remains available
     # ensure discovered paths are deduplicated but preserved
     assert [fake_paths[0], fake_paths[1]] == [p for p in result if p in fake_paths]
 

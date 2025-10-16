@@ -127,7 +127,7 @@ Supports automated setup detection, real-time TP/SL hit monitoring, database per
 
 ## Installation
 
-1. **Clone/Download** repository to `c:/monitor_prod` (or your workspace)
+1. **Clone/Download** repository to `c:/PulseVortex` (or your workspace)
 2. **Install Dependencies**:
    ```bash
    # Install the package in editable mode with development dependencies
@@ -542,7 +542,7 @@ graph TD
 - **Matplotlib Backend**: Set `matplotlib.use('TkAgg')` if using non-interactive mode. Install: `pip install matplotlib[tk]`.
 - **Package Not Installed**: The VBS script requires the package to be installed: `pip install -e .`. If CLI commands like `monitor-gui --help` work, the package is installed correctly.
 - **Resource Limits**: Close other MT5/Python processes; GUI polls DB/MT5—reduce symbols or increase intervals in settings.
-- **Permissions**: Run as admin if DB in protected folder (e.g., Program Files); move project to user dir like `C:\Users\YourName\monitor_prod`.
+- **Permissions**: Run as admin if DB in protected folder (e.g., Program Files); move project to user dir like `C:\Users\YourName\PulseVortex`.
 - **Quiet Hours**: GUI charts pause during quiet periods—check status bar for "Paused: Quiet Hours".
 
 #### Chart Rendering Errors
@@ -647,7 +647,7 @@ monitor-hits --verbose --trace-pages
 This project follows modern Python packaging best practices with a `src/` layout:
 
 ```
-monitor_prod/
+PulseVortex/
 ├── src/
 │   └── monitor/
 │       ├── __init__.py           # Package initialization

@@ -156,7 +156,7 @@ jobs:
     name: Database Backup Check
     runs-on: windows-latest
     # Only run if this is the main repository (not forks)
-    if: github.repository == 'firetee13/monitor_prod'
+    if: github.repository == 'firetee13/PulseVortex'
     steps:
     - name: Check if backup workflow exists
       run: |

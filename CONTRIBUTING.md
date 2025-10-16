@@ -15,8 +15,8 @@ Thank you for your interest in contributing to PulseVortex Monitor! This guide w
 
 1. **Fork and Clone**
    ```bash
-   git clone https://github.com/yourusername/monitor_prod.git
-   cd monitor_prod
+   git clone https://github.com/yourusername/PulseVortex.git
+   cd PulseVortex
    ```
 
 2. **Create Virtual Environment**
@@ -40,7 +40,7 @@ Thank you for your interest in contributing to PulseVortex Monitor! This guide w
 ## 🏗️ Project Structure
 
 ```
-monitor_prod/
+PulseVortex/
 ├── src/monitor/          # Main package
 │   ├── cli/             # Command-line interfaces
 │   ├── gui/             # GUI application

@@ -126,6 +126,7 @@ TOP_SCORE_MIN = 0.35
 WORST_EXPECTANCY_MAX_EDGE = -TOP_EXPECTANCY_MIN_EDGE
 WORST_SCORE_MAX = -0.1
 PNL_EXPECTANCY_MIN_EDGE = 0.10
+PROX_SYMBOL_ALL_LABEL = "(All symbols)"
 
 
 class ProcController:
@@ -286,6 +287,7 @@ class App(tk.Tk):
         self.var_prox_since_hours = tk.IntVar(value=336)
         self.var_prox_min_trades = tk.IntVar(value=5)
         self.var_prox_symbol_filter = tk.StringVar(value="")
+        self.var_prox_symbol_choice = tk.StringVar(value=PROX_SYMBOL_ALL_LABEL)
         self.var_prox_category = tk.StringVar(value="All")
         self.var_prox_auto = tk.BooleanVar(value=False)
         self.var_prox_interval = tk.IntVar(value=300)
@@ -306,6 +308,10 @@ class App(tk.Tk):
             self._load_settings()
         except Exception:
             pass
+        try:
+            self._sync_prox_symbol_choice_from_filter()
+        except Exception:
+            pass
         # Persist on any change
         try:
             self.var_exclude_symbols.trace_add("write", self._on_exclude_changed)
@@ -313,7 +319,10 @@ class App(tk.Tk):
             self.var_prox_symbol_filter.trace_add(
                 "write", self._on_prox_setting_changed
             )
-            self.var_prox_category.trace_add("write", self._on_prox_setting_changed)
+            self.var_prox_symbol_choice.trace_add(
+                "write", self._on_prox_symbol_choice_changed
+            )
+            self.var_prox_category.trace_add("write", self._on_prox_category_changed)
             self.var_prox_min_trades.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_since_hours.trace_add("write", self._on_prox_setting_changed)
             self.var_prox_interval.trace_add("write", self._on_prox_setting_changed)
@@ -699,6 +708,7 @@ class App(tk.Tk):
         self._prox_toolbar = None
         self.prox_status = None
         self.prox_table = None
+        self.prox_symbol_combo = None
         self.prox_chart_frame = None
         self._prox_loading = False
         self._prox_auto_job: str | None = None
@@ -896,9 +906,24 @@ class App(tk.Tk):
             width=10,
         ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(row2, text="Symbol:").pack(side=tk.LEFT)
-        ttk.Entry(row2, textvariable=self.var_prox_symbol_filter, width=14).pack(
-            side=tk.LEFT, padx=(4, 10)
+        self.prox_symbol_combo = ttk.Combobox(
+            row2,
+            textvariable=self.var_prox_symbol_choice,
+            values=[PROX_SYMBOL_ALL_LABEL],
+            state="readonly",
+            width=16,
         )
+        self.prox_symbol_combo.pack(side=tk.LEFT, padx=(4, 10))
+        try:
+            initial_symbol = (
+                self.var_prox_symbol_filter.get().strip()
+                if self.var_prox_symbol_filter is not None
+                else ""
+            )
+            symbols_for_init = [initial_symbol] if initial_symbol else []
+            self._prox_update_symbol_dropdown(symbols_for_init)
+        except Exception:
+            pass
 
         chart_wrap = ttk.Frame(parent)
         chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -1013,6 +1038,109 @@ class App(tk.Tk):
                     pass
                 self._prox_auto_job = None
 
+    def _prox_update_symbol_dropdown(self, symbols: Sequence[str] | None) -> None:
+        if self.prox_symbol_combo is None:
+            return
+        clean_symbols: list[str] = []
+        seen = set()
+        if symbols:
+            for sym in symbols:
+                if not isinstance(sym, str):
+                    continue
+                sym_s = sym.strip()
+                if not sym_s or sym_s in seen:
+                    continue
+                seen.add(sym_s)
+                clean_symbols.append(sym_s)
+        try:
+            clean_symbols.sort()
+        except Exception:
+            clean_symbols = list(clean_symbols)
+
+        current_filter = ""
+        if self.var_prox_symbol_filter is not None:
+            try:
+                current_filter = self.var_prox_symbol_filter.get().strip()
+            except Exception:
+                current_filter = ""
+        preserve_current = bool(current_filter and not clean_symbols)
+        if preserve_current and current_filter not in clean_symbols:
+            clean_symbols.append(current_filter)
+            try:
+                clean_symbols.sort()
+            except Exception:
+                pass
+        values = [PROX_SYMBOL_ALL_LABEL] + clean_symbols
+        try:
+            self.prox_symbol_combo.configure(values=values)
+        except Exception:
+            return
+
+        display_value = PROX_SYMBOL_ALL_LABEL if not current_filter else current_filter
+        if display_value not in values:
+            display_value = PROX_SYMBOL_ALL_LABEL
+        if self.var_prox_symbol_choice.get() != display_value:
+            self.var_prox_symbol_choice.set(display_value)
+        else:
+            try:
+                self.prox_symbol_combo.set(display_value)
+            except Exception:
+                pass
+        if display_value == PROX_SYMBOL_ALL_LABEL and current_filter:
+            if self.var_prox_symbol_filter is not None:
+                try:
+                    self.var_prox_symbol_filter.set("")
+                except Exception:
+                    pass
+
+    def _sync_prox_symbol_choice_from_filter(self) -> None:
+        current_filter = ""
+        if self.var_prox_symbol_filter is not None:
+            try:
+                current_filter = self.var_prox_symbol_filter.get().strip()
+            except Exception:
+                current_filter = ""
+        display_value = PROX_SYMBOL_ALL_LABEL if not current_filter else current_filter
+        if self.var_prox_symbol_choice.get() != display_value:
+            self.var_prox_symbol_choice.set(display_value)
+        elif self.prox_symbol_combo is not None:
+            try:
+                self.prox_symbol_combo.set(display_value)
+            except Exception:
+                pass
+
+    def _on_prox_symbol_choice_changed(self, *args) -> None:
+        if self.var_prox_symbol_filter is None:
+            return
+        choice = self.var_prox_symbol_choice.get().strip()
+        actual = "" if choice == PROX_SYMBOL_ALL_LABEL else choice
+        try:
+            current = self.var_prox_symbol_filter.get()
+        except Exception:
+            current = ""
+        if current == actual:
+            return
+        try:
+            self.var_prox_symbol_filter.set(actual)
+        except Exception:
+            pass
+
+    def _on_prox_category_changed(self, *args) -> None:
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        if self.var_prox_symbol_filter is not None:
+            try:
+                self.var_prox_symbol_filter.set("")
+            except Exception:
+                pass
+        try:
+            self._sync_prox_symbol_choice_from_filter()
+        except Exception:
+            pass
+        self._schedule_prox_refresh()
+
     def _prox_schedule_next(self, soon: bool = False) -> None:
         if not self.var_prox_auto.get():
             return
@@ -1065,6 +1193,7 @@ class App(tk.Tk):
         }
         rows: list[dict[str, object]] = []
         max_prox = 0.0
+        available_symbols: set[str] = set()
 
         try:
             try:
@@ -1108,10 +1237,12 @@ class App(tk.Tk):
                     max_prox = 0.0
                     for sym, prox_raw, rrr_raw, hit, hit_time in raw_rows:
                         sym_s = str(sym) if sym is not None else ""
-                        if symbol_filter and symbol_filter.upper() not in sym_s.upper():
-                            continue
                         category = self._classify_symbol(sym_s).title()
                         if category_filter != "All" and category != category_filter:
+                            continue
+                        if sym_s:
+                            available_symbols.add(sym_s)
+                        if symbol_filter and symbol_filter.upper() not in sym_s.upper():
                             continue
                         if prox_raw is None:
                             continue
@@ -1154,6 +1285,7 @@ class App(tk.Tk):
         payload["rows"] = rows
         payload["max_prox"] = max_prox
         payload["category_filter_used"] = category_filter
+        payload["symbol_options"] = sorted(available_symbols)
 
         self.after(0, lambda: self._prox_apply_result(payload))
 
@@ -1168,6 +1300,12 @@ class App(tk.Tk):
                     pass
             self._prox_schedule_next()
             return
+        symbol_options = payload.get("symbol_options")
+        if isinstance(symbol_options, (list, tuple)):
+            try:
+                self._prox_update_symbol_dropdown(list(symbol_options))
+            except Exception:
+                pass
         rows = payload.get("rows")
         if not isinstance(rows, list):
             rows = []

@@ -32,7 +32,7 @@ import tkinter as tk
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from tkinter import ttk
-from typing import Optional, Sequence
+from typing import Sequence
 
 from monitor.core.config import db_path_str, default_db_path
 from monitor.core.mt5_client import get_server_offset_hours as _GET_OFFS
@@ -120,12 +120,10 @@ DISPLAY_TZ = timezone(timedelta(hours=3))  # UTC+3 for chart display
 QUIET_CHART_MESSAGE = (
     "Charts paused during quiet hours (23:45-00:59 UTC+3; weekends for non-crypto)."
 )
-PNL_EXPECTANCY_MIN_COMPLETED = 20
 TOP_EXPECTANCY_MIN_EDGE = 0.05
 TOP_SCORE_MIN = 0.35
 WORST_EXPECTANCY_MAX_EDGE = -TOP_EXPECTANCY_MIN_EDGE
 WORST_SCORE_MAX = -0.1
-PNL_EXPECTANCY_MIN_EDGE = 0.10
 PROX_SYMBOL_ALL_LABEL = "(All symbols)"
 
 
@@ -261,12 +259,6 @@ class App(tk.Tk):
         self.tab_prox = ttk.Frame(self.nb)
         self.nb.add(self.tab_prox, text="SL Proximity")
 
-        self.tab_pnl = ttk.Frame(self.nb)
-        self.nb.add(self.tab_pnl, text="PnL")
-
-        self.tab_pnl_norm = ttk.Frame(self.nb)
-        self.nb.add(self.tab_pnl_norm, text="PnL (Normalized)")
-
         self.tab_top = ttk.Frame(self.nb)
         self.nb.add(self.tab_top, text="Top Performers")
 
@@ -291,15 +283,9 @@ class App(tk.Tk):
         self.var_prox_category = tk.StringVar(value="All")
         self.var_prox_auto = tk.BooleanVar(value=False)
         self.var_prox_interval = tk.IntVar(value=300)
-        # Normalized PnL tab variables
-        self.var_pnl_norm_since_hours = tk.IntVar(value=168)
-        self.var_pnl_norm_mode = tk.StringVar(value="risk_units")
-        self.var_pnl_norm_category = tk.StringVar(value="overall")
-        self.var_pnl_norm_bin = tk.StringVar(value="All")
         # Top Performers tab variables
         self.var_top_since_hours = tk.IntVar(value=168)
         self.var_top_min_trades = tk.IntVar(value=10)
-        self.var_top_min_trades_per_bin = tk.IntVar(value=3)
         self.var_top_view = tk.StringVar(value="Top performers")
         self.var_top_auto = tk.BooleanVar(value=True)
         self.var_top_interval = tk.IntVar(value=300)
@@ -329,9 +315,6 @@ class App(tk.Tk):
             # Top Performers settings
             self.var_top_since_hours.trace_add("write", self._on_top_setting_changed)
             self.var_top_min_trades.trace_add("write", self._on_top_setting_changed)
-            self.var_top_min_trades_per_bin.trace_add(
-                "write", self._on_top_setting_changed
-            )
             self.var_top_interval.trace_add("write", self._on_top_setting_changed)
             self.var_top_view.trace_add("write", self._on_top_view_changed)
         except Exception:
@@ -348,9 +331,6 @@ class App(tk.Tk):
         self._make_db_tab(self.tab_db)
         # UI elements in SL proximity tab
         self._make_prox_tab(self.tab_prox)
-        # UI elements in PnL tab
-        self._make_pnl_tab(self.tab_pnl)
-        self._make_pnl_norm_tab(self.tab_pnl_norm)
         # UI elements in Top Performers tab
         self._make_top_tab(self.tab_top)
         # Ensure DB results refresh once at startup and auto-refresh is active
@@ -359,16 +339,6 @@ class App(tk.Tk):
         except Exception:
             pass
         self._db_refresh()
-        # Also refresh PnL once at startup
-        try:
-            self._pnl_refresh()
-        except Exception:
-            pass
-        # Prime normalized PnL view
-        try:
-            self._pnl_norm_refresh()
-        except Exception:
-            pass
         # Prime proximity stats view
         try:
             self._prox_refresh()
@@ -713,51 +683,6 @@ class App(tk.Tk):
         self._prox_loading = False
         self._prox_auto_job: str | None = None
         self._prox_refresh_job: str | None = None
-        # PnL chart state
-        self._pnl_fig = None
-        self._pnl_ax = None
-        self._pnl_canvas = None
-        self._pnl_toolbar = None
-        self._pnl_loading = False
-        self.pnl_status = None
-        self._pnl_positive_bins: dict[str, set[str]] = {}
-        self._pnl_filter_counts: tuple[int, int] | None = None
-        self.pnl_chart_frame = None
-        # Normalized PnL chart state
-        self._pnl_norm_fig = None
-        self._pnl_norm_ax = None
-        self._pnl_norm_canvas = None
-        self._pnl_norm_toolbar = None
-        self._pnl_norm_loading = False
-        self.pnl_norm_status = None
-        self.pnl_norm_chart_frame = None
-        self._pnl_norm_data: dict[str, object] | None = None
-        # Second PnL (10k notional) chart state
-        self._pnl2_fig = None
-        self._pnl2_ax = None
-        self._pnl2_canvas = None
-        self._pnl2_toolbar = None
-        self.pnl2_status = None
-        self.pnl2_chart_frame = None
-        # Category PnL (10k notional) chart states
-        self._fx_fig = None
-        self._fx_ax = None
-        self._fx_canvas = None
-        self._fx_toolbar = None
-        self._crypto_fig = None
-        self._crypto_ax = None
-        self._crypto_canvas = None
-        self._crypto_toolbar = None
-        self._indices_fig = None
-        self._indices_ax = None
-        self._indices_canvas = None
-        self._indices_toolbar = None
-        self.pnl_fx_status = None
-        self.pnl_fx_chart_frame = None
-        self.pnl_crypto_status = None
-        self.pnl_crypto_chart_frame = None
-        self.pnl_indices_status = None
-        self.pnl_indices_chart_frame = None
         # Filter refresh job
         self._filter_refresh_job = None
         # Top Performers state
@@ -778,96 +703,6 @@ class App(tk.Tk):
             self.after(30000, self._chart_quiet_guard)
         except Exception:
             pass
-
-        # PnL helper methods moved to class level (avoids nested defs in __init__)
-
-        def _pnl_render_draw(self, times, returns, cum, avg) -> None:
-            """Draw the PnL chart on the PnL axes."""
-            if FigureCanvasTkAgg is None or Figure is None:
-                try:
-                    if self.pnl_status is not None:
-                        self.pnl_status.config(
-                            text="Matplotlib not available; cannot render PnL."
-                        )
-                except Exception:
-                    pass
-                return
-            if self._pnl_ax is None or self._pnl_canvas is None:
-                self._init_pnl_chart_widgets()
-            ax = self._pnl_ax
-            ax.clear()
-            ax.grid(True, which="both", linestyle="--", alpha=0.3)
-
-            try:
-                times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
-            except Exception:
-                times_disp = [t + timedelta(hours=3) for t in times]
-
-            # Plot cumulative and avg
-            try:
-                ax.plot(
-                    times_disp,
-                    cum,
-                    color="#1f77b4",
-                    linewidth=2,
-                    label="Cumulative PnL (sum of +RRR/-1)",
-                )
-                ax.plot(
-                    times_disp,
-                    avg,
-                    color="#ff7f0e",
-                    linewidth=1.5,
-                    linestyle="--",
-                    label="Avg PnL per trade",
-                )
-            except Exception:
-                pass
-
-            # scatter markers for wins/losses
-            try:
-                wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
-                wins_y = [cum[i] for i, v in enumerate(returns) if v > 0]
-                losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
-                losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
-                if wins_x:
-                    ax.scatter(
-                        wins_x, wins_y, color="green", marker="^", s=40, label="TP"
-                    )
-                if losses_x:
-                    ax.scatter(
-                        losses_x, losses_y, color="red", marker="v", s=40, label="SL"
-                    )
-            except Exception:
-                pass
-
-            # Formatter
-            try:
-                locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-                formatter = mdates.ConciseDateFormatter(
-                    locator, tz=DISPLAY_TZ, show_offset=False
-                )
-                ax.xaxis.set_major_locator(locator)
-                ax.xaxis.set_major_formatter(formatter)
-            except Exception:
-                pass
-
-            try:
-                ax.legend(loc="upper left")
-            except Exception:
-                pass
-            try:
-                if self._pnl_fig is not None:
-                    self._pnl_fig.tight_layout()
-                self._pnl_canvas.draw_idle()
-            except Exception:
-                pass
-            try:
-                if self.pnl_status is not None:
-                    self.pnl_status.config(
-                        text=f"Rendered PnL: {len(times)} trades, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}"
-                    )
-            except Exception:
-                pass
 
     def _make_prox_tab(self, parent) -> None:
         top = ttk.Frame(parent)
@@ -2114,10 +1949,6 @@ class App(tk.Tk):
         ttk.Spinbox(
             row1, from_=1, to=500, textvariable=self.var_top_min_trades, width=4
         ).pack(side=tk.LEFT, padx=(4, 10))
-        ttk.Label(row1, text="Min trades/bin:").pack(side=tk.LEFT)
-        ttk.Spinbox(
-            row1, from_=1, to=50, textvariable=self.var_top_min_trades_per_bin, width=4
-        ).pack(side=tk.LEFT, padx=(4, 10))
         ttk.Label(row1, text="View:").pack(side=tk.LEFT)
         ttk.Combobox(
             row1,
@@ -2158,7 +1989,7 @@ class App(tk.Tk):
         headings = {
             "rank": "Rank",
             "symbol": "Symbol",
-            "bins": "Bins",
+            "bins": "Bin",
             "trades": "Trades",
             "win_rate": "Win %",
             "expectancy": "Edge (R)",
@@ -2250,13 +2081,11 @@ class App(tk.Tk):
         dbname = self.var_db_name.get().strip()
         hours = max(1, int(self.var_top_since_hours.get()))
         min_trades = max(1, int(self.var_top_min_trades.get()))
-        min_trades_per_bin = max(1, int(self.var_top_min_trades_per_bin.get()))
 
         payload: dict[str, object] = {
             "error": None,
             "since_hours": hours,
             "min_trades": min_trades,
-            "min_trades_per_bin": min_trades_per_bin,
         }
         rows: list[dict[str, object]] = []
 
@@ -2394,14 +2223,9 @@ class App(tk.Tk):
 
         expectancy_by_bin: dict[tuple[str, str], float] = {}
         eligible_bins: set[tuple[str, str]] = set()
-        min_trades_per_bin = payload.get("min_trades_per_bin", 1)
-
         for key, agg in bin_totals.items():
             count = agg.get("count", 0.0) or 0.0
             if count <= 0.0:
-                continue
-            # Apply minimum trades per bin filter
-            if count < min_trades_per_bin:
                 continue
             expectancy = agg.get("sum", 0.0) / count
             expectancy_by_bin[key] = expectancy
@@ -2477,142 +2301,102 @@ class App(tk.Tk):
     ) -> dict[str, object]:
         hours = payload.get("since_hours", 0)
         min_trades = payload.get("min_trades", 1)
-        min_trades_per_bin = payload.get("min_trades_per_bin", 1)
         try:
             min_trades_int = max(1, int(min_trades))
-            min_trades_per_bin_int = max(1, int(min_trades_per_bin))
         except Exception:
             min_trades_int = 1
-            min_trades_per_bin_int = 1
 
-        symbol_stats: dict[str, dict[str, object]] = {}
         bin_stats: dict[tuple[str, str], dict[str, object]] = {}
+        unique_symbols: set[str] = set()
 
         for row in rows:
-            symbol = str(row.get("symbol") or "")
+            symbol = str(row.get("symbol") or "").strip()
+            prox_bin = str(row.get("proximity_bin") or "").strip()
+            if not symbol or not prox_bin:
+                continue
+            unique_symbols.add(symbol)
+
             outcome = row.get("outcome")
             rrr_val = row.get("rrr")
             trade_r = row.get("trade_r")
             inserted_at = row.get("inserted_at")
             hit_time = row.get("hit_time")
-            prox_bin = row.get("proximity_bin")
 
-            # Use hit_time for completed trades, inserted_at for pending trades
             event_time = hit_time if hit_time else inserted_at
+            key = (symbol, prox_bin)
 
-            stat = symbol_stats.setdefault(
-                symbol,
+            stat = bin_stats.setdefault(
+                key,
                 {
                     "symbol": symbol,
+                    "bin": prox_bin,
                     "trades": 0,
                     "completed": 0,
                     "wins": 0,
                     "losses": 0,
                     "sum_rrr_wins": 0.0,
                     "sum_trade_r": 0.0,
-                    "recent_trades": [],  # For recency weighting
-                    "bins": set(),
+                    "recent_trades": [],
+                    "bin_expectancy": None,
                 },
             )
 
-            stat["trades"] = int(stat["trades"]) + 1
-            try:
-                if prox_bin:
-                    stat_bins = stat.get("bins")
-                    if isinstance(stat_bins, set):
-                        stat_bins.add(str(prox_bin))
-            except Exception:
-                pass
+            stat["trades"] = int(stat.get("trades", 0)) + 1
 
-            # Track per-bin statistics for filtering
-            if prox_bin:
-                bin_key = (symbol, str(prox_bin))
-                bin_stat = bin_stats.setdefault(
-                    bin_key,
-                    {
-                        "symbol": symbol,
-                        "bin": str(prox_bin),
-                        "trades": 0,
-                        "completed": 0,
-                        "wins": 0,
-                        "losses": 0,
-                        "sum_trade_r": 0.0,
-                    },
-                )
-                bin_stat["trades"] += 1
-
-                if outcome in ["win", "loss"]:
-                    bin_stat["completed"] += 1
-                    if outcome == "win":
-                        bin_stat["wins"] += 1
-                    else:
-                        bin_stat["losses"] += 1
-
-                    if trade_r is not None:
-                        bin_stat["sum_trade_r"] += float(trade_r)
-
-            # Add to recent trades for recency calculation
             if event_time:
                 stat["recent_trades"].append(
                     {"time": event_time, "outcome": outcome, "trade_r": trade_r}
                 )
 
             if outcome in ["win", "loss"]:
-                stat["completed"] = int(stat["completed"]) + 1
+                stat["completed"] = int(stat.get("completed", 0)) + 1
                 if outcome == "win":
-                    stat["wins"] = int(stat["wins"]) + 1
-                    if rrr_val is not None:
-                        stat["sum_rrr_wins"] = (
-                            float(stat.get("sum_rrr_wins", 0.0)) + rrr_val
-                        )
+                    stat["wins"] = int(stat.get("wins", 0)) + 1
                 else:
-                    stat["losses"] = int(stat["losses"]) + 1
+                    stat["losses"] = int(stat.get("losses", 0)) + 1
 
                 if trade_r is not None:
-                    stat["sum_trade_r"] = float(stat.get("sum_trade_r", 0.0)) + trade_r
+                    try:
+                        stat["sum_trade_r"] = float(
+                            stat.get("sum_trade_r", 0.0)
+                        ) + float(trade_r)
+                    except Exception:
+                        pass
 
-        # Filter bins by minimum trades per bin requirement
-        valid_bins_by_symbol: dict[str, set[str]] = {}
-        for (symbol, bin_name), bin_stat in bin_stats.items():
-            if bin_stat["completed"] >= min_trades_per_bin_int:
-                if symbol not in valid_bins_by_symbol:
-                    valid_bins_by_symbol[symbol] = set()
-                valid_bins_by_symbol[symbol].add(bin_name)
+                if outcome == "win" and rrr_val is not None:
+                    try:
+                        stat["sum_rrr_wins"] = float(
+                            stat.get("sum_rrr_wins", 0.0)
+                        ) + float(rrr_val)
+                    except Exception:
+                        pass
 
-        # Calculate metrics and scores for each symbol
-        results = []
+            if stat.get("bin_expectancy") is None:
+                bin_exp = row.get("bin_expectancy")
+                if isinstance(bin_exp, (int, float)):
+                    stat["bin_expectancy"] = float(bin_exp)
+
         now = datetime.now(timezone.utc)
+        results: list[dict[str, object]] = []
+        eligible_bins = 0
 
-        for symbol, stat in symbol_stats.items():
-            # Skip symbols that have no bins meeting the minimum trades per bin requirement
-            if symbol not in valid_bins_by_symbol:
-                continue
-            completed = int(stat["completed"])
-            wins = int(stat["wins"])
-
+        for (symbol, bin_name), stat in bin_stats.items():
+            completed = int(stat.get("completed", 0))
             if completed < min_trades_int:
                 continue
+            eligible_bins += 1
+            wins = int(stat.get("wins", 0))
 
-            # Win Rate (40% weight)
             win_rate = wins / completed if completed > 0 else 0.0
+            sum_trade_r = float(stat.get("sum_trade_r", 0.0) or 0.0)
+            avg_trade_r = sum_trade_r / completed if completed > 0 else 0.0
+            sum_rrr_wins = float(stat.get("sum_rrr_wins", 0.0) or 0.0)
+            avg_rrr = sum_rrr_wins / wins if wins > 0 else 0.0
 
-            # Expectancy (30% weight) - average R multiple per trade
-            avg_trade_r = (
-                float(stat.get("sum_trade_r", 0.0)) / completed
-                if completed > 0
-                else 0.0
-            )
-            # Average RRR (15% weight)
-            avg_rrr = float(stat.get("sum_rrr_wins", 0.0)) / wins if wins > 0 else 0.0
+            frequency_factor = min(1.0, completed / 50.0)
 
-            # Trade Frequency Factor (10% weight) - more trades = more reliable
-            frequency_factor = min(
-                1.0, completed / 50.0
-            )  # Normalize to max at 50 trades
-
-            # Recency Factor (5% weight) - recent performance weighted higher
             recency_factor = 0.0
-            recent_trades = stat.get("recent_trades", [])
+            recent_trades = stat.get("recent_trades") or []
             if recent_trades:
                 recent_weight = 0.0
                 recent_score = 0.0
@@ -2627,37 +2411,41 @@ class App(tk.Tk):
                             trade_dt = trade_time
 
                         days_ago = (now - trade_dt).days
-                        if days_ago <= 30:  # Only consider last 30 days
-                            weight = 1.0 - (days_ago / 30.0)  # Linear decay
+                        if days_ago <= 30:
+                            weight = 1.0 - (days_ago / 30.0)
                             recent_weight += weight
-
-                            # Score recent performance (wins=1, losses=0)
-                            recent_score += weight if trade["outcome"] == "win" else 0
+                            recent_score += weight if trade["outcome"] == "win" else 0.0
                     except Exception:
                         continue
 
                 if recent_weight > 0:
                     recency_factor = recent_score / recent_weight
 
-            # Confidence-adjusted score emphasising stable performers
             confidence_boost = math.log1p(completed)
             score = avg_trade_r * (1.0 + confidence_boost) + 0.1 * recency_factor
+
+            bin_expectancy = stat.get("bin_expectancy")
+            if isinstance(bin_expectancy, (int, float)):
+                expectancy_val = float(bin_expectancy)
+            else:
+                expectancy_val = avg_trade_r
 
             results.append(
                 {
                     "symbol": symbol,
+                    "bin": bin_name,
+                    "bin_label": bin_name,
                     "trades": completed,
                     "win_rate": win_rate,
-                    "expectancy": avg_trade_r,
+                    "expectancy": expectancy_val,
                     "avg_rrr": avg_rrr,
                     "score": score,
                     "frequency_factor": frequency_factor,
                     "recency_factor": recency_factor,
-                    "bins": sorted(valid_bins_by_symbol.get(symbol, set())),
+                    "bins": [bin_name],
                 }
             )
 
-        # Sort by score and filter by configured thresholds
         results_desc = sorted(results, key=lambda x: x["score"], reverse=True)
         top_results = [
             r
@@ -2678,13 +2466,16 @@ class App(tk.Tk):
                 fallback = [r for r in results if r.get("expectancy", 0.0) < 0.0]
             worst_results = sorted(fallback, key=lambda x: x["score"])[:25]
 
+        unique_symbol_count = len(unique_symbols)
+
         return {
             "top_performers": top_results,
             "worst_performers": list(worst_results),
-            "total_symbols": len(symbol_stats),
+            "total_bins": eligible_bins,
+            "total_symbols": unique_symbol_count,
+            "unique_symbols": unique_symbol_count,
             "since_hours": hours,
             "min_trades": min_trades_int,
-            "min_trades_per_bin": min_trades_per_bin_int,
         }
 
     def _top_render(self, data: dict[str, object]) -> None:
@@ -2695,26 +2486,31 @@ class App(tk.Tk):
         if view_value.startswith("worst"):
             performers = data.get("worst_performers", [])
             label = "Worst"
-            descriptor = "lagging performers"
+            descriptor = "lagging bins"
             view_kind = "worst"
         else:
             performers = data.get("top_performers", [])
             label = "Top"
-            descriptor = "profitable performers"
+            descriptor = "profitable bins"
             view_kind = "top"
 
         if not isinstance(performers, list):
             performers = list(performers) if performers else []
-        total_symbols = data.get("total_symbols", 0)
+        total_bins = data.get("total_bins")
+        if not isinstance(total_bins, int):
+            total_bins = len(performers)
+        unique_symbols = data.get("unique_symbols")
+        if not isinstance(unique_symbols, int):
+            unique_symbols = data.get("total_symbols", 0)
         since_hours = data.get("since_hours", 0)
         min_trades = data.get("min_trades", 1)
-        min_trades_per_bin = data.get("min_trades_per_bin", 1)
 
         # Update status
         try:
             status_text = (
-                f"{label} {len(performers)} {descriptor} from {total_symbols} symbols "
-                f"(last {since_hours}h, min {min_trades} trades, {min_trades_per_bin} trades/bin)"
+                f"{label} {len(performers)} {descriptor} across {total_bins} bins "
+                f"({unique_symbols} symbols, last {since_hours}h, "
+                f"min {min_trades} trades)"
             )
             self.top_status.config(text=status_text)
         except Exception:
@@ -2731,11 +2527,16 @@ class App(tk.Tk):
             for i, performer in enumerate(performers, 1):
                 try:
                     symbol = performer.get("symbol", "")
-                    bins = performer.get("bins") or []
-                    if isinstance(bins, (list, tuple, set)):
-                        bins_display = ", ".join(sorted(str(b) for b in bins if b))
+                    bin_label = (
+                        performer.get("bin")
+                        or performer.get("bin_label")
+                        or performer.get("bins")
+                        or ""
+                    )
+                    if isinstance(bin_label, (list, tuple, set)):
+                        bin_display = ", ".join(sorted(str(b) for b in bin_label if b))
                     else:
-                        bins_display = str(bins)
+                        bin_display = str(bin_label)
                     trades = performer.get("trades", 0)
                     win_rate = performer.get("win_rate", 0.0)
                     expectancy = performer.get("expectancy", 0.0)
@@ -2745,7 +2546,7 @@ class App(tk.Tk):
                     row = (
                         i,
                         symbol,
-                        bins_display,
+                        bin_display,
                         trades,
                         f"{win_rate * 100:.1f}%",
                         f"{expectancy:+.2f}",
@@ -2795,12 +2596,19 @@ class App(tk.Tk):
             return
 
         # Prepare data for chart
-        symbols = [p.get("symbol", "") for p in performers_list]
+        labels = []
+        for p in performers_list:
+            symbol = p.get("symbol", "")
+            bin_label = p.get("bin") or p.get("bin_label") or ""
+            if isinstance(bin_label, (list, tuple, set)):
+                bin_label = ", ".join(str(b) for b in bin_label if b)
+            label_text = f"{symbol} [{bin_label}]" if bin_label else str(symbol)
+            labels.append(label_text)
         scores = [float(p.get("score", 0.0) or 0.0) for p in performers_list]
         win_rates = [float(p.get("win_rate", 0.0) or 0.0) for p in performers_list]
 
         # Create horizontal bar chart
-        y_pos = range(len(symbols))
+        y_pos = range(len(labels))
         bars = ax.barh(y_pos, scores, color="#2ca02c", alpha=0.7)
 
         # Color bars based on win rate
@@ -2816,12 +2624,12 @@ class App(tk.Tk):
                     bar.set_color("#d62728")  # Red for low win rate
 
         ax.set_yticks(y_pos)
-        ax.set_yticklabels(symbols)
+        ax.set_yticklabels(labels)
         ax.set_xlabel("Performance Score")
         if view_kind == "worst":
-            ax.set_title("Worst 10 Performing Symbols")
+            ax.set_title("Worst 10 Performing Bins")
         else:
-            ax.set_title("Top 10 Performing Symbols")
+            ax.set_title("Top 10 Performing Bins")
         ax.grid(True, axis="x", linestyle="--", alpha=0.3)
         ax.axvline(0, color="#999999", linewidth=1, linestyle="--", alpha=0.6)
 
@@ -2893,1901 +2701,10 @@ class App(tk.Tk):
         self._top_ax = ax
         self._top_canvas = canvas
 
-    def _make_pnl_tab(self, parent) -> None:
-        """Create the PnL tab UI: simple controls + Matplotlib chart."""
-        top = ttk.Frame(parent)
-        top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
-
-        row1 = ttk.Frame(top)
-        row1.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(row1, text="Since(h):").pack(side=tk.LEFT)
-        ttk.Spinbox(
-            row1, from_=1, to=24 * 365, textvariable=self.var_since_hours, width=6
-        ).pack(side=tk.LEFT, padx=6)
-        ttk.Button(row1, text="Refresh", command=self._pnl_refresh).pack(side=tk.LEFT)
-
-        chart_wrap = ttk.Frame(parent)
-
-        # 10k-notional PnL split into three charts
-        self.pnl_fx_status = ttk.Label(
-            chart_wrap, text="Press 'Refresh' to load PnL (10k - Forex)."
-        )
-        self.pnl_fx_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(4, 0))
-        self.pnl_fx_chart_frame = ttk.Frame(chart_wrap)
-        self.pnl_fx_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self.pnl_crypto_status = ttk.Label(
-            chart_wrap, text="Press 'Refresh' to load PnL (10k - Crypto)."
-        )
-        self.pnl_crypto_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(8, 0))
-        self.pnl_crypto_chart_frame = ttk.Frame(chart_wrap)
-        self.pnl_crypto_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self.pnl_indices_status = ttk.Label(
-            chart_wrap, text="Press 'Refresh' to load PnL (10k - Indices)."
-        )
-        self.pnl_indices_status.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(8, 0))
-        self.pnl_indices_chart_frame = ttk.Frame(chart_wrap)
-        self.pnl_indices_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        # Initialize Matplotlib canvases
-        self._init_fx_chart_widgets()
-        self._init_crypto_chart_widgets()
-        self._init_indices_chart_widgets()
-
-    def _make_pnl_norm_tab(self, parent) -> None:
-        """Create the normalized PnL tab with selectable metrics."""
-        container = ttk.Frame(parent)
-        container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        controls = ttk.Frame(container)
-        controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
-
-        ttk.Label(controls, text="Since(h):").pack(side=tk.LEFT)
-        ttk.Spinbox(
-            controls,
-            from_=1,
-            to=24 * 365,
-            textvariable=self.var_pnl_norm_since_hours,
-            width=6,
-        ).pack(side=tk.LEFT, padx=6)
-
-        ttk.Label(controls, text="Metric:").pack(side=tk.LEFT)
-        mode_combo = ttk.Combobox(
-            controls,
-            textvariable=self.var_pnl_norm_mode,
-            values=("risk_units", "log_equity", "vol_target", "notional"),
-            state="readonly",
-            width=14,
-        )
-        mode_combo.pack(side=tk.LEFT, padx=6)
-        try:
-            mode_combo.bind("<<ComboboxSelected>>", self._on_pnl_norm_mode_change)
-        except Exception:
-            pass
-
-        ttk.Label(controls, text="Category:").pack(side=tk.LEFT)
-        cat_combo = ttk.Combobox(
-            controls,
-            textvariable=self.var_pnl_norm_category,
-            values=("overall", "forex", "crypto", "indices"),
-            state="readonly",
-            width=10,
-        )
-        cat_combo.pack(side=tk.LEFT, padx=6)
-        try:
-            cat_combo.bind("<<ComboboxSelected>>", self._on_pnl_norm_category_change)
-        except Exception:
-            pass
-
-        ttk.Label(controls, text="Bin:").pack(side=tk.LEFT)
-        self.pnl_norm_bin_combo = ttk.Combobox(
-            controls,
-            textvariable=self.var_pnl_norm_bin,
-            values=("All",),
-            state="readonly",
-            width=8,
-        )
-        self.pnl_norm_bin_combo.pack(side=tk.LEFT, padx=6)
-        try:
-            self.pnl_norm_bin_combo.bind(
-                "<<ComboboxSelected>>", self._on_pnl_norm_bin_change
-            )
-        except Exception:
-            pass
-
-        ttk.Button(controls, text="Refresh", command=self._pnl_norm_refresh).pack(
-            side=tk.LEFT, padx=(12, 0)
-        )
-
-        self.pnl_norm_status = ttk.Label(controls, text="Ready", anchor=tk.W)
-        self.pnl_norm_status.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(12, 0))
-
-        chart_wrap = ttk.Frame(container)
-        chart_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        self.pnl_norm_chart_frame = ttk.Frame(chart_wrap)
-        self.pnl_norm_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self._init_pnl_norm_chart_widgets()
-
-    def _init_pnl_norm_chart_widgets(self) -> None:
-        """Initialise Matplotlib widgets for the normalized PnL chart."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            return
-        if self.pnl_norm_chart_frame is None:
-            return
-        for child in list(self.pnl_norm_chart_frame.winfo_children()):
-            try:
-                child.destroy()
-            except Exception:
-                pass
-        fig = Figure(figsize=(6, 3), dpi=100)
-        ax = fig.add_subplot(111)
-        ax.set_title("Normalized PnL")
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        ax.set_xlabel("Time (UTC+3)")
-        ax.set_ylabel("Value")
-        canvas = FigureCanvasTkAgg(fig, master=self.pnl_norm_chart_frame)
-        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        try:
-            toolbar = NavigationToolbar2Tk(
-                canvas, self.pnl_norm_chart_frame, pack_toolbar=False
-            )
-            toolbar.update()
-            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-            self._pnl_norm_toolbar = toolbar
-        except Exception:
-            self._pnl_norm_toolbar = None
-        self._pnl_norm_fig = fig
-        self._pnl_norm_ax = ax
-        self._pnl_norm_canvas = canvas
-
-    def _on_pnl_norm_mode_change(self, _event=None) -> None:
-        if self._pnl_norm_loading:
-            return
-        self._pnl_norm_render()
-
-    def _on_pnl_norm_category_change(self, _event=None) -> None:
-        if self._pnl_norm_loading:
-            return
-        self._pnl_norm_render()
-
-    def _on_pnl_norm_bin_change(self, _event=None) -> None:
-        if self._pnl_norm_loading:
-            return
-        self._pnl_norm_render()
-
-    def _pnl_norm_refresh(self) -> None:
-        if self._pnl_norm_loading:
-            return
-        try:
-            if self.pnl_norm_status is not None:
-                self.pnl_norm_status.config(text="Loading normalized PnL…")
-        except Exception:
-            pass
-        self._pnl_norm_loading = True
-        threading.Thread(target=self._pnl_norm_fetch_thread, daemon=True).start()
-
-    def _pnl_norm_fetch_thread(self) -> None:
-        dbname = self.var_db_name.get().strip()
-        hours = max(1, int(self.var_pnl_norm_since_hours.get()))
-        payload: dict[str, object] = {"error": None}
-        rows: list[tuple] = []
-        bins: set[str] = set()
-        try:
-            import sqlite3  # type: ignore
-
-            db_path = db_path_str(dbname)
-            conn = sqlite3.connect(db_path, timeout=3)
-            try:
-                cur = conn.cursor()
-                thr = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                sql = """
-                    SELECT COALESCE(h.hit_time, s.inserted_at) as event_time,
-                           h.hit,
-                           s.symbol,
-                           COALESCE(h.entry_price, s.price) AS entry_price,
-                           h.hit_price,
-                           s.sl,
-                           s.direction,
-                           s.proximity_bin
-                    FROM timelapse_setups s
-                    JOIN timelapse_hits h ON h.setup_id = s.id
-                    WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
-                    ORDER BY COALESCE(h.hit_time, s.inserted_at) ASC
-                    """
-                cur.execute(sql, (thr,))
-                rows = cur.fetchall() or []
-                for row in rows:
-                    if len(row) >= 7:
-                        bin_label = row[7]
-                        if bin_label:
-                            bins.add(str(bin_label))
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception as exc:
-            payload["error"] = str(exc)
-
-        times: list[datetime] = []
-        symbols: list[str] = []
-        returns_risk: list[float] = []
-        returns_log: list[float] = []
-        returns_vol_target: list[float] = []
-        returns_notional: list[float] = []
-        bin_labels: list[str] = []
-
-        if not payload.get("error") and rows:
-            atr_map: dict[str, float | None] = {}
-            spec_map: dict[str, dict[str, float]] = {}
-            if _MT5_IMPORTED and mt5 is not None:
-                try:
-                    init_ok, init_err = self._ensure_mt5()
-                except Exception:
-                    init_ok, init_err = False, None
-                if init_ok:
-                    for sym in sorted({r[2] for r in rows if r and r[2]}):
-                        atr_map[sym] = None
-                        spec_map[sym] = {}
-                        try:
-                            try:
-                                mt5.symbol_select(sym, True)
-                            except Exception:
-                                pass
-                            # Fetch contract specs (tick_value, tick_size, contract_size)
-                            info = None
-                            try:
-                                info = mt5.symbol_info(sym)
-                            except Exception:
-                                info = None
-                            if info is not None:
-                                try:
-                                    tv = getattr(info, "trade_tick_value", None)
-                                    if tv in (None, 0.0):
-                                        tv = getattr(info, "tick_value", None)
-                                    tick_value = float(tv) if tv is not None else 0.0
-                                except Exception:
-                                    tick_value = 0.0
-                                try:
-                                    tsz = getattr(info, "trade_tick_size", None)
-                                    if tsz in (None, 0.0):
-                                        tsz = getattr(info, "tick_size", None)
-                                    tick_size = float(tsz) if tsz is not None else 0.0
-                                except Exception:
-                                    tick_size = 0.0
-                                try:
-                                    cs = getattr(info, "trade_contract_size", None)
-                                    if cs in (None, 0.0):
-                                        cs = getattr(info, "contract_size", None)
-                                    contract_size = float(cs) if cs is not None else 0.0
-                                except Exception:
-                                    contract_size = 0.0
-                                spec_map[sym] = {
-                                    "tick_value": float(tick_value),
-                                    "tick_size": float(tick_size),
-                                    "contract_size": float(contract_size),
-                                }
-                            # Compute ATR (Wilder-like) for normalization context
-                            tf = getattr(mt5, "TIMEFRAME_D1", 0)
-                            rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
-                            if rates is None or len(rates) < 2:
-                                continue
-                            vals = []
-                            for b in rates[-15:]:
-                                try:
-                                    high = float(b["high"])
-                                    low = float(b["low"])
-                                    close = float(b["close"])
-                                except Exception:
-                                    try:
-                                        high = float(getattr(b, "high", 0.0))
-                                        low = float(getattr(b, "low", 0.0))
-                                        close = float(getattr(b, "close", 0.0))
-                                    except Exception:
-                                        high = low = close = 0.0
-                                vals.append((high, low, close))
-                            if len(vals) >= 2:
-                                trs = []
-                                prev_close = vals[0][2]
-                                for h, l, c in vals[1:]:
-                                    tr1 = h - l
-                                    tr2 = abs(h - prev_close)
-                                    tr3 = abs(prev_close - l)
-                                    trs.append(max(tr1, tr2, tr3))
-                                    prev_close = c
-                                atr_map[sym] = (sum(trs) / len(trs)) if trs else None
-                        except Exception:
-                            atr_map[sym] = None
-                            spec_map[sym] = {}
-
-            risk_capital = 0.01  # 1% per R
-            target_vol = 0.10  # 10% annualised target volatility
-            sqrt_252 = math.sqrt(252.0)
-            sqrt_365 = math.sqrt(365.0)
-
-            for (
-                event_time,
-                hit,
-                symbol,
-                entry_price,
-                hit_price,
-                sl_val,
-                direction,
-                prox_bin,
-            ) in rows:
-                if not hit:
-                    continue
-                dt: datetime | None = None
-                if isinstance(event_time, str):
-                    try:
-                        dt = datetime.fromisoformat(event_time)
-                    except Exception:
-                        try:
-                            dt = datetime.strptime(
-                                event_time.split(".")[0], "%Y-%m-%d %H:%M:%S"
-                            )
-                        except Exception:
-                            dt = None
-                elif isinstance(event_time, datetime):
-                    dt = event_time
-                if dt is None:
-                    continue
-                try:
-                    dt = dt.replace(tzinfo=UTC)
-                except Exception:
-                    pass
-
-                try:
-                    ep = float(entry_price) if entry_price is not None else None
-                except Exception:
-                    ep = None
-                try:
-                    hp = float(hit_price) if hit_price is not None else None
-                except Exception:
-                    hp = None
-                try:
-                    slp = float(sl_val) if sl_val is not None else None
-                except Exception:
-                    slp = None
-
-                if ep is None or hp is None or slp is None:
-                    continue
-
-                dir_s = (str(direction) or "").lower()
-                profit = (hp - ep) if dir_s == "buy" else (ep - hp)
-                risk = (ep - slp) if dir_s == "buy" else (slp - ep)
-                if risk is None or risk <= 0:
-                    continue
-
-                trade_r = profit / risk
-                raw_return = trade_r * risk_capital
-
-                # notional 10k using contract specs when available
-                notional_profit = None
-                spec = spec_map.get(symbol) if "spec_map" in locals() else None
-                if spec and ep not in (None, 0.0):
-                    try:
-                        tick_value = float(spec.get("tick_value", 0.0))
-                    except Exception:
-                        tick_value = 0.0
-                    try:
-                        tick_size = float(spec.get("tick_size", 0.0))
-                    except Exception:
-                        tick_size = 0.0
-                    try:
-                        contract_size = float(spec.get("contract_size", 0.0))
-                    except Exception:
-                        contract_size = 0.0
-                    # Volume sized so that notional ~ 10k of quote for linear instruments
-                    volume = 0.0
-                    try:
-                        if contract_size > 0.0 and ep not in (None, 0.0):
-                            volume = 10000.0 / (contract_size * ep)
-                    except Exception:
-                        volume = 0.0
-                    if volume > 0.0:
-                        if tick_size > 0.0 and tick_value > 0.0:
-                            # Price move -> ticks -> PnL via tick_value, scaled by volume
-                            notional_profit = (profit / tick_size) * tick_value * volume
-                        elif contract_size > 0.0:
-                            notional_profit = profit * contract_size * volume
-                if notional_profit is None:
-                    # Fallback: spot-like units approximation
-                    try:
-                        units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
-                    except Exception:
-                        units = 0.0
-                    notional_profit = units * profit
-
-                atr_val = atr_map.get(symbol) if atr_map else None
-                vol_target_return = raw_return
-                if atr_val is not None and atr_val > 0 and ep not in (None, 0.0):
-                    try:
-                        asset_kind = self._classify_symbol(symbol)
-                        sqrt_factor = sqrt_365 if asset_kind == "crypto" else sqrt_252
-                        annual_vol = (atr_val / ep) * sqrt_factor
-                        if annual_vol > 0:
-                            vol_target_return = raw_return * (target_vol / annual_vol)
-                    except Exception:
-                        pass
-
-                try:
-                    log_return = math.log1p(raw_return)
-                except Exception:
-                    log_return = raw_return
-
-                times.append(dt)
-                sym_str = str(symbol)
-                symbols.append(sym_str)
-                returns_risk.append(trade_r)
-                returns_log.append(log_return)
-                returns_vol_target.append(vol_target_return)
-                returns_notional.append(notional_profit)
-                bin_val = str(prox_bin) if prox_bin not in (None, "") else ""
-                bin_labels.append(bin_val)
-                if bin_val:
-                    bins.add(bin_val)
-
-        def _cumulative(values: list[float]) -> list[float]:
-            total = 0.0
-            out: list[float] = []
-            for v in values:
-                total += v
-                out.append(total)
-            return out
-
-        payload["times"] = times
-        payload["symbols"] = symbols
-        # Split series by category
-        categories = {
-            "overall": list(range(len(times))),
-            "forex": [
-                i for i, s in enumerate(symbols) if self._classify_symbol(s) == "forex"
-            ],
-            "crypto": [
-                i for i, s in enumerate(symbols) if self._classify_symbol(s) == "crypto"
-            ],
-            "indices": [
-                i
-                for i, s in enumerate(symbols)
-                if self._classify_symbol(s) == "indices"
-            ],
-        }
-
-        def _select(idx_list: list[int], seq: list[float]) -> list[float]:
-            return [seq[i] for i in idx_list]
-
-        def _select_times(idx_list: list[int], seq: list[datetime]) -> list[datetime]:
-            return [seq[i] for i in idx_list]
-
-        series: dict[str, dict[str, list[float]]] = {}
-        cumulative: dict[str, dict[str, list[float]]] = {}
-        times_map: dict[str, list[datetime]] = {}
-
-        bin_map: dict[str, list[str]] = {}
-        for cat, idxs in categories.items():
-            times_map[cat] = _select_times(idxs, times)
-            cat_series = {
-                "risk_units": _select(idxs, returns_risk),
-                "log_equity": _select(idxs, returns_log),
-                "vol_target": _select(idxs, returns_vol_target),
-                "notional": _select(idxs, returns_notional),
-            }
-            series[cat] = cat_series
-            cumulative[cat] = {
-                key: _cumulative(vals) for key, vals in cat_series.items()
-            }
-            bin_map[cat] = _select(idxs, bin_labels)
-
-        payload["times"] = times_map
-        payload["series"] = series
-        payload["cumulative"] = cumulative
-        payload["bins"] = sorted(bins, key=lambda x: (1, x)) if bins else []
-        payload["bin_map"] = bin_map
-
-        self.after(0, self._pnl_norm_update_ui, payload)
-
-    def _pnl_norm_update_ui(self, payload: dict[str, object]) -> None:
-        self._pnl_norm_loading = False
-
-        error = payload.get("error") if isinstance(payload, dict) else None
-        if error:
-            try:
-                if self.pnl_norm_status is not None:
-                    self.pnl_norm_status.config(text=f"Error: {error}")
-            except Exception:
-                pass
-            if self._pnl_norm_ax is not None:
-                try:
-                    self._pnl_norm_ax.clear()
-                    if self._pnl_norm_fig is not None:
-                        self._pnl_norm_fig.tight_layout()
-                    if self._pnl_norm_canvas is not None:
-                        self._pnl_norm_canvas.draw_idle()
-                except Exception:
-                    pass
-            return
-
-        self._pnl_norm_data = payload
-        # Update bin list in UI
-        items = payload.get("bins") if isinstance(payload, dict) else None
-        if isinstance(items, list):
-            values = ["All"] + items if items else ["All"]
-            try:
-                self.pnl_norm_bin_combo.configure(values=values)
-            except Exception:
-                pass
-            if self.var_pnl_norm_bin.get() not in values:
-                self.var_pnl_norm_bin.set("All")
-        else:
-            try:
-                self.pnl_norm_bin_combo.configure(values=("All",))
-            except Exception:
-                pass
-            self.var_pnl_norm_bin.set("All")
-        self._pnl_norm_render()
-
-    def _pnl_norm_render(self) -> None:
-        data = self._pnl_norm_data
-        if not data:
-            return
-        if self._pnl_norm_ax is None or self._pnl_norm_canvas is None:
-            self._init_pnl_norm_chart_widgets()
-        ax = self._pnl_norm_ax
-        if ax is None:
-            return
-
-        ax.clear()
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-
-        mode = self.var_pnl_norm_mode.get()
-        category = self.var_pnl_norm_category.get()
-        times_map = data.get("times", {}) if isinstance(data, dict) else {}
-        series_map = data.get("series", {}) if isinstance(data, dict) else {}
-        cumulative_map = data.get("cumulative", {}) if isinstance(data, dict) else {}
-
-        times = times_map.get(category) if isinstance(times_map, dict) else None
-        cat_series = series_map.get(category) if isinstance(series_map, dict) else None
-        cat_cumulative = (
-            cumulative_map.get(category) if isinstance(cumulative_map, dict) else None
-        )
-        cat_bins = (
-            data.get("bin_map", {}).get(category) if isinstance(data, dict) else None
-        )
-
-        values = cat_cumulative.get(mode) if isinstance(cat_cumulative, dict) else None
-        raw_values = cat_series.get(mode) if isinstance(cat_series, dict) else None
-
-        # Apply bin filter if requested
-        selected_bin = self.var_pnl_norm_bin.get()
-        if (
-            selected_bin
-            and selected_bin != "All"
-            and times
-            and raw_values is not None
-            and cat_bins is not None
-        ):
-            filtered_idx = [
-                i for i, label in enumerate(cat_bins) if label == selected_bin
-            ]
-            times = [times[i] for i in filtered_idx]
-            raw_values = [raw_values[i] for i in filtered_idx]
-            # Recompute cumulative series from filtered raw returns to avoid inheriting
-            # earlier trades outside the bin.
-            if raw_values:
-                running = 0.0
-                values = []
-                for v in raw_values:
-                    running += v
-                    values.append(running)
-            else:
-                values = []
-
-        if raw_values is None:
-            raw_values = []
-        if values is None:
-            values = []
-
-        if not times or not values:
-            ax.text(
-                0.5,
-                0.5,
-                "No trades available.",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-            try:
-                if self.pnl_norm_status is not None:
-                    self.pnl_norm_status.config(text="No trades in range.")
-            except Exception:
-                pass
-            if self._pnl_norm_fig is not None:
-                self._pnl_norm_fig.tight_layout()
-            if self._pnl_norm_canvas is not None:
-                self._pnl_norm_canvas.draw_idle()
-            return
-
-        # Align lengths
-        n = min(len(times), len(values))
-        times = times[:n]
-        values = values[:n]
-        raw_slice = raw_values[:n]
-
-        try:
-            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
-        except Exception:
-            times_disp = [t + timedelta(hours=3) for t in times]
-
-        labels = {
-            "risk_units": "Cumulative R",
-            "log_equity": "Cumulative log return (1% risk)",
-            "vol_target": "Vol-target cumulative return",
-            "notional": "Cumulative PnL (10k notionals)",
-        }
-        ax.plot(times_disp, values, color="#1f77b4", label=labels.get(mode, mode))
-        ax.axhline(0.0, color="#888888", linestyle="--", linewidth=1)
-        ax.set_ylabel(labels.get(mode, "Value"))
-
-        try:
-            last_val = values[-1]
-            ax.annotate(
-                f"{last_val:+.2f}",
-                xy=(times_disp[-1], last_val),
-                xytext=(10, 10),
-                textcoords="offset points",
-                arrowprops=dict(arrowstyle="->", color="#1f77b4"),
-                color="#1f77b4",
-            )
-        except Exception:
-            pass
-
-        try:
-            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-            formatter = mdates.ConciseDateFormatter(
-                locator, tz=DISPLAY_TZ, show_offset=False
-            )
-            ax.xaxis.set_major_locator(locator)
-            ax.xaxis.set_major_formatter(formatter)
-        except Exception:
-            pass
-
-        try:
-            ax.legend(loc="upper left")
-        except Exception:
-            pass
-
-        if self._pnl_norm_fig is not None:
-            self._pnl_norm_fig.tight_layout()
-        if self._pnl_norm_canvas is not None:
-            self._pnl_norm_canvas.draw_idle()
-
-        try:
-            count = len(raw_slice) if raw_slice else len(values)
-            last_value = values[-1] if values else 0.0
-            if self.pnl_norm_status is not None:
-                self.pnl_norm_status.config(
-                    text=f"Trades: {count} | Last {last_value:+.2f}"
-                )
-        except Exception:
-            pass
-
-    def _init_pnl_chart_widgets(self) -> None:
-        """Initialize Matplotlib widgets for the PnL chart."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            return
-        # Destroy previous widgets if present
-        if self.pnl_chart_frame is None:
-            return
-        for w in (
-            self.pnl_chart_frame.winfo_children()
-            if self.pnl_chart_frame is not None
-            else []
-        ):
-            try:
-                w.destroy()
-            except Exception:
-                pass
-        fig = Figure(figsize=(6, 3), dpi=100)
-        ax = fig.add_subplot(111)
-        ax.set_title("PnL (normalized wins/losses)")
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        ax.set_xlabel("Time (UTC+3)")
-        ax.set_ylabel("Normalized PnL")
-        canvas = FigureCanvasTkAgg(fig, master=self.pnl_chart_frame)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        try:
-            toolbar = NavigationToolbar2Tk(
-                canvas, self.pnl_chart_frame, pack_toolbar=False
-            )
-            toolbar.update()
-            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-            self._pnl_toolbar = toolbar
-        except Exception:
-            self._pnl_toolbar = None
-        self._pnl_fig = fig
-        self._pnl_ax = ax
-        self._pnl_canvas = canvas
-
-    def _init_pnl2_chart_widgets(self) -> None:
-        """Initialize Matplotlib widgets for the 10k-notional PnL chart."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            return
-
-    def _init_fx_chart_widgets(self) -> None:
-        """Initialize Matplotlib widgets for the 10k-notional Forex PnL chart."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            return
-        if self.pnl_fx_chart_frame is None:
-            return
-        for w in (
-            self.pnl_fx_chart_frame.winfo_children()
-            if self.pnl_fx_chart_frame is not None
-            else []
-        ):
-            try:
-                w.destroy()
-            except Exception:
-                pass
-        fig = Figure(figsize=(6, 3), dpi=100)
-        ax = fig.add_subplot(111)
-        ax.set_title("PnL (10k - Forex)")
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        ax.set_xlabel("Time (UTC+3)")
-        ax.set_ylabel("Profit (quote currency)")
-        canvas = FigureCanvasTkAgg(fig, master=self.pnl_fx_chart_frame)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        try:
-            toolbar = NavigationToolbar2Tk(
-                canvas, self.pnl_fx_chart_frame, pack_toolbar=False
-            )
-            toolbar.update()
-            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-            self._fx_toolbar = toolbar
-        except Exception:
-            self._fx_toolbar = None
-        self._fx_fig = fig
-        self._fx_ax = ax
-        self._fx_canvas = canvas
-
-    def _init_crypto_chart_widgets(self) -> None:
-        """Initialize Matplotlib widgets for the 10k-notional Crypto PnL chart."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            return
-        if self.pnl_crypto_chart_frame is None:
-            return
-        for w in (
-            self.pnl_crypto_chart_frame.winfo_children()
-            if self.pnl_crypto_chart_frame is not None
-            else []
-        ):
-            try:
-                w.destroy()
-            except Exception:
-                pass
-        fig = Figure(figsize=(6, 3), dpi=100)
-        ax = fig.add_subplot(111)
-        ax.set_title("PnL (10k - Crypto)")
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        ax.set_xlabel("Time (UTC+3)")
-        ax.set_ylabel("Profit (quote currency)")
-        canvas = FigureCanvasTkAgg(fig, master=self.pnl_crypto_chart_frame)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        try:
-            toolbar = NavigationToolbar2Tk(
-                canvas, self.pnl_crypto_chart_frame, pack_toolbar=False
-            )
-            toolbar.update()
-            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-            self._crypto_toolbar = toolbar
-        except Exception:
-            self._crypto_toolbar = None
-        self._crypto_fig = fig
-        self._crypto_ax = ax
-        self._crypto_canvas = canvas
-
-    def _init_indices_chart_widgets(self) -> None:
-        """Initialize Matplotlib widgets for the 10k-notional Indices PnL chart."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            return
-        if self.pnl_indices_chart_frame is None:
-            return
-        for w in (
-            self.pnl_indices_chart_frame.winfo_children()
-            if self.pnl_indices_chart_frame is not None
-            else []
-        ):
-            try:
-                w.destroy()
-            except Exception:
-                pass
-        fig = Figure(figsize=(6, 3), dpi=100)
-        ax = fig.add_subplot(111)
-        ax.set_title("PnL (10k - Indices)")
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        ax.set_xlabel("Time (UTC+3)")
-        ax.set_ylabel("Profit (quote currency)")
-        canvas = FigureCanvasTkAgg(fig, master=self.pnl_indices_chart_frame)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        try:
-            toolbar = NavigationToolbar2Tk(
-                canvas, self.pnl_indices_chart_frame, pack_toolbar=False
-            )
-            toolbar.update()
-            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-            self._indices_toolbar = toolbar
-        except Exception:
-            self._indices_toolbar = None
-        self._indices_fig = fig
-        self._indices_ax = ax
-        self._indices_canvas = canvas
-        if self.pnl2_chart_frame is None:
-            return
-        for w in (
-            self.pnl2_chart_frame.winfo_children()
-            if self.pnl2_chart_frame is not None
-            else []
-        ):
-            try:
-                w.destroy()
-            except Exception:
-                pass
-        fig = Figure(figsize=(6, 3), dpi=100)
-        ax = fig.add_subplot(111)
-        ax.set_title("PnL (10k notional)")
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        ax.set_xlabel("Time (UTC+3)")
-        ax.set_ylabel("Profit (quote currency)")
-        canvas = FigureCanvasTkAgg(fig, master=self.pnl2_chart_frame)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        try:
-            toolbar = NavigationToolbar2Tk(
-                canvas, self.pnl2_chart_frame, pack_toolbar=False
-            )
-            toolbar.update()
-            toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-            self._pnl2_toolbar = toolbar
-        except Exception:
-            self._pnl2_toolbar = None
-        self._pnl2_fig = fig
-        self._pnl2_ax = ax
-        self._pnl2_canvas = canvas
-
-    def _pnl_refresh(self) -> None:
-        """Trigger background fetch of PnL data and redraw chart."""
-        if self._pnl_loading:
-            return
-        self._pnl_loading = True
-        try:
-            if self.pnl_fx_status is not None:
-                self.pnl_fx_status.config(text="Loading PnL (10k - Forex)...")
-            if self.pnl_crypto_status is not None:
-                self.pnl_crypto_status.config(text="Loading PnL (10k - Crypto)...")
-            if self.pnl_indices_status is not None:
-                self.pnl_indices_status.config(text="Loading PnL (10k - Indices)...")
-        except Exception:
-            pass
-        t = threading.Thread(target=self._pnl_fetch_thread, daemon=True)
-        t.start()
-
-    def _positive_expectancy_bins(
-        self,
-        hours: int,
-        min_completed: int,
-    ) -> Optional[dict[str, set[str]]]:
-        """Compute positive expectancy proximity bins per symbol category."""
-        try:
-            min_required = max(1, int(min_completed))
-        except Exception:
-            min_required = 1
-        try:
-            dbname = self.var_db_name.get().strip()
-        except Exception:
-            dbname = ""
-        bins_by_category: dict[str, set[str]] = {}
-        try:
-            import sqlite3  # type: ignore
-
-            db_path = db_path_str(dbname)
-            conn = sqlite3.connect(db_path, timeout=3)
-            try:
-                cur = conn.cursor()
-                from datetime import timezone as _tz
-
-                threshold = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                cur.execute(
-                    """
-                    SELECT s.symbol, COALESCE(s.proximity_bin, ''), s.rrr, h.hit
-                    FROM timelapse_setups s
-                    JOIN timelapse_hits h ON h.setup_id = s.id
-                    WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
-                      AND s.proximity_bin IS NOT NULL
-                      AND s.proximity_bin != ''
-                    """,
-                    (threshold,),
-                )
-                rows = cur.fetchall() or []
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception:
-            return None
-
-        aggregates: dict[str, dict[str, dict[str, float]]] = {}
-        for sym, bin_label, rrr_raw, hit in rows:
-            if not bin_label:
-                continue
-            category = self._classify_symbol(str(sym or "")) or "other"
-            cat_map = aggregates.setdefault(category, {})
-            bin_stats = cat_map.setdefault(
-                str(bin_label),
-                {"wins": 0.0, "losses": 0.0, "sum_rrr_wins": 0.0},
-            )
-            outcome = str(hit or "").upper()
-            if outcome == "TP":
-                bin_stats["wins"] += 1
-                try:
-                    rrr_val = float(rrr_raw)
-                except Exception:
-                    rrr_val = None
-                if rrr_val is not None and rrr_val > 0:
-                    bin_stats["sum_rrr_wins"] += rrr_val
-            elif outcome == "SL":
-                bin_stats["losses"] += 1
-
-        for category, bin_map in aggregates.items():
-            for label, stats in bin_map.items():
-                wins = float(stats.get("wins", 0.0))
-                losses = float(stats.get("losses", 0.0))
-                completed = wins + losses
-                if completed < max(3, min_required):
-                    continue
-                success = wins / completed if completed else None
-                avg_rrr = (
-                    (stats["sum_rrr_wins"] / wins)
-                    if (wins and stats["sum_rrr_wins"] > 0)
-                    else None
-                )
-                if success is None or avg_rrr is None:
-                    continue
-                expectancy = success * avg_rrr - (1 - success)
-                if expectancy is not None and expectancy >= PNL_EXPECTANCY_MIN_EDGE:
-                    bins_by_category.setdefault(category, set()).add(label)
-        return bins_by_category
-
-    def _pnl_fetch_thread(self) -> None:
-        """Fetch PnL-relevant rows from the SQLite DB in a background thread and compute ATR-normalized P/L."""
-        dbname = self.var_db_name.get().strip()
-        hours = max(1, int(self.var_since_hours.get()))
-        rows: list[tuple] = []
-        error: str | None = None
-        try:
-            import sqlite3  # type: ignore
-
-            db_path = db_path_str(dbname)
-            conn = sqlite3.connect(db_path, timeout=3)
-            try:
-                cur = conn.cursor()
-                from datetime import timezone as _tz
-
-                thr = (datetime.now(_tz.utc) - timedelta(hours=hours)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                sql = """
-                    SELECT COALESCE(h.hit_time, s.inserted_at) as event_time,
-                           h.hit,
-                           s.symbol,
-                           COALESCE(h.entry_price, s.price) AS entry_price,
-                           h.hit_price,
-                           s.sl,
-                           s.direction,
-                           COALESCE(s.proximity_bin, '')
-                    FROM timelapse_setups s
-                    JOIN timelapse_hits h ON h.setup_id = s.id
-                    WHERE COALESCE(h.hit_time, s.inserted_at) >= ?
-                    ORDER BY COALESCE(h.hit_time, s.inserted_at) ASC
-                    """
-                cur.execute(sql, (thr,))
-                for (
-                    event_time,
-                    hit,
-                    symbol,
-                    entry_price,
-                    hit_price,
-                    sl,
-                    direction,
-                    prox_bin,
-                ) in (
-                    cur.fetchall() or []
-                ):
-                    rows.append(
-                        (
-                            event_time,
-                            hit,
-                            symbol,
-                            entry_price,
-                            hit_price,
-                            sl,
-                            direction,
-                            prox_bin,
-                        )
-                    )
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception as e:
-            error = str(e)
-
-        positive_bins: Optional[dict[str, set[str]]] = None
-        bins_available = False
-        kept = len(rows)
-        dropped = 0
-        try:
-            positive_bins = self._positive_expectancy_bins(
-                hours, min_completed=PNL_EXPECTANCY_MIN_COMPLETED
-            )
-            bins_available = positive_bins is not None
-        except Exception:
-            positive_bins = None
-            bins_available = False
-
-        # Compute ATR per symbol (D1, period 14-ish) for normalized P/L,
-        # while also preparing contract specs for 10k-notional scaling.
-        times_norm: list[datetime] = []
-        norm_returns: list[float] = []
-        symbols_norm: list[str] = []
-        times_abs: list[datetime] = []
-        symbols_abs: list[str] = []
-        notional_returns: list[float] = []
-        try:
-            atr_map: dict[str, float | None] = {}
-            spec_map: dict[str, dict[str, float]] = {}
-            if _MT5_IMPORTED and mt5 is not None:
-                try:
-                    init_ok, init_err = self._ensure_mt5()
-                    if init_ok:
-                        atr_syms = sorted({r[2] for r in rows if r and r[2]})
-                        for sym in atr_syms:
-                            atr_map[sym] = None
-                            spec_map[sym] = {}
-                            try:
-                                try:
-                                    mt5.symbol_select(sym, True)
-                                except Exception:
-                                    pass
-                                info = None
-                                try:
-                                    info = mt5.symbol_info(sym)
-                                except Exception:
-                                    info = None
-                                if info is not None:
-                                    tick_value = _as_float(
-                                        getattr(info, "trade_tick_value", None)
-                                    )
-                                    if tick_value is None or tick_value == 0.0:
-                                        tick_value = _as_float(
-                                            getattr(info, "tick_value", None)
-                                        )
-                                    tick_size = _as_float(
-                                        getattr(info, "trade_tick_size", None)
-                                    )
-                                    if tick_size is None or tick_size == 0.0:
-                                        tick_size = _as_float(
-                                            getattr(info, "tick_size", None)
-                                        )
-                                    contract_size = _as_float(
-                                        getattr(info, "trade_contract_size", None)
-                                    )
-                                    if contract_size is None or contract_size == 0.0:
-                                        contract_size = _as_float(
-                                            getattr(info, "contract_size", None)
-                                        )
-                                    spec_map[sym] = {
-                                        "tick_value": float(tick_value or 0.0),
-                                        "tick_size": float(tick_size or 0.0),
-                                        "contract_size": float(contract_size or 0.0),
-                                    }
-                                tf = getattr(mt5, "TIMEFRAME_D1", 0)
-                                rates = mt5.copy_rates_from_pos(sym, tf, 0, 15)
-                                if rates is None or len(rates) < 2:
-                                    atr_map[sym] = None
-                                    continue
-                                vals = []
-                                for b in rates[-15:]:
-                                    try:
-                                        high = float(b["high"])
-                                        low = float(b["low"])
-                                        close = float(b["close"])
-                                    except Exception:
-                                        try:
-                                            high = float(getattr(b, "high", 0.0))
-                                            low = float(getattr(b, "low", 0.0))
-                                            close = float(getattr(b, "close", 0.0))
-                                        except Exception:
-                                            high = low = close = 0.0
-                                    vals.append((high, low, close))
-                                if len(vals) >= 2:
-                                    trs = []
-                                    prev_close = vals[0][2]
-                                    for h, l, c in vals[1:]:
-                                        tr1 = h - l
-                                        tr2 = abs(h - prev_close)
-                                        tr3 = abs(prev_close - l)
-                                        trs.append(max(tr1, tr2, tr3))
-                                        prev_close = c
-                                    atr_map[sym] = (
-                                        (sum(trs) / len(trs)) if trs else None
-                                    )
-                                else:
-                                    atr_map[sym] = None
-                            except Exception:
-                                atr_map[sym] = None
-                                spec_map[sym] = {}
-                except Exception:
-                    atr_map = {}
-                    spec_map = {}
-
-            # Compute normalized returns using ATR
-            for (
-                event_time,
-                hit,
-                symbol,
-                entry_price,
-                hit_price,
-                sl_val,
-                direction,
-                _prox_bin,
-            ) in rows:
-                if not hit:
-                    continue
-                dt = None
-                if isinstance(event_time, str):
-                    try:
-                        dt = datetime.fromisoformat(event_time)
-                    except Exception:
-                        try:
-                            dt = datetime.strptime(
-                                event_time.split(".")[0], "%Y-%m-%d %H:%M:%S"
-                            )
-                        except Exception:
-                            dt = None
-                elif isinstance(event_time, datetime):
-                    dt = event_time
-                if dt is None:
-                    continue
-                try:
-                    dt = dt.replace(tzinfo=UTC)
-                except Exception:
-                    pass
-
-                try:
-                    ep = float(entry_price) if entry_price is not None else None
-                except Exception:
-                    ep = None
-                try:
-                    hp = float(hit_price) if hit_price is not None else None
-                except Exception:
-                    hp = None
-                try:
-                    slp = float(sl_val) if sl_val is not None else None
-                except Exception:
-                    slp = None
-                if ep is None or hp is None or slp is None:
-                    continue
-                dir_s = (str(direction) or "").lower()
-                profit = (hp - ep) if dir_s == "buy" else (ep - hp)
-                atr = atr_map.get(symbol)
-                norm: float | None = None
-                if atr is not None and atr != 0:
-                    norm = profit / atr
-                notional_profit: float | None = None
-                spec = spec_map.get(symbol)
-                if spec and ep not in (None, 0.0):
-                    tick_value = float(spec.get("tick_value", 0.0))
-                    tick_size = float(spec.get("tick_size", 0.0))
-                    contract_size = float(spec.get("contract_size", 0.0))
-                    try:
-                        volume = 0.0
-                        if contract_size > 0.0 and ep not in (None, 0.0):
-                            volume = 10000.0 / (contract_size * ep)
-                        if volume > 0.0:
-                            if tick_size > 0.0 and tick_value > 0.0:
-                                ticks = profit / tick_size
-                                notional_profit = ticks * tick_value * volume
-                            elif contract_size > 0.0:
-                                notional_profit = profit * contract_size * volume
-                    except Exception:
-                        notional_profit = None
-                if notional_profit is None:
-                    try:
-                        units = 10000.0 / ep if ep not in (None, 0.0) else 0.0
-                    except Exception:
-                        units = 0.0
-                    notional_profit = units * profit
-                times_abs.append(dt)
-                symbols_abs.append(str(symbol))
-                notional_returns.append(notional_profit)
-                if norm is not None:
-                    times_norm.append(dt)
-                    norm_returns.append(norm)
-                    symbols_norm.append(str(symbol))
-        except Exception as e:
-            if error is None:
-                error = str(e)
-
-        # Compute cumulative and average per trade (ATR-normalized)
-        cum_norm: list[float] = []
-        ssum = 0.0
-        for v in norm_returns:
-            ssum += v
-            cum_norm.append(ssum)
-        avg_norm = [c / (i + 1) for i, c in enumerate(cum_norm)] if cum_norm else []
-
-        # Compute cumulative and average for 10k-notional series
-        not_cum: list[float] = []
-        nsum = 0.0
-        for v in notional_returns:
-            nsum += v
-            not_cum.append(nsum)
-        not_avg = [c / (i + 1) for i, c in enumerate(not_cum)] if not_cum else []
-
-        # Hand off to UI thread
-        filter_info = {
-            "positive_bins": positive_bins,
-            "kept": kept,
-            "dropped": dropped,
-            "filter_applied": False,
-            "bins_available": bins_available,
-        }
-        self.after(
-            0,
-            self._pnl_update_ui,
-            times_norm,
-            norm_returns,
-            cum_norm,
-            avg_norm,
-            symbols_norm,
-            times_abs,
-            symbols_abs,
-            notional_returns,
-            not_cum,
-            not_avg,
-            filter_info,
-            error,
-        )
-
-    def _pnl_update_ui(
-        self,
-        times_norm,
-        norm_returns,
-        cum_norm,
-        avg_norm,
-        symbols_norm,
-        times_abs,
-        symbols_abs,
-        notional_returns,
-        not_cum,
-        not_avg,
-        filter_info: dict[str, object],
-        error: str | None,
-    ) -> None:
-        """UI-thread handler for ATR-normalized and 10k-notional PnL series.
-
-        Expects:
-          - times_norm: list[datetime] for normalized series
-          - norm_returns: list[float] (per-trade profit divided by ATR)
-          - cum_norm: list[float] (cumulative sums of norm_returns)
-          - avg_norm: list[float] (average per-trade for normalized series)
-          - symbols_norm: list[str] (trade symbol at each normalized point)
-          - times_abs: list[datetime] for absolute 10k-notional series
-          - symbols_abs: list[str] aligned with times_abs
-          - notional_returns: list[float] (per-trade PnL for 10k notional)
-          - not_cum: list[float] (cumulative notional PnL)
-          - not_avg: list[float] (average notional PnL per trade)
-          - filter_info: filtering metadata (positive bins, kept/dropped counts)
-          - error: optional error message
-        """
-        self._pnl_loading = False
-        positive_bins = {}
-        kept = 0
-        dropped = 0
-        # filter_applied = False  # Reserved for future use
-        bins_available = False
-        if isinstance(filter_info, dict):
-            positive_bins = filter_info.get("positive_bins") or {}
-            try:
-                kept = int(filter_info.get("kept", 0))
-            except Exception:
-                kept = 0
-            try:
-                dropped = int(filter_info.get("dropped", 0))
-            except Exception:
-                dropped = 0
-            # filter_applied = bool(filter_info.get("filter_applied"))  # Reserved for future use
-            bins_available = bool(filter_info.get("bins_available"))
-        if not isinstance(positive_bins, dict):
-            positive_bins = {}
-        self._pnl_positive_bins = {k: set(v) for k, v in positive_bins.items()}
-        self._pnl_filter_counts = (kept, dropped)
-
-        if error:
-            try:
-                if self.pnl_status is not None:
-                    self.pnl_status.config(text=f"Error: {error}")
-            except Exception:
-                pass
-            # Clear any previous chart
-            if self._pnl_ax is not None:
-                try:
-                    self._pnl_ax.clear()
-                    if self._pnl_fig is not None:
-                        self._pnl_fig.tight_layout()
-                    if self._pnl_canvas is not None:
-                        self._pnl_canvas.draw_idle()
-                except Exception:
-                    pass
-            return
-
-        # Render normalized PnL chart if data is available; otherwise clear it.
-        if times_norm and norm_returns:
-            try:
-                self._pnl_render_draw(
-                    times_norm, norm_returns, cum_norm, avg_norm, symbols_norm
-                )
-            except Exception as exc:
-                try:
-                    if self.pnl_status is not None:
-                        self.pnl_status.config(text=f"Normalized render error: {exc}")
-                except Exception:
-                    pass
-            else:
-                if self.pnl_status is not None:
-                    try:
-                        kept_str = f"{kept} trades"
-                        if dropped:
-                            kept_str += f" (filtered out {dropped})"
-                        bins_bits = []
-                        for cat in sorted(self._pnl_positive_bins):
-                            labels = sorted(self._pnl_positive_bins[cat])
-                            if not labels:
-                                continue
-                            bins_bits.append(f"{cat}: {', '.join(labels)}")
-                        if bins_bits:
-                            listing = "; ".join(bins_bits)
-                            bins_text = f"positive bins ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R: {listing}"
-                        elif bins_available:
-                            bins_text = (
-                                "positive bins: none meet "
-                                f"edge ≥ +{PNL_EXPECTANCY_MIN_EDGE:.2f}R and ≥ {PNL_EXPECTANCY_MIN_COMPLETED} trades"
-                            )
-                        else:
-                            bins_text = "positive-bin stats unavailable"
-                        self.pnl_status.config(
-                            text=(
-                                f"Rendered PnL: {kept_str}; all trades included; {bins_text}"
-                            )
-                        )
-                    except Exception:
-                        pass
-        else:
-            if self._pnl_ax is not None:
-                try:
-                    self._pnl_ax.clear()
-                    if self._pnl_canvas is not None:
-                        self._pnl_canvas.draw_idle()
-                except Exception:
-                    pass
-            try:
-                if self.pnl_status is not None:
-                    msg = "No normalized PnL trades available."
-                    self.pnl_status.config(text=msg)
-            except Exception:
-                pass
-
-        if not times_abs or not notional_returns:
-            try:
-                if self.pnl_fx_status is not None:
-                    self.pnl_fx_status.config(
-                        text="No 10k-notional hits in the requested time range."
-                    )
-                if self.pnl_crypto_status is not None:
-                    self.pnl_crypto_status.config(
-                        text="No 10k-notional hits in the requested time range."
-                    )
-                if self.pnl_indices_status is not None:
-                    self.pnl_indices_status.config(
-                        text="No 10k-notional hits in the requested time range."
-                    )
-            except Exception:
-                pass
-            # Clear charts if available
-            for ax, fig, canvas in (
-                (
-                    getattr(self, "_fx_ax", None),
-                    getattr(self, "_fx_fig", None),
-                    getattr(self, "_fx_canvas", None),
-                ),
-                (
-                    getattr(self, "_crypto_ax", None),
-                    getattr(self, "_crypto_fig", None),
-                    getattr(self, "_crypto_canvas", None),
-                ),
-                (
-                    getattr(self, "_indices_ax", None),
-                    getattr(self, "_indices_fig", None),
-                    getattr(self, "_indices_canvas", None),
-                ),
-            ):
-                if ax is not None:
-                    try:
-                        ax.clear()
-                        if fig is not None:
-                            fig.tight_layout()
-                        if canvas is not None:
-                            canvas.draw_idle()
-                    except Exception:
-                        pass
-            return
-
-        # Ensure lists align
-        n = min(len(times_abs), len(notional_returns), len(symbols_abs))
-        times = times_abs[:n]
-        symbols = symbols_abs[:n]
-        notional_returns = notional_returns[:n]
-
-        # Split by instrument class
-        def _sel(idxs, seq):
-            return [seq[i] for i in idxs]
-
-        idx_fx = [
-            i for i, s in enumerate(symbols) if self._classify_symbol(s) == "forex"
-        ]
-        idx_crypto = [
-            i for i, s in enumerate(symbols) if self._classify_symbol(s) == "crypto"
-        ]
-        idx_indices = [
-            i for i, s in enumerate(symbols) if self._classify_symbol(s) == "indices"
-        ]
-
-        # Build series for each category
-        series = []
-        for idxs in (idx_fx, idx_crypto, idx_indices):
-            ts = _sel(idxs, times)
-            rets = _sel(idxs, notional_returns)
-            syms = _sel(idxs, symbols)
-            cum_ = []
-            ssum = 0.0
-            for v in rets:
-                ssum += v
-                cum_.append(ssum)
-            avg_ = [c / (i + 1) for i, c in enumerate(cum_)] if cum_ else []
-            series.append((ts, rets, cum_, avg_, syms))
-
-        # Render using the prepared series (Forex, Crypto, Indices)
-        try:
-            self._pnl_fx_render_draw(*series[0])
-            self._pnl_crypto_render_draw(*series[1])
-            self._pnl_indices_render_draw(*series[2])
-        except Exception as e:
-            try:
-                if self.pnl_fx_status is not None:
-                    self.pnl_fx_status.config(text=f"Render error: {e}")
-            except Exception:
-                pass
-
-    def _pnl_render_draw(self, times, returns, cum, avg, symbols) -> None:
-        """Draw the PnL chart with step lines, baseline, and per-trade annotations."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            try:
-                if self.pnl_status is not None:
-                    self.pnl_status.config(
-                        text="Matplotlib not available; cannot render PnL."
-                    )
-            except Exception:
-                pass
-            return
-        if self._pnl_ax is None or self._pnl_canvas is None:
-            self._init_pnl_chart_widgets()
-        ax = self._pnl_ax
-        ax.clear()
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-
-        # Convert times to display timezone
-        try:
-            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
-        except Exception:
-            times_disp = [t + timedelta(hours=3) for t in times]
-
-        # Add baseline so N trades -> N visible segments
-        try:
-            base_time = times_disp[0] - timedelta(seconds=1)
-        except Exception:
-            base_time = None
-        if base_time is not None:
-            times_plot = [base_time] + list(times_disp)
-            cum_plot = [0.0] + list(cum)
-            avg_plot = [0.0] + (list(avg) if avg else [0.0] * len(cum))
-        else:
-            times_plot = list(times_disp)
-            cum_plot = list(cum)
-            avg_plot = list(avg) if avg else list(cum)
-
-        # Use smooth curves to show trends; add breakeven line
-        try:
-            ax.plot(
-                times_plot,
-                cum_plot,
-                color="#1f77b4",
-                linewidth=2,
-                label="Cumulative PnL (sum of +RRR/-1)",
-                marker="o",
-                markersize=3,
-            )
-            ax.plot(
-                times_plot,
-                avg_plot,
-                color="#ff7f0e",
-                linewidth=1.2,
-                linestyle="--",
-                label="Avg PnL per trade",
-                marker="s",
-                markersize=2,
-            )
-            ax.axhline(0.0, color="#888888", linewidth=2.0, linestyle="-", alpha=0.9)
-        except Exception:
-            pass
-
-        # Mark wins/losses at the end of each trade (TP green ^, SL red v)
-        try:
-            wins_x = [times_disp[i] for i, v in enumerate(returns) if v > 0]
-            wins_y = [cum[i] for i, v in enumerate(returns) if v > 0]
-            losses_x = [times_disp[i] for i, v in enumerate(returns) if v < 0]
-            losses_y = [cum[i] for i, v in enumerate(returns) if v < 0]
-            if wins_x:
-                ax.scatter(wins_x, wins_y, color="green", marker="^", s=40, label="TP")
-            if losses_x:
-                ax.scatter(
-                    losses_x, losses_y, color="red", marker="v", s=40, label="SL"
-                )
-        except Exception:
-            pass
-
-        # Annotate per-trade change values; always annotate last, annotate all when small series
-        try:
-            if returns:
-                last_idx = len(returns) - 1
-                ax.annotate(
-                    f"{returns[last_idx]:+.2f}",
-                    xy=(times_disp[last_idx], cum[last_idx]),
-                    xytext=(0, -16),
-                    textcoords="offset points",
-                    ha="right",
-                    va="top",
-                    fontsize=9,
-                    bbox=dict(
-                        boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9
-                    ),
-                )
-                if len(returns) <= 12:
-                    for i, r in enumerate(returns):
-                        color = "green" if r > 0 else ("red" if r < 0 else "#333333")
-                        ax.annotate(
-                            f"{r:+.2f}",
-                            xy=(times_disp[i], cum[i]),
-                            xytext=(0, 8),
-                            textcoords="offset points",
-                            ha="center",
-                            va="bottom",
-                            fontsize=8,
-                            color=color,
-                            alpha=0.9,
-                        )
-        except Exception:
-            pass
-
-        # Annotate symbol at each trade point (to avoid clutter, show last 20 if many)
-        try:
-            if returns:
-                max_labels = 20
-                n = len(returns)
-                start = 0 if n <= max_labels else n - max_labels
-                for i in range(start, n):
-                    sym = symbols[i] if symbols and i < len(symbols) else ""
-                    if not sym:
-                        continue
-                    ax.annotate(
-                        str(sym),
-                        xy=(times_disp[i], cum[i]),
-                        xytext=(0, 18),
-                        textcoords="offset points",
-                        ha="center",
-                        va="bottom",
-                        fontsize=8,
-                        color="#1f1f1f",
-                        alpha=0.9,
-                    )
-        except Exception:
-            pass
-
-        # X-axis formatter
-        try:
-            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-            formatter = mdates.ConciseDateFormatter(
-                locator, tz=DISPLAY_TZ, show_offset=False
-            )
-            ax.xaxis.set_major_locator(locator)
-            ax.xaxis.set_major_formatter(formatter)
-        except Exception:
-            pass
-
-        try:
-            ax.legend(loc="upper left")
-        except Exception:
-            pass
-        try:
-            if self._pnl_fig is not None:
-                self._pnl_fig.tight_layout()
-            self._pnl_canvas.draw_idle()
-        except Exception:
-            pass
-        try:
-            if self.pnl_status is not None:
-                last_change = returns[-1] if returns else 0.0
-                last_sym = symbols[-1] if symbols else ""
-                self.pnl_status.config(
-                    text=f"Rendered PnL: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum[-1]:.2f}, avg {avg[-1]:.3f}"
-                )
-        except Exception:
-            pass
-
     def _classify_symbol(self, sym: str) -> str:
         """Heuristically classify a symbol as 'forex', 'crypto', or 'indices'."""
 
         return classify_symbol(sym)
-
-    def _pnl_category_render(
-        self,
-        title: str,
-        ax,
-        fig,
-        canvas,
-        status_label,
-        times,
-        returns_abs,
-        cum_abs,
-        avg_abs,
-        symbols,
-    ) -> None:
-        """Common renderer for 10k-notional category charts."""
-        if FigureCanvasTkAgg is None or Figure is None:
-            try:
-                if status_label is not None:
-                    status_label.config(text="Matplotlib not available; cannot render.")
-            except Exception:
-                pass
-            return
-
-        # Ensure axis exists (caller should have initialized)
-        if ax is None or canvas is None:
-            try:
-                if title.endswith("Forex"):
-                    self._init_fx_chart_widgets()
-                    ax, fig, canvas = self._fx_ax, self._fx_fig, self._fx_canvas
-                elif title.endswith("Crypto"):
-                    self._init_crypto_chart_widgets()
-                    ax, fig, canvas = (
-                        self._crypto_ax,
-                        self._crypto_fig,
-                        self._crypto_canvas,
-                    )
-                else:
-                    self._init_indices_chart_widgets()
-                    ax, fig, canvas = (
-                        self._indices_ax,
-                        self._indices_fig,
-                        self._indices_canvas,
-                    )
-            except Exception:
-                return
-        if ax is None:
-            return
-
-        ax.clear()
-        ax.grid(True, which="both", linestyle="--", alpha=0.3)
-
-        # Convert times to display timezone
-        try:
-            times_disp = [t.astimezone(DISPLAY_TZ) for t in times]
-        except Exception:
-            times_disp = [t + timedelta(hours=3) for t in times]
-
-        # Baseline so N trades -> N segments
-        try:
-            base_time = times_disp[0] - timedelta(seconds=1) if times_disp else None
-        except Exception:
-            base_time = None
-        if base_time is not None:
-            times_plot = [base_time] + list(times_disp)
-            cum_plot = [0.0] + list(cum_abs)
-        else:
-            times_plot = list(times_disp)
-            cum_plot = list(cum_abs)
-
-        # Plot cumulative and avg as smooth curves, add breakeven line
-        try:
-            ax.set_title(title)
-            ax.plot(
-                times_plot,
-                cum_plot,
-                color="#2c7fb8",
-                linewidth=2,
-                label="Cumulative (10k)",
-                marker="o",
-                markersize=3,
-            )
-            # ax.plot(times_plot, avg_plot, color='#f28e2b', linewidth=1.2, linestyle='--', label='Avg per trade (10k)', marker='s', markersize=2)
-            ax.axhline(0.0, color="#888888", linewidth=2.0, linestyle="-", alpha=0.9)
-        except Exception:
-            pass
-
-        # Markers for wins/losses
-        try:
-            wins_x = [times_disp[i] for i, v in enumerate(returns_abs) if v > 0]
-            wins_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v > 0]
-            losses_x = [times_disp[i] for i, v in enumerate(returns_abs) if v < 0]
-            losses_y = [cum_abs[i] for i, v in enumerate(returns_abs) if v < 0]
-            if wins_x:
-                ax.scatter(wins_x, wins_y, color="green", marker="^", s=40, label="Win")
-            if losses_x:
-                ax.scatter(
-                    losses_x, losses_y, color="red", marker="v", s=40, label="Loss"
-                )
-        except Exception:
-            pass
-
-        # Annotations: last value and recent symbols
-        try:
-            if returns_abs:
-                last_idx = len(returns_abs) - 1
-                ax.annotate(
-                    f"{returns_abs[last_idx]:+.2f}",
-                    xy=(times_disp[last_idx], cum_abs[last_idx]),
-                    xytext=(0, -16),
-                    textcoords="offset points",
-                    ha="right",
-                    va="top",
-                    fontsize=9,
-                    bbox=dict(
-                        boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9
-                    ),
-                )
-                max_labels = 20
-                n = len(returns_abs)
-                start = 0 if n <= max_labels else n - max_labels
-                for i in range(start, n):
-                    sym = symbols[i] if symbols and i < len(symbols) else ""
-                    if not sym:
-                        continue
-                    ax.annotate(
-                        str(sym),
-                        xy=(times_disp[i], cum_abs[i]),
-                        xytext=(0, 18),
-                        textcoords="offset points",
-                        ha="center",
-                        va="bottom",
-                        fontsize=8,
-                        color="#1f1f1f",
-                        alpha=0.9,
-                    )
-        except Exception:
-            pass
-
-        # Axis formatter
-        try:
-            locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
-            formatter = mdates.ConciseDateFormatter(
-                locator, tz=DISPLAY_TZ, show_offset=False
-            )
-            ax.xaxis.set_major_locator(locator)
-            ax.xaxis.set_major_formatter(formatter)
-        except Exception:
-            pass
-
-        try:
-            ax.legend(loc="upper left")
-        except Exception:
-            pass
-        try:
-            if fig is not None:
-                fig.tight_layout()
-            if canvas is not None:
-                canvas.draw_idle()
-        except Exception:
-            pass
-        try:
-            if status_label is not None:
-                if cum_abs:
-                    last_change = returns_abs[-1] if returns_abs else 0.0
-                    last_sym = symbols[-1] if symbols else ""
-                    status_label.config(
-                        text=f"{title}: {len(times)} trades, last {last_sym} {last_change:+.2f}, cumulative {cum_abs[-1]:.2f}"
-                    )
-                else:
-                    status_label.config(text=f"{title}: no trades")
-        except Exception:
-            pass
-
-    def _pnl_fx_render_draw(
-        self, times, returns_abs, cum_abs, avg_abs, symbols
-    ) -> None:
-        if self._fx_ax is None or self._fx_canvas is None:
-            self._init_fx_chart_widgets()
-        self._pnl_category_render(
-            "PnL (10k - Forex)",
-            self._fx_ax,
-            self._fx_fig,
-            self._fx_canvas,
-            self.pnl_fx_status,
-            times,
-            returns_abs,
-            cum_abs,
-            avg_abs,
-            symbols,
-        )
-
-    def _pnl_crypto_render_draw(
-        self, times, returns_abs, cum_abs, avg_abs, symbols
-    ) -> None:
-        if self._crypto_ax is None or self._crypto_canvas is None:
-            self._init_crypto_chart_widgets()
-        self._pnl_category_render(
-            "PnL (10k - Crypto)",
-            self._crypto_ax,
-            self._crypto_fig,
-            self._crypto_canvas,
-            self.pnl_crypto_status,
-            times,
-            returns_abs,
-            cum_abs,
-            avg_abs,
-            symbols,
-        )
-
-    def _pnl_indices_render_draw(
-        self, times, returns_abs, cum_abs, avg_abs, symbols
-    ) -> None:
-        if self._indices_ax is None or self._indices_canvas is None:
-            self._init_indices_chart_widgets()
-        self._pnl_category_render(
-            "PnL (10k - Indices)",
-            self._indices_ax,
-            self._indices_fig,
-            self._indices_canvas,
-            self.pnl_indices_status,
-            times,
-            returns_abs,
-            cum_abs,
-            avg_abs,
-            symbols,
-        )
 
     def _enqueue_log(self, name: str, text: str) -> None:
         self.log_q.put((name, text))
@@ -5174,11 +3091,6 @@ class App(tk.Tk):
 
         # Schedule next auto refresh if enabled
         self._db_schedule_next()
-        # Also refresh PnL so changes are reflected immediately
-        try:
-            self._pnl_refresh()
-        except Exception:
-            pass
 
     def _db_delete_selected(self) -> None:
         # Delete from DB both in timelapse_hits and timelapse_setups for a selected row
@@ -6470,12 +4382,6 @@ class App(tk.Tk):
                 self.var_top_min_trades.set(top_min_trades)
             except Exception:
                 pass
-        top_min_trades_per_bin = data.get("top_min_trades_per_bin")
-        if isinstance(top_min_trades_per_bin, int):
-            try:
-                self.var_top_min_trades_per_bin.set(top_min_trades_per_bin)
-            except Exception:
-                pass
         top_auto = data.get("top_auto")
         if isinstance(top_auto, bool):
             try:
@@ -6560,11 +4466,6 @@ class App(tk.Tk):
                 self.var_top_min_trades.get()
                 if self.var_top_min_trades is not None
                 else 10
-            ),
-            "top_min_trades_per_bin": (
-                self.var_top_min_trades_per_bin.get()
-                if self.var_top_min_trades_per_bin is not None
-                else 3
             ),
             "top_auto": (
                 bool(self.var_top_auto.get()) if self.var_top_auto is not None else True

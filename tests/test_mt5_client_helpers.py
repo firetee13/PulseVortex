@@ -23,6 +23,7 @@ def test_candidate_terminal_paths_deduplicates(monkeypatch, tmp_path):
 
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
     monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path))
+    monkeypatch.setattr(mt5_client.os, "name", "nt", raising=False)
     monkeypatch.setattr(
         mt5_client.glob,
         "glob",

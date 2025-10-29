@@ -17,10 +17,28 @@ import sqlite3
 import sys
 from typing import Optional, Tuple
 
-# Add monitor directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "monitor"))
 
-from monitor.core.config import default_db_path
+def _default_db_path_str() -> str:
+    """Resolve the configured default DB path, adding src/ to sys.path temporarily."""
+    project_src = os.path.join(os.path.dirname(__file__), "..", "src")
+    project_src = os.path.abspath(project_src)
+    added = False
+    if project_src not in sys.path:
+        sys.path.insert(0, project_src)
+        added = True
+    try:
+        from monitor.core.config import default_db_path  # type: ignore
+
+        return str(default_db_path())
+    finally:
+        if added:
+            try:
+                sys.path.remove(project_src)
+            except ValueError:
+                pass
+
+
+DEFAULT_DB_PATH = _default_db_path_str()
 
 
 def _infer_decimals_from_price(price: Optional[float]) -> int:
@@ -199,7 +217,7 @@ def main():
         help="Show what would be updated without making changes",
     )
     parser.add_argument(
-        "--db", default=str(default_db_path()), help="Path to SQLite database file"
+        "--db", default=DEFAULT_DB_PATH, help="Path to SQLite database file"
     )
 
     args = parser.parse_args()

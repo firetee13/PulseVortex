@@ -163,7 +163,7 @@ def insert_restore_to_setups(dry_run=False, replace_existing=False):
         if not dry_run:
             conn.commit()
 
-        print(f"\nSummary:")
+        print("\nSummary:")
         print(f"Total records processed: {len(restore_records)}")
         print(f"Records inserted: {inserted_count}")
         print(f"Records skipped (already exists): {skipped_count}")
